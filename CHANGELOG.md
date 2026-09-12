@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.9] - 2026-09-12
+
+### Changed
+
+- Separate geo lookup, response parsing, and language defaults from browser
+  lifecycle handling. Preserve endpoint order, fallback behavior, and profile
+  identity updates.
+
 ## [0.5.8] - 2026-08-29
 
 ### Changed
