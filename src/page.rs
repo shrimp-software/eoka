@@ -186,7 +186,7 @@ struct HeldKey {
 }
 
 #[derive(Default)]
-struct HeldInputState {
+pub(crate) struct HeldInputState {
     mouse_buttons: HashMap<MouseButton, (f64, f64)>,
     keys: HashMap<HeldKeyId, HeldKey>,
 }
@@ -298,6 +298,207 @@ impl HeldInputState {
     }
 }
 
+pub(crate) async fn coordinated_mouse_move(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    x: f64,
+    y: f64,
+) -> Result<()> {
+    let mut state = held_input.lock().await;
+    let buttons = state.mouse_button_mask();
+    dispatch_coordinated_mouse_event(
+        session,
+        MouseEventType::MouseMoved,
+        x,
+        y,
+        None,
+        None,
+        buttons,
+    )
+    .await?;
+    for position in state.mouse_buttons.values_mut() {
+        *position = (x, y);
+    }
+    Ok(())
+}
+
+pub(crate) async fn coordinated_mouse_down(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    x: f64,
+    y: f64,
+    button: MouseButton,
+) -> Result<()> {
+    let mut state = held_input.lock().await;
+    let buttons = state
+        .reserve_mouse_down(button, (x, y))
+        .map_err(input_state_error)?;
+    let result = dispatch_coordinated_mouse_event(
+        session,
+        MouseEventType::MousePressed,
+        x,
+        y,
+        Some(button),
+        Some(1),
+        buttons,
+    )
+    .await;
+    if result.is_err() {
+        state.cancel_mouse_down(button);
+    }
+    result
+}
+
+pub(crate) async fn coordinated_mouse_up(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    x: f64,
+    y: f64,
+    button: MouseButton,
+) -> Result<()> {
+    let mut state = held_input.lock().await;
+    let buttons = state.mouse_up_mask(button).map_err(input_state_error)?;
+    let result = dispatch_coordinated_mouse_event(
+        session,
+        MouseEventType::MouseReleased,
+        x,
+        y,
+        Some(button),
+        Some(1),
+        buttons,
+    )
+    .await;
+    state.finish_mouse_up(button);
+    result
+}
+
+pub(crate) async fn coordinated_mouse_wheel(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    x: f64,
+    y: f64,
+    delta_x: f64,
+    delta_y: f64,
+) -> Result<()> {
+    let state = held_input.lock().await;
+    let buttons = state.mouse_button_mask();
+    session
+        .dispatch_mouse_event_full(crate::cdp::InputDispatchMouseEvent {
+            r#type: MouseEventType::MouseWheel,
+            x,
+            y,
+            button: None,
+            click_count: None,
+            buttons: (buttons != 0).then_some(buttons),
+            delta_x: Some(delta_x),
+            delta_y: Some(delta_y),
+        })
+        .await
+}
+
+pub(crate) async fn coordinated_key_down(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    key: &str,
+) -> Result<()> {
+    let (id, held_key) = held_key_from_combo(key);
+    let mut state = held_input.lock().await;
+    let modifiers = state
+        .reserve_key_down(id.clone(), held_key.clone())
+        .map_err(input_state_error)?
+        | held_key.combo_modifiers;
+    let result = dispatch_coordinated_key_event(
+        session,
+        &held_key,
+        crate::cdp::KeyEventType::KeyDown,
+        modifiers,
+    )
+    .await;
+    if result.is_err() {
+        state.cancel_key_down(&id);
+    }
+    result
+}
+
+pub(crate) async fn coordinated_key_up(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    key: &str,
+) -> Result<()> {
+    let (id, _) = held_key_from_combo(key);
+    let mut state = held_input.lock().await;
+    let (held_key, modifiers) = state.key_up_event(&id).map_err(input_state_error)?;
+    let result = dispatch_coordinated_key_event(
+        session,
+        &held_key,
+        crate::cdp::KeyEventType::KeyUp,
+        modifiers,
+    )
+    .await;
+    state.finish_key_up(&id);
+    result
+}
+
+pub(crate) async fn coordinated_key_char(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    text: &str,
+) -> Result<()> {
+    let state = held_input.lock().await;
+    let modifiers = state.active_key_modifiers();
+    session
+        .dispatch_key_event_full(crate::cdp::InputDispatchKeyEventFull {
+            r#type: crate::cdp::KeyEventType::Char,
+            modifiers: (modifiers != 0).then_some(modifiers),
+            text: Some(text.to_string()),
+            unmodified_text: Some(text.to_string()),
+            ..Default::default()
+        })
+        .await
+}
+
+async fn dispatch_coordinated_mouse_event(
+    session: &Session,
+    event_type: MouseEventType,
+    x: f64,
+    y: f64,
+    button: Option<MouseButton>,
+    click_count: Option<i32>,
+    buttons: i32,
+) -> Result<()> {
+    session
+        .dispatch_mouse_event_full(crate::cdp::InputDispatchMouseEvent {
+            r#type: event_type,
+            x,
+            y,
+            button: button.map(MouseButton::cdp),
+            click_count,
+            buttons: (buttons != 0).then_some(buttons),
+            delta_x: None,
+            delta_y: None,
+        })
+        .await
+}
+
+async fn dispatch_coordinated_key_event(
+    session: &Session,
+    held_key: &HeldKey,
+    event_type: crate::cdp::KeyEventType,
+    modifiers: i32,
+) -> Result<()> {
+    session
+        .dispatch_key_event_full(crate::cdp::InputDispatchKeyEventFull {
+            r#type: event_type,
+            modifiers: (modifiers != 0).then_some(modifiers),
+            key: Some(held_key.key.clone()),
+            code: Some(held_key.code.clone()),
+            windows_virtual_key_code: held_key.virtual_key_code,
+            native_virtual_key_code: held_key.virtual_key_code,
+            ..Default::default()
+        })
+        .await
+}
+
 /// A browser page with stealth capabilities. Cheap to clone (`Arc`-backed
 /// shared state) — clones refer to the same tab and share the document cache.
 #[derive(Clone)]
@@ -318,12 +519,13 @@ impl Page {
     /// Create a new Page wrapping a CDP session
     pub(crate) fn new(session: Session, config: Arc<StealthConfig>) -> Self {
         let net_idle_key = format!("_{:012x}", fastrand::u64(..) & 0xffff_ffff_ffff);
+        let held_input = session.held_input();
         Self {
             session,
             config,
             root_node: Arc::new(AtomicI32::new(0)),
             net_idle_key,
-            held_input: Arc::new(tokio::sync::Mutex::new(HeldInputState::default())),
+            held_input,
         }
     }
 
@@ -644,65 +846,12 @@ impl Page {
     /// in flight, its reservation is retained for `release_all_inputs`.
     /// Calling this twice for the same button returns [`Error::InputState`].
     pub async fn mouse_down(&self, x: f64, y: f64, button: MouseButton) -> Result<()> {
-        // Input transitions share one async lock so cloned Pages cannot send
-        // out-of-order button masks. Keeping it over the CDP call also makes a
-        // cancelled down leave a cleanup-able reservation rather than pending
-        // state that can deadlock a later release-all.
-        let mut state = self.held_input.lock().await;
-        let buttons = state
-            .reserve_mouse_down(button, (x, y))
-            .map_err(input_state_error)?;
-        let result = self
-            .dispatch_mouse_event(
-                MouseEventType::MousePressed,
-                x,
-                y,
-                Some(button),
-                Some(1),
-                buttons,
-            )
-            .await;
-        if result.is_err() {
-            state.cancel_mouse_down(button);
-        }
-        result
+        coordinated_mouse_down(&self.session, &self.held_input, x, y, button).await
     }
 
     /// Move the mouse to viewport coordinates, preserving any held buttons.
     pub async fn mouse_move(&self, x: f64, y: f64) -> Result<()> {
-        let mut state = self.held_input.lock().await;
-        let buttons = state.mouse_button_mask();
-        self.dispatch_mouse_event(MouseEventType::MouseMoved, x, y, None, None, buttons)
-            .await?;
-
-        for position in state.mouse_buttons.values_mut() {
-            *position = (x, y);
-        }
-        Ok(())
-    }
-
-    /// Dispatch a wheel event through the shared pointer coordinator.
-    pub(crate) async fn mouse_wheel(
-        &self,
-        x: f64,
-        y: f64,
-        delta_x: f64,
-        delta_y: f64,
-    ) -> Result<()> {
-        let state = self.held_input.lock().await;
-        let buttons = state.mouse_button_mask();
-        self.session
-            .dispatch_mouse_event_full(crate::cdp::InputDispatchMouseEvent {
-                r#type: MouseEventType::MouseWheel,
-                x,
-                y,
-                button: None,
-                click_count: None,
-                buttons: (buttons != 0).then_some(buttons),
-                delta_x: Some(delta_x),
-                delta_y: Some(delta_y),
-            })
-            .await
+        coordinated_mouse_move(&self.session, &self.held_input, x, y).await
     }
 
     /// Release a held mouse button at viewport coordinates.
@@ -710,20 +859,7 @@ impl Page {
     /// Local held state is cleared even if CDP rejects the release, so it
     /// cannot remain permanently tracked after a transport error.
     pub async fn mouse_up(&self, x: f64, y: f64, button: MouseButton) -> Result<()> {
-        let mut state = self.held_input.lock().await;
-        let buttons = state.mouse_up_mask(button).map_err(input_state_error)?;
-        let result = self
-            .dispatch_mouse_event(
-                MouseEventType::MouseReleased,
-                x,
-                y,
-                Some(button),
-                Some(1),
-                buttons,
-            )
-            .await;
-        state.finish_mouse_up(button);
-        result
+        coordinated_mouse_up(&self.session, &self.held_input, x, y, button).await
     }
 
     /// Release every held key and mouse button.
@@ -744,9 +880,13 @@ impl Page {
                 Ok(value) => value,
                 Err(_) => continue,
             };
-            if let Err(error) = self
-                .dispatch_held_key(&key, crate::cdp::KeyEventType::KeyUp, modifiers)
-                .await
+            if let Err(error) = dispatch_coordinated_key_event(
+                &self.session,
+                &key,
+                crate::cdp::KeyEventType::KeyUp,
+                modifiers,
+            )
+            .await
             {
                 first_error.get_or_insert(error);
             }
@@ -921,7 +1061,7 @@ impl Page {
     ///
     /// Its pointer actions share this Page's held-input coordinator.
     pub fn human(&self) -> Human<'_> {
-        Human::new(self)
+        Human::new(&self.session)
     }
 
     /// Human-like click on an element
@@ -1711,52 +1851,14 @@ impl Page {
     /// then call `key_down("A")`. Duplicate key-down calls return
     /// [`Error::InputState`].
     pub async fn key_down(&self, key: &str) -> Result<()> {
-        let (id, held_key) = held_key_from_combo(key);
-        let mut state = self.held_input.lock().await;
-        let modifiers = state
-            .reserve_key_down(id.clone(), held_key.clone())
-            .map_err(input_state_error)?
-            | held_key.combo_modifiers;
-        let result = self
-            .dispatch_held_key(&held_key, crate::cdp::KeyEventType::KeyDown, modifiers)
-            .await;
-        if result.is_err() {
-            state.cancel_key_down(&id);
-        }
-        result
+        coordinated_key_down(&self.session, &self.held_input, key).await
     }
 
     /// Release a key previously held with [`Page::key_down`].
     ///
     /// Local held state is cleared even if CDP rejects the release.
     pub async fn key_up(&self, key: &str) -> Result<()> {
-        let (id, _) = held_key_from_combo(key);
-        let mut state = self.held_input.lock().await;
-        let (held_key, modifiers) = state.key_up_event(&id).map_err(input_state_error)?;
-        let result = self
-            .dispatch_held_key(&held_key, crate::cdp::KeyEventType::KeyUp, modifiers)
-            .await;
-        state.finish_key_up(&id);
-        result
-    }
-
-    async fn dispatch_held_key(
-        &self,
-        held_key: &HeldKey,
-        event_type: crate::cdp::KeyEventType,
-        modifiers: i32,
-    ) -> Result<()> {
-        self.session
-            .dispatch_key_event_full(crate::cdp::InputDispatchKeyEventFull {
-                r#type: event_type,
-                modifiers: (modifiers != 0).then_some(modifiers),
-                key: Some(held_key.key.clone()),
-                code: Some(held_key.code.clone()),
-                windows_virtual_key_code: held_key.virtual_key_code,
-                native_virtual_key_code: held_key.virtual_key_code,
-                ..Default::default()
-            })
-            .await
+        coordinated_key_up(&self.session, &self.held_input, key).await
     }
 
     /// Platform-aware select all (Cmd+A on Mac, Ctrl+A elsewhere)

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use super::transport::Transport;
 use super::types::*;
 use crate::error::Result;
+use crate::page::HeldInputState;
 
 /// A CDP connection to Chrome
 pub struct Connection {
@@ -71,6 +72,7 @@ impl Connection {
             transport: Arc::clone(&self.transport),
             session_id: result.session_id,
             target_id: target_id.to_string(),
+            held_input: Arc::new(tokio::sync::Mutex::new(HeldInputState::default())),
         })
     }
 
@@ -134,6 +136,8 @@ pub struct Session {
     transport: Arc<Transport>,
     session_id: String,
     target_id: String,
+    /// Per-target native input state shared by Page and Human helpers.
+    held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
 }
 
 impl Session {
@@ -150,6 +154,11 @@ impl Session {
     /// Get a reference to the underlying transport (for event polling)
     pub fn transport(&self) -> &Arc<Transport> {
         &self.transport
+    }
+
+    /// Return the per-target held-input coordinator state.
+    pub(crate) fn held_input(&self) -> Arc<tokio::sync::Mutex<HeldInputState>> {
+        Arc::clone(&self.held_input)
     }
 
     /// Send a command to this session
@@ -425,26 +434,6 @@ impl Session {
         event: InputDispatchMouseEvent,
     ) -> Result<()> {
         self.send_void("Input.dispatchMouseEvent", &event).await
-    }
-
-    /// Dispatch a key event
-    pub(crate) async fn dispatch_key_event(
-        &self,
-        event_type: KeyEventType,
-        key: Option<&str>,
-        text: Option<&str>,
-        code: Option<&str>,
-    ) -> Result<()> {
-        self.send_void(
-            "Input.dispatchKeyEvent",
-            &InputDispatchKeyEvent {
-                r#type: event_type,
-                text: text.map(String::from),
-                code: code.map(String::from),
-                key: key.map(String::from),
-            },
-        )
-        .await
     }
 
     /// Insert text at current cursor position

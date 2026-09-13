@@ -3,12 +3,17 @@
 //! Simulates realistic mouse movements and typing patterns to avoid
 //! behavior-based bot detection.
 
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::cdp::{KeyEventType, Session};
+use crate::cdp::Session;
 use crate::error::Result;
-use crate::page::Page;
+use crate::page::{
+    coordinated_key_char, coordinated_key_down, coordinated_key_up, coordinated_mouse_down,
+    coordinated_mouse_move, coordinated_mouse_up, coordinated_mouse_wheel, HeldInputState,
+    MouseButton,
+};
 
 /// Speed mode for human simulation
 #[derive(Debug, Clone, Copy, Default)]
@@ -119,17 +124,17 @@ fn bezier_curve(start: Point, end: Point, num_points: usize) -> Vec<Point> {
 /// Human-like interaction helpers
 pub struct Human<'a> {
     session: &'a Session,
-    /// The Page that owns this helper's coordinated pointer state.
-    page: &'a Page,
+    /// Per-target state obtained from Session, shared with every Page clone.
+    held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
     speed: HumanSpeed,
 }
 
 impl<'a> Human<'a> {
-    /// Create a Human helper whose pointer input is coordinated by a Page.
-    pub fn new(page: &'a Page) -> Self {
+    /// Create a Human helper whose input shares the session's Page coordinator.
+    pub fn new(session: &'a Session) -> Self {
         Self {
-            session: &page.session,
-            page,
+            session,
+            held_input: session.held_input(),
             speed: HumanSpeed::Normal,
         }
     }
@@ -188,23 +193,19 @@ impl<'a> Human<'a> {
     }
 
     async fn mouse_move(&self, x: f64, y: f64) -> Result<()> {
-        self.page.mouse_move(x, y).await
+        coordinated_mouse_move(self.session, &self.held_input, x, y).await
     }
 
     async fn mouse_down(&self, x: f64, y: f64) -> Result<()> {
-        self.page
-            .mouse_down(x, y, crate::page::MouseButton::Left)
-            .await
+        coordinated_mouse_down(self.session, &self.held_input, x, y, MouseButton::Left).await
     }
 
     async fn mouse_up(&self, x: f64, y: f64) -> Result<()> {
-        self.page
-            .mouse_up(x, y, crate::page::MouseButton::Left)
-            .await
+        coordinated_mouse_up(self.session, &self.held_input, x, y, MouseButton::Left).await
     }
 
     async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
-        self.page.mouse_wheel(x, y, delta_x, delta_y).await
+        coordinated_mouse_wheel(self.session, &self.held_input, x, y, delta_x, delta_y).await
     }
 
     /// Type text with human-like timing
@@ -212,10 +213,9 @@ impl<'a> Human<'a> {
         let (min_delay, max_delay) = self.speed.type_delay_ms();
 
         for ch in text.chars() {
-            // Type the character
-            self.session
-                .dispatch_key_event(KeyEventType::Char, None, Some(&ch.to_string()), None)
-                .await?;
+            // Type through the shared key coordinator so held modifiers are
+            // reflected in the native CDP event.
+            coordinated_key_char(self.session, &self.held_input, &ch.to_string()).await?;
 
             // Variable delay based on character
             let base_delay = if ch == ' ' {
@@ -240,33 +240,13 @@ impl<'a> Human<'a> {
             // Occasional typo (slow mode only)
             if matches!(self.speed, HumanSpeed::Slow) && random_bool(0.01) && text.len() > 10 {
                 let wrong_char = (b'a' + random_range(0, 26) as u8) as char;
-                self.session
-                    .dispatch_key_event(
-                        KeyEventType::Char,
-                        None,
-                        Some(&wrong_char.to_string()),
-                        None,
-                    )
+                coordinated_key_char(self.session, &self.held_input, &wrong_char.to_string())
                     .await?;
                 sleep(Duration::from_millis(random_range(100, 300))).await;
 
-                // Backspace
-                self.session
-                    .dispatch_key_event(
-                        KeyEventType::KeyDown,
-                        Some("Backspace"),
-                        None,
-                        Some("Backspace"),
-                    )
-                    .await?;
-                self.session
-                    .dispatch_key_event(
-                        KeyEventType::KeyUp,
-                        Some("Backspace"),
-                        None,
-                        Some("Backspace"),
-                    )
-                    .await?;
+                // Backspace through the shared held-key coordinator.
+                coordinated_key_down(self.session, &self.held_input, "Backspace").await?;
+                coordinated_key_up(self.session, &self.held_input, "Backspace").await?;
                 sleep(Duration::from_millis(random_range(50, 150))).await;
             }
         }
@@ -274,19 +254,11 @@ impl<'a> Human<'a> {
         Ok(())
     }
 
-    /// Press a key
+    /// Press a key through the session's held-key coordinator.
     pub async fn press_key(&self, key: &str) -> Result<()> {
-        self.session
-            .dispatch_key_event(KeyEventType::KeyDown, Some(key), None, Some(key))
-            .await?;
-
+        coordinated_key_down(self.session, &self.held_input, key).await?;
         sleep(Duration::from_millis(random_range(50, 100))).await;
-
-        self.session
-            .dispatch_key_event(KeyEventType::KeyUp, Some(key), None, Some(key))
-            .await?;
-
-        Ok(())
+        coordinated_key_up(self.session, &self.held_input, key).await
     }
 
     /// Scroll the page by delta_y pixels (positive = down, negative = up)
