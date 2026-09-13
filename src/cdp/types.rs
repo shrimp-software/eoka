@@ -213,6 +213,10 @@ pub struct InputDispatchMouseEvent {
     pub button: Option<MouseButton>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub click_count: Option<i32>,
+    /// Bit field of currently pressed mouse buttons (left=1, right=2,
+    /// middle=4, back=8, forward=16).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub buttons: Option<i32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta_x: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -865,6 +869,51 @@ mod tests {
             content: vec![0.0, 0.0, 10.0, 0.0, 10.0, 20.0],
         };
         assert_eq!(bm.try_center(), None);
+    }
+
+    #[test]
+    fn test_mouse_event_serializes_held_button_mask() {
+        let event = InputDispatchMouseEvent {
+            r#type: MouseEventType::MousePressed,
+            x: 12.5,
+            y: 4.0,
+            button: Some(MouseButton::Left),
+            click_count: Some(1),
+            buttons: Some(1),
+            delta_x: None,
+            delta_y: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            json!({
+                "type": "mousePressed",
+                "x": 12.5,
+                "y": 4.0,
+                "button": "left",
+                "clickCount": 1,
+                "buttons": 1,
+            })
+        );
+    }
+
+    #[test]
+    fn test_mouse_event_omits_optional_fields() {
+        let event = InputDispatchMouseEvent {
+            r#type: MouseEventType::MouseMoved,
+            x: 0.0,
+            y: 0.0,
+            button: None,
+            click_count: None,
+            buttons: None,
+            delta_x: None,
+            delta_y: None,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&event).unwrap(),
+            json!({ "type": "mouseMoved", "x": 0.0, "y": 0.0 })
+        );
     }
 
     #[test]

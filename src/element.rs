@@ -182,6 +182,54 @@ impl Element {
         self.eval_str("this.value || ''").await
     }
 
+    /// Return this element's effective input type, if it is an input.
+    pub(crate) async fn input_type(&self) -> Result<Option<String>> {
+        let value = self
+            .eval_on_element("this instanceof HTMLInputElement ? this.type : null")
+            .await?;
+        Ok(value.as_str().map(str::to_owned))
+    }
+
+    /// Set a range input through its property and notify application listeners.
+    ///
+    /// The assignment is first checked on a detached clone so unsupported,
+    /// out-of-range, or step-invalid requests do not mutate the live control.
+    /// Returns the browser-normalized value when it is accepted.
+    pub(crate) async fn set_range_value(&self, value: &str) -> Result<Option<String>> {
+        let object_id = self.page.session.resolve_node(self.node_id).await?;
+        let requested = serde_json::to_string(value)?;
+        let function = format!(
+            r#"function() {{
+                const requested = {requested};
+                const requestedNumber = Number(requested);
+                if (!Number.isFinite(requestedNumber)) return null;
+                const probe = this.cloneNode(false);
+                probe.value = requested;
+                const normalized = probe.value;
+                if (!probe.validity.valid || Number(normalized) !== requestedNumber) return null;
+                this.value = requested;
+                this.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                this.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                return this.value;
+            }}"#
+        );
+        let result = self
+            .page
+            .session
+            .call_function_on(&object_id, &function)
+            .await?;
+        if let Some(exception) = result.exception_details {
+            return Err(Error::cdp_msg(format!(
+                "JavaScript error: {} at {}:{}",
+                exception.text, exception.line_number, exception.column_number
+            )));
+        }
+        Ok(result
+            .result
+            .value
+            .and_then(|value| value.as_str().map(str::to_owned)))
+    }
+
     /// Get computed CSS property value
     pub async fn css(&self, property: &str) -> Result<String> {
         let escaped = escape_js_string(property);

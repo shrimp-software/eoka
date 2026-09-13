@@ -2,11 +2,11 @@
 //!
 //! High-level API for interacting with a browser page.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
-use crate::cdp::{MouseButton, MouseEventType, Session};
+use crate::cdp::{MouseButton as CdpMouseButton, MouseEventType, Session};
 use crate::error::{Error, Result};
 use crate::fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
 use crate::keyboard::{key_to_codes, parse_key_combo};
@@ -81,6 +81,8 @@ fn is_element_cdp_error(e: &Error) -> bool {
         | Error::Transport { .. }
         | Error::Navigation(_)
         | Error::Timeout(_)
+        | Error::InputState(_)
+        | Error::ValueMismatch { .. }
         | Error::Serialization(_)
         | Error::Decode(_)
         | Error::Io(_)
@@ -131,6 +133,163 @@ pub enum TextMatch {
     EndsWith,
 }
 
+/// A mouse button used by held pointer input methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseButton {
+    /// Primary (usually left) mouse button.
+    Left,
+    /// Auxiliary (usually middle) mouse button.
+    Middle,
+    /// Secondary (usually right) mouse button.
+    Right,
+    /// Browser-back mouse button.
+    Back,
+    /// Browser-forward mouse button.
+    Forward,
+}
+
+impl MouseButton {
+    fn cdp(self) -> CdpMouseButton {
+        match self {
+            Self::Left => CdpMouseButton::Left,
+            Self::Middle => CdpMouseButton::Middle,
+            Self::Right => CdpMouseButton::Right,
+            Self::Back => CdpMouseButton::Back,
+            Self::Forward => CdpMouseButton::Forward,
+        }
+    }
+
+    fn bit(self) -> i32 {
+        match self {
+            Self::Left => 1,
+            Self::Right => 2,
+            Self::Middle => 4,
+            Self::Back => 8,
+            Self::Forward => 16,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HeldKeyId {
+    modifiers: i32,
+    key: String,
+}
+
+#[derive(Debug, Clone)]
+struct HeldKey {
+    modifiers: Option<i32>,
+    key: String,
+    code: String,
+    virtual_key_code: Option<i32>,
+    modifier_bit: i32,
+}
+
+#[derive(Default)]
+struct HeldInputState {
+    mouse_buttons: HashMap<MouseButton, (f64, f64)>,
+    pending_mouse_buttons: HashSet<MouseButton>,
+    keys: HashMap<HeldKeyId, HeldKey>,
+    pending_keys: HashSet<HeldKeyId>,
+    releasing: bool,
+}
+
+fn input_state_error(message: impl Into<String>) -> Error {
+    Error::InputState(message.into())
+}
+
+fn modifier_bit_for_key(key: &str) -> i32 {
+    use crate::cdp::modifiers;
+
+    match key.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => modifiers::CTRL,
+        "alt" | "option" => modifiers::ALT,
+        "shift" => modifiers::SHIFT,
+        "cmd" | "meta" | "command" => modifiers::META,
+        _ => 0,
+    }
+}
+
+fn held_key_from_combo(combo: &str) -> (HeldKeyId, HeldKey) {
+    let (modifiers, key_name) = parse_key_combo(combo);
+    let (key, code, virtual_key_code) = key_to_codes(key_name);
+    let id = HeldKeyId {
+        modifiers,
+        key: key_name.to_ascii_lowercase(),
+    };
+    let held_key = HeldKey {
+        modifiers: None,
+        key: key.to_string(),
+        code: code.to_string(),
+        virtual_key_code,
+        modifier_bit: modifier_bit_for_key(key_name),
+    };
+    (id, held_key)
+}
+
+impl HeldInputState {
+    fn mouse_button_mask(&self) -> i32 {
+        self.mouse_buttons
+            .keys()
+            .fold(0, |mask, button| mask | button.bit())
+    }
+
+    fn active_key_modifiers(&self) -> i32 {
+        self.keys
+            .values()
+            .fold(0, |modifiers, key| modifiers | key.modifier_bit)
+    }
+
+    fn reserve_mouse_down(&mut self, button: MouseButton) -> std::result::Result<(), &'static str> {
+        if self.releasing {
+            return Err("cannot press a mouse button while release_all_inputs is running");
+        }
+        if self.mouse_buttons.contains_key(&button) || !self.pending_mouse_buttons.insert(button) {
+            return Err("mouse button is already held");
+        }
+        Ok(())
+    }
+
+    fn finish_mouse_down(&mut self, button: MouseButton, position: (f64, f64), success: bool) {
+        self.pending_mouse_buttons.remove(&button);
+        if success {
+            self.mouse_buttons.insert(button, position);
+        }
+    }
+
+    fn begin_mouse_up(&mut self, button: MouseButton) -> std::result::Result<i32, &'static str> {
+        if self.mouse_buttons.remove(&button).is_none() {
+            return Err("mouse button is not held");
+        }
+        Ok(self.mouse_button_mask())
+    }
+
+    fn reserve_key_down(&mut self, key: HeldKeyId) -> std::result::Result<i32, &'static str> {
+        if self.releasing {
+            return Err("cannot press a key while release_all_inputs is running");
+        }
+        if self.keys.contains_key(&key) || !self.pending_keys.insert(key) {
+            return Err("key is already held");
+        }
+        Ok(self.active_key_modifiers())
+    }
+
+    fn finish_key_down(&mut self, id: HeldKeyId, key: HeldKey, success: bool) {
+        self.pending_keys.remove(&id);
+        if success {
+            self.keys.insert(id, key);
+        }
+    }
+
+    fn begin_key_up(&mut self, id: &HeldKeyId) -> std::result::Result<HeldKey, &'static str> {
+        self.keys.remove(id).ok_or("key is not held")
+    }
+
+    fn has_pending_input(&self) -> bool {
+        !self.pending_mouse_buttons.is_empty() || !self.pending_keys.is_empty()
+    }
+}
+
 /// A browser page with stealth capabilities. Cheap to clone (`Arc`-backed
 /// shared state) — clones refer to the same tab and share the document cache.
 #[derive(Clone)]
@@ -143,6 +302,8 @@ pub struct Page {
     root_node: Arc<AtomicI32>,
     /// Randomized per-page property key for the network-idle request counter.
     net_idle_key: String,
+    /// Pointer and keyboard state shared by this Page and all Element/Page clones.
+    held_input: Arc<StdMutex<HeldInputState>>,
 }
 
 impl Page {
@@ -154,6 +315,7 @@ impl Page {
             config,
             root_node: Arc::new(AtomicI32::new(0)),
             net_idle_key,
+            held_input: Arc::new(StdMutex::new(HeldInputState::default())),
         }
     }
 
@@ -460,33 +622,167 @@ impl Page {
     pub async fn text_exists(&self, text: &str) -> bool {
         self.find_by_text(text).await.is_ok()
     }
-    /// Click at coordinates
+    /// Click at coordinates with the primary mouse button.
     pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
-        // Mouse down
-        self.session
+        self.mouse_down(x, y, MouseButton::Left).await?;
+        sleep_ms(INTERACTION_DELAY_MS).await;
+        self.mouse_up(x, y, MouseButton::Left).await
+    }
+
+    /// Press and hold a mouse button at viewport coordinates.
+    ///
+    /// The press remains held until [`Page::mouse_up`] or
+    /// [`Page::release_all_inputs`] succeeds or fails. Calling this twice for
+    /// the same button without releasing it returns [`Error::InputState`].
+    pub async fn mouse_down(&self, x: f64, y: f64, button: MouseButton) -> Result<()> {
+        let buttons = {
+            let mut state = self.lock_held_input();
+            state
+                .reserve_mouse_down(button)
+                .map_err(input_state_error)?;
+            state.mouse_button_mask() | button.bit()
+        };
+
+        let result = self
             .dispatch_mouse_event(
                 MouseEventType::MousePressed,
                 x,
                 y,
-                Some(MouseButton::Left),
+                Some(button),
                 Some(1),
+                buttons,
             )
+            .await;
+        self.lock_held_input()
+            .finish_mouse_down(button, (x, y), result.is_ok());
+        result
+    }
+
+    /// Move the mouse to viewport coordinates, preserving any held buttons.
+    pub async fn mouse_move(&self, x: f64, y: f64) -> Result<()> {
+        let buttons = self.lock_held_input().mouse_button_mask();
+        self.dispatch_mouse_event(MouseEventType::MouseMoved, x, y, None, None, buttons)
             .await?;
 
-        sleep_ms(INTERACTION_DELAY_MS).await;
+        let mut state = self.lock_held_input();
+        for position in state.mouse_buttons.values_mut() {
+            *position = (x, y);
+        }
+        Ok(())
+    }
 
-        // Mouse up
+    /// Release a held mouse button at viewport coordinates.
+    ///
+    /// Local held state is cleared even if CDP rejects the release, so it
+    /// cannot remain permanently tracked after a transport error.
+    pub async fn mouse_up(&self, x: f64, y: f64, button: MouseButton) -> Result<()> {
+        let buttons = self
+            .lock_held_input()
+            .begin_mouse_up(button)
+            .map_err(input_state_error)?;
+        self.dispatch_mouse_event(
+            MouseEventType::MouseReleased,
+            x,
+            y,
+            Some(button),
+            Some(1),
+            buttons,
+        )
+        .await
+    }
+
+    /// Release every held key and mouse button.
+    ///
+    /// This is the async cleanup path for interrupted drag/key operations.
+    /// Call it before closing a tab or browser; Rust `Drop` cannot reliably
+    /// send asynchronous CDP releases. All local state is cleared even when a
+    /// release command fails, and the first such error is returned.
+    pub async fn release_all_inputs(&self) -> Result<()> {
+        {
+            let mut state = self.lock_held_input();
+            if state.releasing {
+                return Err(input_state_error("release_all_inputs is already running"));
+            }
+            // Reject new presses, then wait for already-dispatched downs to
+            // either succeed or fail before taking the release snapshot.
+            state.releasing = true;
+        }
+        while self.lock_held_input().has_pending_input() {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        let (keys, mouse_buttons) = {
+            let mut state = self.lock_held_input();
+            let keys = state.keys.drain().map(|(_, key)| key).collect::<Vec<_>>();
+            let mouse_buttons = state
+                .mouse_buttons
+                .drain()
+                .collect::<Vec<(MouseButton, (f64, f64))>>();
+            (keys, mouse_buttons)
+        };
+
+        let mut first_error = None;
+        for key in keys {
+            if let Err(error) = self
+                .dispatch_held_key(&key, crate::cdp::KeyEventType::KeyUp)
+                .await
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+        let mut remaining_mouse_buttons = mouse_buttons
+            .iter()
+            .fold(0, |mask, (button, _)| mask | button.bit());
+        for (button, (x, y)) in mouse_buttons {
+            remaining_mouse_buttons &= !button.bit();
+            if let Err(error) = self
+                .dispatch_mouse_event(
+                    MouseEventType::MouseReleased,
+                    x,
+                    y,
+                    Some(button),
+                    Some(1),
+                    remaining_mouse_buttons,
+                )
+                .await
+            {
+                first_error.get_or_insert(error);
+            }
+        }
+
+        self.lock_held_input().releasing = false;
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn lock_held_input(&self) -> std::sync::MutexGuard<'_, HeldInputState> {
+        self.held_input
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    async fn dispatch_mouse_event(
+        &self,
+        event_type: MouseEventType,
+        x: f64,
+        y: f64,
+        button: Option<MouseButton>,
+        click_count: Option<i32>,
+        buttons: i32,
+    ) -> Result<()> {
         self.session
-            .dispatch_mouse_event(
-                MouseEventType::MouseReleased,
+            .dispatch_mouse_event_full(crate::cdp::InputDispatchMouseEvent {
+                r#type: event_type,
                 x,
                 y,
-                Some(MouseButton::Left),
-                Some(1),
-            )
-            .await?;
-
-        Ok(())
+                button: button.map(MouseButton::cdp),
+                click_count,
+                buttons: (buttons != 0).then_some(buttons),
+                delta_x: None,
+                delta_y: None,
+            })
+            .await
     }
 
     /// Click on an element by selector
@@ -539,22 +835,64 @@ impl Page {
         }
     }
 
-    /// Fill a form field: click, clear, type
+    /// Fill a form field: click, clear, type, and verify the resulting value.
+    ///
+    /// Range inputs are assigned through their DOM property rather than text
+    /// insertion. The requested value must be finite and satisfy the range's
+    /// min/max/step constraints; accepted range values dispatch bubbling
+    /// `input` and `change` events.
     pub async fn fill(&self, selector: &str, value: &str) -> Result<()> {
         let element = self.find(selector).await?;
+
+        if element.input_type().await?.as_deref() == Some("range") {
+            // Clicking a range is itself a value-changing native action. Focus
+            // it directly so this method emits only the assignment events.
+            element.focus().await?;
+            let expected = match element.set_range_value(value).await? {
+                Some(value) => value,
+                None => {
+                    return Err(Error::ValueMismatch {
+                        selector: selector.to_string(),
+                        expected: value.to_string(),
+                        actual: element.value().await?,
+                    });
+                }
+            };
+            return self
+                .verify_filled_value(&element, selector, &expected)
+                .await;
+        }
+
         element.click().await?;
         sleep_ms(INTERACTION_DELAY_MS).await;
 
-        // Focus + select via selector (don't rely on activeElement — popups can steal focus)
+        // Focus + select via selector (don't rely on activeElement — popups can steal focus).
         let escaped = escape_js_string(selector);
         self.execute(&format!(
             "(() => {{ const el = document.querySelector('{}'); if (el) {{ el.focus(); el.select(); }} }})()",
             escaped
         )).await?;
         self.session.insert_text("").await?;
+        self.session.insert_text(value).await?;
+        self.verify_filled_value(&element, selector, value).await
+    }
 
-        // Now type the new value
-        self.session.insert_text(value).await
+    async fn verify_filled_value(
+        &self,
+        element: &Element,
+        selector: &str,
+        expected: &str,
+    ) -> Result<()> {
+        let actual = element.value().await?;
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(Error::ValueMismatch {
+                selector: selector.to_string(),
+                expected: expected.to_string(),
+                actual,
+            })
+        }
     }
     /// Get a Human helper for human-like interactions
     pub fn human(&self) -> Human<'_> {
@@ -1336,30 +1674,64 @@ impl Page {
         Ok(())
     }
 
-    /// Press key with optional modifiers (e.g., "Enter", "Ctrl+A", "Cmd+Shift+S")
+    /// Press key with optional modifiers (e.g., "Enter", "Ctrl+A", "Cmd+Shift+S").
     pub async fn press_key(&self, key: &str) -> Result<()> {
-        use crate::cdp::types::{InputDispatchKeyEventFull, KeyEventType};
-
-        let (mods, key_name) = parse_key_combo(key);
-        let (key_str, code_str, vk) = key_to_codes(key_name);
-        let modifiers = if mods != 0 { Some(mods) } else { None };
-
-        let make_event = |event_type| InputDispatchKeyEventFull {
-            r#type: event_type,
-            modifiers,
-            key: Some(key_str.into()),
-            code: Some(code_str.into()),
-            windows_virtual_key_code: vk,
-            native_virtual_key_code: vk,
-            ..Default::default()
-        };
-
-        self.session
-            .dispatch_key_event_full(make_event(KeyEventType::KeyDown))
-            .await?;
+        self.key_down(key).await?;
         sleep_ms(INTERACTION_DELAY_MS).await;
+        self.key_up(key).await
+    }
+
+    /// Press and hold a key, optionally including modifiers in `key`.
+    ///
+    /// For example, `key_down("Ctrl+A")` dispatches `A` with the Control
+    /// modifier. To hold a modifier across calls, use `key_down("Ctrl")`,
+    /// then call `key_down("A")`. Duplicate key-down calls return
+    /// [`Error::InputState`].
+    pub async fn key_down(&self, key: &str) -> Result<()> {
+        let (id, mut held_key) = held_key_from_combo(key);
+        let active_modifiers = self
+            .lock_held_input()
+            .reserve_key_down(id.clone())
+            .map_err(input_state_error)?;
+        let modifiers = active_modifiers | id.modifiers | held_key.modifier_bit;
+        held_key.modifiers = (modifiers != 0).then_some(modifiers);
+
+        let result = self
+            .dispatch_held_key(&held_key, crate::cdp::KeyEventType::KeyDown)
+            .await;
+        self.lock_held_input()
+            .finish_key_down(id, held_key, result.is_ok());
+        result
+    }
+
+    /// Release a key previously held with [`Page::key_down`].
+    ///
+    /// Local held state is cleared even if CDP rejects the release.
+    pub async fn key_up(&self, key: &str) -> Result<()> {
+        let (id, _) = held_key_from_combo(key);
+        let held_key = self
+            .lock_held_input()
+            .begin_key_up(&id)
+            .map_err(input_state_error)?;
+        self.dispatch_held_key(&held_key, crate::cdp::KeyEventType::KeyUp)
+            .await
+    }
+
+    async fn dispatch_held_key(
+        &self,
+        held_key: &HeldKey,
+        event_type: crate::cdp::KeyEventType,
+    ) -> Result<()> {
         self.session
-            .dispatch_key_event_full(make_event(KeyEventType::KeyUp))
+            .dispatch_key_event_full(crate::cdp::InputDispatchKeyEventFull {
+                r#type: event_type,
+                modifiers: held_key.modifiers,
+                key: Some(held_key.key.clone()),
+                code: Some(held_key.code.clone()),
+                windows_virtual_key_code: held_key.virtual_key_code,
+                native_virtual_key_code: held_key.virtual_key_code,
+                ..Default::default()
+            })
             .await
     }
 
@@ -1581,5 +1953,51 @@ mod tests {
             Err(Error::transport("cleanup failed")),
         );
         assert!(matches!(result, Err(Error::Navigation(_))));
+    }
+
+    #[test]
+    fn held_mouse_state_rejects_duplicate_down_and_clears_on_up() {
+        let mut state = HeldInputState::default();
+        state.reserve_mouse_down(MouseButton::Left).unwrap();
+        state.finish_mouse_down(MouseButton::Left, (10.0, 20.0), true);
+        assert_eq!(state.mouse_button_mask(), 1);
+        assert!(state.reserve_mouse_down(MouseButton::Left).is_err());
+
+        assert_eq!(state.begin_mouse_up(MouseButton::Left).unwrap(), 0);
+        assert_eq!(state.mouse_button_mask(), 0);
+        assert!(state.begin_mouse_up(MouseButton::Left).is_err());
+    }
+
+    #[test]
+    fn failed_mouse_down_is_not_recorded_as_held() {
+        let mut state = HeldInputState::default();
+        state.reserve_mouse_down(MouseButton::Right).unwrap();
+        state.finish_mouse_down(MouseButton::Right, (0.0, 0.0), false);
+        assert_eq!(state.mouse_button_mask(), 0);
+        assert!(state.begin_mouse_up(MouseButton::Right).is_err());
+    }
+
+    #[test]
+    fn held_modifier_is_applied_to_later_key_downs() {
+        let mut state = HeldInputState::default();
+        let (ctrl_id, ctrl) = held_key_from_combo("Ctrl");
+        let modifiers = state.reserve_key_down(ctrl_id.clone()).unwrap();
+        assert_eq!(modifiers, 0);
+        state.finish_key_down(ctrl_id, ctrl, true);
+
+        let (a_id, _) = held_key_from_combo("A");
+        assert_eq!(
+            state.reserve_key_down(a_id).unwrap(),
+            crate::cdp::modifiers::CTRL
+        );
+    }
+
+    #[test]
+    fn key_identity_is_case_insensitive_but_keeps_combo_modifiers() {
+        let (lower, _) = held_key_from_combo("ctrl+a");
+        let (upper, _) = held_key_from_combo("Ctrl+A");
+        let (without_modifier, _) = held_key_from_combo("A");
+        assert_eq!(lower, upper);
+        assert_ne!(lower, without_modifier);
     }
 }

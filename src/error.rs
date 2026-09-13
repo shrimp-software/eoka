@@ -56,6 +56,21 @@ pub enum Error {
     #[error("Timeout: {0}")]
     Timeout(String),
 
+    /// Input action could not be completed because its held-input state was invalid.
+    #[error("Input state error: {0}")]
+    InputState(String),
+
+    /// A form control did not contain the requested value after filling.
+    #[error("Value mismatch for '{selector}': expected '{expected}', got '{actual}'")]
+    ValueMismatch {
+        /// Selector supplied to the fill operation.
+        selector: String,
+        /// Value requested by the caller.
+        expected: String,
+        /// Value read back from the DOM.
+        actual: String,
+    },
+
     /// Serialization error
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
@@ -120,6 +135,16 @@ impl Clone for Error {
                 selector: selector.clone(),
             },
             Self::Timeout(s) => Self::Timeout(s.clone()),
+            Self::InputState(s) => Self::InputState(s.clone()),
+            Self::ValueMismatch {
+                selector,
+                expected,
+                actual,
+            } => Self::ValueMismatch {
+                selector: selector.clone(),
+                expected: expected.clone(),
+                actual: actual.clone(),
+            },
             Self::Serialization(e) => Self::Serialization(serde_json::Error::custom(e.to_string())),
             Self::Decode(s) => Self::Decode(s.clone()),
             Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),

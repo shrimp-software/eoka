@@ -3,7 +3,7 @@
 //! These tests require Chrome to be installed and available.
 //! Run with: cargo test --test integration -- --ignored
 
-use eoka::Browser;
+use eoka::{Browser, MouseButton};
 
 /// Check if Chrome is available
 fn chrome_available() -> bool {
@@ -600,6 +600,126 @@ async fn test_press_key() {
         .await
         .expect("Failed to evaluate");
     assert_eq!(key, "Tab");
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_held_input_and_release_all() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+    page.goto(r#"data:text/html,<input id='input'><div id='target' style='width:120px;height:120px'></div><script>window.events=[];const target=document.getElementById('target');for(const type of ['mousedown','mousemove','mouseup'])target.addEventListener(type,e=>window.events.push(`${type}:${e.buttons}`));const input=document.getElementById('input');for(const type of ['keydown','keyup'])input.addEventListener(type,e=>window.events.push(`${type}:${e.key}:${e.shiftKey}`));input.focus()</script>"#)
+        .await
+        .expect("Failed to navigate");
+
+    let (x, y) = page
+        .find("#target")
+        .await
+        .expect("Missing target")
+        .center()
+        .await
+        .expect("Target is not visible");
+    page.mouse_move(x, y).await.expect("Failed to move");
+    page.mouse_down(x, y, MouseButton::Left)
+        .await
+        .expect("Failed to press mouse");
+    page.mouse_move(x + 20.0, y).await.expect("Failed to drag");
+    page.mouse_up(x + 20.0, y, MouseButton::Left)
+        .await
+        .expect("Failed to release mouse");
+    page.find("#input")
+        .await
+        .expect("Missing input")
+        .focus()
+        .await
+        .expect("Failed to focus input");
+    page.key_down("Shift").await.expect("Failed to press shift");
+    page.release_all_inputs()
+        .await
+        .expect("Failed to release held inputs");
+
+    let events: Vec<String> = page
+        .evaluate("window.events")
+        .await
+        .expect("Failed to read events");
+    assert!(
+        events.iter().any(|event| event == "mousedown:1"),
+        "events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event == "mouseup:0"),
+        "events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event == "keydown:Shift:true"),
+        "events: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| event == "keyup:Shift:true"),
+        "events: {events:?}"
+    );
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_fill_range_dispatches_events_and_rejects_invalid_values() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+    page.goto(r#"data:text/html,<input id='range' type='range' min='0' max='10' step='2' value='2'><input id='text' value='old'><script>window.rangeEvents=[];const range=document.getElementById('range');for(const type of ['input','change'])range.addEventListener(type,()=>window.rangeEvents.push(type))</script>"#)
+        .await
+        .expect("Failed to navigate");
+
+    page.fill("#range", "6")
+        .await
+        .expect("Failed to fill range");
+    assert_eq!(
+        page.evaluate::<String>("document.getElementById('range').value")
+            .await
+            .expect("Failed to read range"),
+        "6"
+    );
+    assert_eq!(
+        page.evaluate::<Vec<String>>("window.rangeEvents")
+            .await
+            .expect("Failed to read range events"),
+        vec!["input", "change"]
+    );
+    assert!(page.fill("#range", "7").await.is_err());
+    assert_eq!(
+        page.evaluate::<String>("document.getElementById('range').value")
+            .await
+            .expect("Failed to read rejected range"),
+        "6"
+    );
+
+    page.fill("#text", "new text")
+        .await
+        .expect("Failed to fill text input");
+    assert_eq!(
+        page.evaluate::<String>("document.getElementById('text').value")
+            .await
+            .expect("Failed to read text input"),
+        "new text"
+    );
 
     browser.close().await.expect("Failed to close browser");
 }

@@ -434,6 +434,7 @@ impl Session {
             y,
             button,
             click_count,
+            buttons: None,
             delta_x: None,
             delta_y: None,
         })
@@ -454,6 +455,7 @@ impl Session {
             y,
             button: None,
             click_count: None,
+            buttons: None,
             delta_x: Some(delta_x),
             delta_y: Some(delta_y),
         })

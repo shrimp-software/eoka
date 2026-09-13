@@ -101,12 +101,20 @@ page.click_by_text("Submit").await?;
 page.human_click_by_text("Submit").await?;
 page.try_click("#optional").await?;             // Ok(false) if missing
 page.try_click_by_text("Accept").await?;
+
+// Native held pointer input for drags. Call release_all_inputs before close
+// if an operation is interrupted.
+page.mouse_move(100.0, 100.0).await?;
+page.mouse_down(100.0, 100.0, eoka::MouseButton::Left).await?;
+page.mouse_move(300.0, 100.0).await?;
+page.mouse_up(300.0, 100.0, eoka::MouseButton::Left).await?;
 ```
 
 ### Typing
 
 ```rust
-page.fill("#email", "user@example.com").await?;     // clear + type
+page.fill("#email", "user@example.com").await?;     // clear + type + verify
+page.fill("#volume", "50").await?;                    // range: validates, sets, input/change
 page.human_fill("#email", "user@example.com").await?; // human-like
 page.type_into("#search", "query").await?;           // append (no clear)
 page.human_type("#search", "query").await?;
@@ -147,6 +155,11 @@ elem.scroll_into_view().await?;
 ```rust
 page.press_key("Enter").await?;
 page.press_key("Ctrl+A").await?;
+page.key_down("Shift").await?; // held across calls, with browser-native CDP input
+page.key_down("ArrowRight").await?;
+page.key_up("ArrowRight").await?;
+page.key_up("Shift").await?;
+page.release_all_inputs().await?; // cleanup interrupted held input
 page.select_all().await?;
 page.copy().await?;
 page.paste().await?;
