@@ -2,7 +2,8 @@
 //!
 //! Manages browser and page sessions over the CDP transport.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
 
 use super::transport::Transport;
 use super::types::*;
@@ -12,6 +13,9 @@ use crate::page::HeldInputState;
 /// A CDP connection to Chrome
 pub struct Connection {
     transport: Arc<Transport>,
+    /// Held-input state scoped by browser target, not CDP attachment session.
+    /// Weak entries avoid retaining stale state after all Page handles drop.
+    held_inputs: Mutex<HashMap<String, Weak<tokio::sync::Mutex<HeldInputState>>>>,
 }
 
 impl Connection {
@@ -19,6 +23,7 @@ impl Connection {
     pub(crate) fn new(transport: Transport) -> Self {
         Self {
             transport: Arc::new(transport),
+            held_inputs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -72,7 +77,7 @@ impl Connection {
             transport: Arc::clone(&self.transport),
             session_id: result.session_id,
             target_id: target_id.to_string(),
-            held_input: Arc::new(tokio::sync::Mutex::new(HeldInputState::default())),
+            held_input: self.held_input_for_target(target_id),
         })
     }
 
@@ -87,6 +92,9 @@ impl Connection {
                 },
             )
             .await?;
+        if result.success {
+            self.remove_held_input(target_id);
+        }
         Ok(result.success)
     }
 
@@ -97,6 +105,28 @@ impl Connection {
             .send("Target.getTargets", &TargetGetTargets {})
             .await?;
         Ok(result.target_infos)
+    }
+
+    fn held_input_for_target(&self, target_id: &str) -> Arc<tokio::sync::Mutex<HeldInputState>> {
+        let mut held_inputs = self
+            .held_inputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        held_inputs.retain(|_, state| state.strong_count() != 0);
+        if let Some(state) = held_inputs.get(target_id).and_then(Weak::upgrade) {
+            return state;
+        }
+
+        let state = Arc::new(tokio::sync::Mutex::new(HeldInputState::default()));
+        held_inputs.insert(target_id.to_string(), Arc::downgrade(&state));
+        state
+    }
+
+    fn remove_held_input(&self, target_id: &str) {
+        self.held_inputs
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(target_id);
     }
 
     /// Activate (focus) a target

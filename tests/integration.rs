@@ -740,6 +740,95 @@ async fn test_held_input_drag_coordinates_hover_and_human_pointer_through_page_s
 
 #[tokio::test]
 #[ignore = "requires Chrome"]
+async fn test_held_input_duplicate_attachment_shares_target_state() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let first = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+    first
+        .goto(r#"data:text/html,<input id='input'><div id='target' style='width:160px;height:160px'></div><script>window.pointerEvents=[];const target=document.getElementById('target');target.addEventListener('mousemove',e=>window.pointerEvents.push(`move:${e.buttons}`));window.keyEvents=[];const input=document.getElementById('input');for(const type of ['keydown','keyup'])input.addEventListener(type,e=>window.keyEvents.push(`${type}:${e.key}:${e.ctrlKey}`))</script>"#)
+        .await
+        .expect("Failed to navigate");
+    let second = browser
+        .attach_page(first.target_id())
+        .await
+        .expect("Failed to attach second Page handle");
+
+    let (x, y) = first
+        .find("#target")
+        .await
+        .expect("Missing target")
+        .center()
+        .await
+        .expect("Target is not visible");
+    first
+        .mouse_down(x, y, MouseButton::Left)
+        .await
+        .expect("Failed to hold left mouse button");
+    second
+        .hover("#target")
+        .await
+        .expect("Second Page failed to hover");
+    let pointer_events: Vec<String> = first
+        .evaluate("window.pointerEvents")
+        .await
+        .expect("Failed to read pointer events");
+    assert!(
+        pointer_events.iter().any(|event| event == "move:1"),
+        "pointer events: {pointer_events:?}"
+    );
+    first
+        .mouse_up(x, y, MouseButton::Left)
+        .await
+        .expect("Failed to release left mouse button");
+
+    second
+        .find("#input")
+        .await
+        .expect("Missing input")
+        .focus()
+        .await
+        .expect("Failed to focus input");
+    first
+        .key_down("Ctrl")
+        .await
+        .expect("Failed to press control");
+    second
+        .key_down("A")
+        .await
+        .expect("Second Page failed to press A");
+    second
+        .key_up("A")
+        .await
+        .expect("Second Page failed to release A");
+    first
+        .key_up("Ctrl")
+        .await
+        .expect("Failed to release control");
+    let key_events: Vec<String> = first
+        .evaluate("window.keyEvents")
+        .await
+        .expect("Failed to read key events");
+    assert!(
+        key_events.iter().any(|event| event == "keydown:a:true"),
+        "key events: {key_events:?}"
+    );
+    assert!(
+        key_events.iter().any(|event| event == "keyup:a:true"),
+        "key events: {key_events:?}"
+    );
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
 async fn test_held_input_human_session_constructor_and_modifier_key_press() {
     if !chrome_available() {
         eprintln!("Chrome not found, skipping test");
