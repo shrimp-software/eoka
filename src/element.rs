@@ -208,9 +208,12 @@ impl Element {
                 const normalized = probe.value;
                 if (!probe.validity.valid || Number(normalized) !== requestedNumber) return null;
                 this.value = requested;
+                // Capture before listeners run: fill must reject handlers that
+                // overwrite the requested range value during input/change.
+                const assigned = this.value;
                 this.dispatchEvent(new Event('input', {{ bubbles: true }}));
                 this.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return this.value;
+                return assigned;
             }}"#
         );
         let result = self

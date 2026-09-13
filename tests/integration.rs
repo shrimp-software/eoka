@@ -673,6 +673,79 @@ async fn test_held_input_and_release_all() {
 
 #[tokio::test]
 #[ignore = "requires Chrome"]
+async fn test_held_input_serializes_clone_masks_and_current_key_up_modifiers() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+    page.goto(r#"data:text/html,<input id='input'><div id='target' style='width:120px;height:120px'></div><script>window.pointerEvents=[];const target=document.getElementById('target');target.addEventListener('mousedown',e=>window.pointerEvents.push(`down:${e.buttons}`));target.addEventListener('mouseup',e=>window.pointerEvents.push(`up:${e.buttons}`));window.keyEvents=[];const input=document.getElementById('input');for(const type of ['keydown','keyup'])input.addEventListener(type,e=>window.keyEvents.push(`${type}:${e.key}:${e.ctrlKey}`))</script>"#)
+        .await
+        .expect("Failed to navigate");
+
+    let (x, y) = page
+        .find("#target")
+        .await
+        .expect("Missing target")
+        .center()
+        .await
+        .expect("Target is not visible");
+    let other_page = page.clone();
+    let (left, right) = tokio::join!(
+        page.mouse_down(x, y, MouseButton::Left),
+        other_page.mouse_down(x, y, MouseButton::Right)
+    );
+    left.expect("Failed to press left mouse button");
+    right.expect("Failed to press right mouse button");
+    page.release_all_inputs()
+        .await
+        .expect("Failed to release mouse buttons");
+    let pointer_events: Vec<String> = page
+        .evaluate("window.pointerEvents")
+        .await
+        .expect("Failed to read pointer events");
+    assert!(
+        pointer_events.iter().any(|event| event == "down:3"),
+        "pointer events: {pointer_events:?}"
+    );
+
+    page.find("#input")
+        .await
+        .expect("Missing input")
+        .focus()
+        .await
+        .expect("Failed to focus input");
+    page.key_down("Ctrl")
+        .await
+        .expect("Failed to press control");
+    page.key_down("A").await.expect("Failed to press A");
+    page.key_up("Ctrl")
+        .await
+        .expect("Failed to release control");
+    page.key_up("A").await.expect("Failed to release A");
+    let key_events: Vec<String> = page
+        .evaluate("window.keyEvents")
+        .await
+        .expect("Failed to read key events");
+    assert!(
+        key_events.iter().any(|event| event == "keydown:a:true"),
+        "key events: {key_events:?}"
+    );
+    assert!(
+        key_events.iter().any(|event| event == "keyup:a:false"),
+        "key events: {key_events:?}"
+    );
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
 async fn test_fill_range_dispatches_events_and_rejects_invalid_values() {
     if !chrome_available() {
         eprintln!("Chrome not found, skipping test");
@@ -709,6 +782,19 @@ async fn test_fill_range_dispatches_events_and_rejects_invalid_values() {
             .await
             .expect("Failed to read rejected range"),
         "6"
+    );
+
+    // fill must verify the value assigned before input/change handlers run,
+    // not accept the handler's replacement value as its expected result.
+    page.execute("document.getElementById('range').addEventListener('input', event => { event.target.value = '2'; }, { once: true })")
+        .await
+        .expect("Failed to install range listener");
+    assert!(page.fill("#range", "6").await.is_err());
+    assert_eq!(
+        page.evaluate::<String>("document.getElementById('range').value")
+            .await
+            .expect("Failed to read listener-mutated range"),
+        "2"
     );
 
     page.fill("#text", "new text")

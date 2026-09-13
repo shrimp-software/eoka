@@ -2,9 +2,9 @@
 //!
 //! High-level API for interacting with a browser page.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 use crate::cdp::{MouseButton as CdpMouseButton, MouseEventType, Session};
 use crate::error::{Error, Result};
@@ -178,7 +178,7 @@ struct HeldKeyId {
 
 #[derive(Debug, Clone)]
 struct HeldKey {
-    modifiers: Option<i32>,
+    combo_modifiers: i32,
     key: String,
     code: String,
     virtual_key_code: Option<i32>,
@@ -188,10 +188,7 @@ struct HeldKey {
 #[derive(Default)]
 struct HeldInputState {
     mouse_buttons: HashMap<MouseButton, (f64, f64)>,
-    pending_mouse_buttons: HashSet<MouseButton>,
     keys: HashMap<HeldKeyId, HeldKey>,
-    pending_keys: HashSet<HeldKeyId>,
-    releasing: bool,
 }
 
 fn input_state_error(message: impl Into<String>) -> Error {
@@ -218,7 +215,7 @@ fn held_key_from_combo(combo: &str) -> (HeldKeyId, HeldKey) {
         key: key_name.to_ascii_lowercase(),
     };
     let held_key = HeldKey {
-        modifiers: None,
+        combo_modifiers: modifiers,
         key: key.to_string(),
         code: code.to_string(),
         virtual_key_code,
@@ -240,53 +237,64 @@ impl HeldInputState {
             .fold(0, |modifiers, key| modifiers | key.modifier_bit)
     }
 
-    fn reserve_mouse_down(&mut self, button: MouseButton) -> std::result::Result<(), &'static str> {
-        if self.releasing {
-            return Err("cannot press a mouse button while release_all_inputs is running");
-        }
-        if self.mouse_buttons.contains_key(&button) || !self.pending_mouse_buttons.insert(button) {
+    fn reserve_mouse_down(
+        &mut self,
+        button: MouseButton,
+        position: (f64, f64),
+    ) -> std::result::Result<i32, &'static str> {
+        if self.mouse_buttons.contains_key(&button) {
             return Err("mouse button is already held");
         }
-        Ok(())
-    }
-
-    fn finish_mouse_down(&mut self, button: MouseButton, position: (f64, f64), success: bool) {
-        self.pending_mouse_buttons.remove(&button);
-        if success {
-            self.mouse_buttons.insert(button, position);
-        }
-    }
-
-    fn begin_mouse_up(&mut self, button: MouseButton) -> std::result::Result<i32, &'static str> {
-        if self.mouse_buttons.remove(&button).is_none() {
-            return Err("mouse button is not held");
-        }
+        // Retain this reservation before dispatch. If the future is cancelled
+        // while CDP is in flight, release_all_inputs can still send its up.
+        self.mouse_buttons.insert(button, position);
         Ok(self.mouse_button_mask())
     }
 
-    fn reserve_key_down(&mut self, key: HeldKeyId) -> std::result::Result<i32, &'static str> {
-        if self.releasing {
-            return Err("cannot press a key while release_all_inputs is running");
+    fn cancel_mouse_down(&mut self, button: MouseButton) {
+        self.mouse_buttons.remove(&button);
+    }
+
+    fn mouse_up_mask(&self, button: MouseButton) -> std::result::Result<i32, &'static str> {
+        if !self.mouse_buttons.contains_key(&button) {
+            return Err("mouse button is not held");
         }
-        if self.keys.contains_key(&key) || !self.pending_keys.insert(key) {
+        Ok(self.mouse_button_mask() & !button.bit())
+    }
+
+    fn finish_mouse_up(&mut self, button: MouseButton) {
+        self.mouse_buttons.remove(&button);
+    }
+
+    fn reserve_key_down(
+        &mut self,
+        id: HeldKeyId,
+        key: HeldKey,
+    ) -> std::result::Result<i32, &'static str> {
+        if self.keys.contains_key(&id) {
             return Err("key is already held");
         }
+        // As with mouse reservations, retain the key across cancellation so
+        // the explicit async cleanup path can release it.
+        self.keys.insert(id, key);
         Ok(self.active_key_modifiers())
     }
 
-    fn finish_key_down(&mut self, id: HeldKeyId, key: HeldKey, success: bool) {
-        self.pending_keys.remove(&id);
-        if success {
-            self.keys.insert(id, key);
-        }
+    fn cancel_key_down(&mut self, id: &HeldKeyId) {
+        self.keys.remove(id);
     }
 
-    fn begin_key_up(&mut self, id: &HeldKeyId) -> std::result::Result<HeldKey, &'static str> {
-        self.keys.remove(id).ok_or("key is not held")
+    fn key_up_event(&self, id: &HeldKeyId) -> std::result::Result<(HeldKey, i32), &'static str> {
+        let held_key = self.keys.get(id).cloned().ok_or("key is not held")?;
+        // Read modifiers from the current held state rather than preserving
+        // the key-down snapshot. The key being released contributes to its
+        // own key-up event; subsequent releases observe its removal.
+        let modifiers = self.active_key_modifiers() | held_key.combo_modifiers;
+        Ok((held_key, modifiers))
     }
 
-    fn has_pending_input(&self) -> bool {
-        !self.pending_mouse_buttons.is_empty() || !self.pending_keys.is_empty()
+    fn finish_key_up(&mut self, id: &HeldKeyId) {
+        self.keys.remove(id);
     }
 }
 
@@ -303,7 +311,7 @@ pub struct Page {
     /// Randomized per-page property key for the network-idle request counter.
     net_idle_key: String,
     /// Pointer and keyboard state shared by this Page and all Element/Page clones.
-    held_input: Arc<StdMutex<HeldInputState>>,
+    held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
 }
 
 impl Page {
@@ -315,7 +323,7 @@ impl Page {
             config,
             root_node: Arc::new(AtomicI32::new(0)),
             net_idle_key,
-            held_input: Arc::new(StdMutex::new(HeldInputState::default())),
+            held_input: Arc::new(tokio::sync::Mutex::new(HeldInputState::default())),
         }
     }
 
@@ -632,17 +640,18 @@ impl Page {
     /// Press and hold a mouse button at viewport coordinates.
     ///
     /// The press remains held until [`Page::mouse_up`] or
-    /// [`Page::release_all_inputs`] succeeds or fails. Calling this twice for
-    /// the same button without releasing it returns [`Error::InputState`].
+    /// [`Page::release_all_inputs`]. If this future is cancelled while CDP is
+    /// in flight, its reservation is retained for `release_all_inputs`.
+    /// Calling this twice for the same button returns [`Error::InputState`].
     pub async fn mouse_down(&self, x: f64, y: f64, button: MouseButton) -> Result<()> {
-        let buttons = {
-            let mut state = self.lock_held_input();
-            state
-                .reserve_mouse_down(button)
-                .map_err(input_state_error)?;
-            state.mouse_button_mask() | button.bit()
-        };
-
+        // Input transitions share one async lock so cloned Pages cannot send
+        // out-of-order button masks. Keeping it over the CDP call also makes a
+        // cancelled down leave a cleanup-able reservation rather than pending
+        // state that can deadlock a later release-all.
+        let mut state = self.held_input.lock().await;
+        let buttons = state
+            .reserve_mouse_down(button, (x, y))
+            .map_err(input_state_error)?;
         let result = self
             .dispatch_mouse_event(
                 MouseEventType::MousePressed,
@@ -653,18 +662,19 @@ impl Page {
                 buttons,
             )
             .await;
-        self.lock_held_input()
-            .finish_mouse_down(button, (x, y), result.is_ok());
+        if result.is_err() {
+            state.cancel_mouse_down(button);
+        }
         result
     }
 
     /// Move the mouse to viewport coordinates, preserving any held buttons.
     pub async fn mouse_move(&self, x: f64, y: f64) -> Result<()> {
-        let buttons = self.lock_held_input().mouse_button_mask();
+        let mut state = self.held_input.lock().await;
+        let buttons = state.mouse_button_mask();
         self.dispatch_mouse_event(MouseEventType::MouseMoved, x, y, None, None, buttons)
             .await?;
 
-        let mut state = self.lock_held_input();
         for position in state.mouse_buttons.values_mut() {
             *position = (x, y);
         }
@@ -676,64 +686,59 @@ impl Page {
     /// Local held state is cleared even if CDP rejects the release, so it
     /// cannot remain permanently tracked after a transport error.
     pub async fn mouse_up(&self, x: f64, y: f64, button: MouseButton) -> Result<()> {
-        let buttons = self
-            .lock_held_input()
-            .begin_mouse_up(button)
-            .map_err(input_state_error)?;
-        self.dispatch_mouse_event(
-            MouseEventType::MouseReleased,
-            x,
-            y,
-            Some(button),
-            Some(1),
-            buttons,
-        )
-        .await
+        let mut state = self.held_input.lock().await;
+        let buttons = state.mouse_up_mask(button).map_err(input_state_error)?;
+        let result = self
+            .dispatch_mouse_event(
+                MouseEventType::MouseReleased,
+                x,
+                y,
+                Some(button),
+                Some(1),
+                buttons,
+            )
+            .await;
+        state.finish_mouse_up(button);
+        result
     }
 
     /// Release every held key and mouse button.
     ///
     /// This is the async cleanup path for interrupted drag/key operations.
     /// Call it before closing a tab or browser; Rust `Drop` cannot reliably
-    /// send asynchronous CDP releases. All local state is cleared even when a
-    /// release command fails, and the first such error is returned.
+    /// send asynchronous CDP releases. If this future is cancelled, unhandled
+    /// inputs remain recorded so a later call can retry their releases.
     pub async fn release_all_inputs(&self) -> Result<()> {
-        {
-            let mut state = self.lock_held_input();
-            if state.releasing {
-                return Err(input_state_error("release_all_inputs is already running"));
-            }
-            // Reject new presses, then wait for already-dispatched downs to
-            // either succeed or fail before taking the release snapshot.
-            state.releasing = true;
-        }
-        while self.lock_held_input().has_pending_input() {
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
-        let (keys, mouse_buttons) = {
-            let mut state = self.lock_held_input();
-            let keys = state.keys.drain().map(|(_, key)| key).collect::<Vec<_>>();
-            let mouse_buttons = state
-                .mouse_buttons
-                .drain()
-                .collect::<Vec<(MouseButton, (f64, f64))>>();
-            (keys, mouse_buttons)
-        };
-
+        let mut state = self.held_input.lock().await;
         let mut first_error = None;
-        for key in keys {
+
+        // Inputs are removed only after their release command completes. A
+        // cancelled cleanup therefore retains the remaining inputs for retry.
+        let key_ids = state.keys.keys().cloned().collect::<Vec<_>>();
+        for id in key_ids {
+            let (key, modifiers) = match state.key_up_event(&id) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
             if let Err(error) = self
-                .dispatch_held_key(&key, crate::cdp::KeyEventType::KeyUp)
+                .dispatch_held_key(&key, crate::cdp::KeyEventType::KeyUp, modifiers)
                 .await
             {
                 first_error.get_or_insert(error);
             }
+            state.finish_key_up(&id);
         }
-        let mut remaining_mouse_buttons = mouse_buttons
+
+        let mouse_buttons = state
+            .mouse_buttons
             .iter()
-            .fold(0, |mask, (button, _)| mask | button.bit());
+            .map(|(button, position)| (*button, *position))
+            .collect::<Vec<_>>();
         for (button, (x, y)) in mouse_buttons {
-            remaining_mouse_buttons &= !button.bit();
+            let buttons = match state.mouse_up_mask(button) {
+                Ok(buttons) => buttons,
+                Err(_) => continue,
+            };
             if let Err(error) = self
                 .dispatch_mouse_event(
                     MouseEventType::MouseReleased,
@@ -741,25 +746,19 @@ impl Page {
                     y,
                     Some(button),
                     Some(1),
-                    remaining_mouse_buttons,
+                    buttons,
                 )
                 .await
             {
                 first_error.get_or_insert(error);
             }
+            state.finish_mouse_up(button);
         }
 
-        self.lock_held_input().releasing = false;
         match first_error {
             Some(error) => Err(error),
             None => Ok(()),
         }
-    }
-
-    fn lock_held_input(&self) -> std::sync::MutexGuard<'_, HeldInputState> {
-        self.held_input
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     async fn dispatch_mouse_event(
@@ -1688,19 +1687,18 @@ impl Page {
     /// then call `key_down("A")`. Duplicate key-down calls return
     /// [`Error::InputState`].
     pub async fn key_down(&self, key: &str) -> Result<()> {
-        let (id, mut held_key) = held_key_from_combo(key);
-        let active_modifiers = self
-            .lock_held_input()
-            .reserve_key_down(id.clone())
-            .map_err(input_state_error)?;
-        let modifiers = active_modifiers | id.modifiers | held_key.modifier_bit;
-        held_key.modifiers = (modifiers != 0).then_some(modifiers);
-
+        let (id, held_key) = held_key_from_combo(key);
+        let mut state = self.held_input.lock().await;
+        let modifiers = state
+            .reserve_key_down(id.clone(), held_key.clone())
+            .map_err(input_state_error)?
+            | held_key.combo_modifiers;
         let result = self
-            .dispatch_held_key(&held_key, crate::cdp::KeyEventType::KeyDown)
+            .dispatch_held_key(&held_key, crate::cdp::KeyEventType::KeyDown, modifiers)
             .await;
-        self.lock_held_input()
-            .finish_key_down(id, held_key, result.is_ok());
+        if result.is_err() {
+            state.cancel_key_down(&id);
+        }
         result
     }
 
@@ -1709,23 +1707,25 @@ impl Page {
     /// Local held state is cleared even if CDP rejects the release.
     pub async fn key_up(&self, key: &str) -> Result<()> {
         let (id, _) = held_key_from_combo(key);
-        let held_key = self
-            .lock_held_input()
-            .begin_key_up(&id)
-            .map_err(input_state_error)?;
-        self.dispatch_held_key(&held_key, crate::cdp::KeyEventType::KeyUp)
-            .await
+        let mut state = self.held_input.lock().await;
+        let (held_key, modifiers) = state.key_up_event(&id).map_err(input_state_error)?;
+        let result = self
+            .dispatch_held_key(&held_key, crate::cdp::KeyEventType::KeyUp, modifiers)
+            .await;
+        state.finish_key_up(&id);
+        result
     }
 
     async fn dispatch_held_key(
         &self,
         held_key: &HeldKey,
         event_type: crate::cdp::KeyEventType,
+        modifiers: i32,
     ) -> Result<()> {
         self.session
             .dispatch_key_event_full(crate::cdp::InputDispatchKeyEventFull {
                 r#type: event_type,
-                modifiers: held_key.modifiers,
+                modifiers: (modifiers != 0).then_some(modifiers),
                 key: Some(held_key.key.clone()),
                 code: Some(held_key.code.clone()),
                 windows_virtual_key_code: held_key.virtual_key_code,
@@ -1956,40 +1956,120 @@ mod tests {
     }
 
     #[test]
-    fn held_mouse_state_rejects_duplicate_down_and_clears_on_up() {
+    fn mouse_reservation_is_included_in_its_dispatched_mask() {
         let mut state = HeldInputState::default();
-        state.reserve_mouse_down(MouseButton::Left).unwrap();
-        state.finish_mouse_down(MouseButton::Left, (10.0, 20.0), true);
+        assert_eq!(
+            state
+                .reserve_mouse_down(MouseButton::Left, (10.0, 20.0))
+                .unwrap(),
+            1
+        );
+        // A concurrent transition observes Left before it is dispatched.
+        assert_eq!(
+            state
+                .reserve_mouse_down(MouseButton::Right, (10.0, 20.0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(state.mouse_up_mask(MouseButton::Right).unwrap(), 1);
+        state.finish_mouse_up(MouseButton::Right);
         assert_eq!(state.mouse_button_mask(), 1);
-        assert!(state.reserve_mouse_down(MouseButton::Left).is_err());
-
-        assert_eq!(state.begin_mouse_up(MouseButton::Left).unwrap(), 0);
-        assert_eq!(state.mouse_button_mask(), 0);
-        assert!(state.begin_mouse_up(MouseButton::Left).is_err());
+        assert!(state
+            .reserve_mouse_down(MouseButton::Left, (0.0, 0.0))
+            .is_err());
     }
 
     #[test]
-    fn failed_mouse_down_is_not_recorded_as_held() {
+    fn cancelled_down_reservations_remain_cleanupable() {
         let mut state = HeldInputState::default();
-        state.reserve_mouse_down(MouseButton::Right).unwrap();
-        state.finish_mouse_down(MouseButton::Right, (0.0, 0.0), false);
-        assert_eq!(state.mouse_button_mask(), 0);
-        assert!(state.begin_mouse_up(MouseButton::Right).is_err());
+        state
+            .reserve_mouse_down(MouseButton::Left, (0.0, 0.0))
+            .unwrap();
+        let (ctrl_id, ctrl) = held_key_from_combo("Ctrl");
+        state.reserve_key_down(ctrl_id.clone(), ctrl).unwrap();
+
+        // Dropping an in-flight future skips its normal finish path, but the
+        // reservation remains available to a later release_all_inputs call.
+        assert_eq!(state.mouse_up_mask(MouseButton::Left).unwrap(), 0);
+        assert!(state.key_up_event(&ctrl_id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_reserved_transition_drops_the_lock_but_keeps_cleanup_state() {
+        let state = Arc::new(tokio::sync::Mutex::new(HeldInputState::default()));
+        let reserved = Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            let mut state = reserved.lock().await;
+            state
+                .reserve_mouse_down(MouseButton::Left, (0.0, 0.0))
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+
+        // No pending/releasing flag survives cancellation, and cleanup still
+        // has the reservation needed to dispatch MouseReleased.
+        let state = state.lock().await;
+        assert_eq!(state.mouse_up_mask(MouseButton::Left).unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancelling_release_keeps_input_available_for_a_later_cleanup() {
+        let state = Arc::new(tokio::sync::Mutex::new(HeldInputState::default()));
+        {
+            let mut state = state.lock().await;
+            state
+                .reserve_mouse_down(MouseButton::Left, (0.0, 0.0))
+                .unwrap();
+        }
+        let releasing = Arc::clone(&state);
+        let task = tokio::spawn(async move {
+            let state = releasing.lock().await;
+            assert_eq!(state.mouse_up_mask(MouseButton::Left).unwrap(), 0);
+            // Model cancellation during the asynchronous CDP release.
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        task.abort();
+        let _ = task.await;
+
+        let state = state.lock().await;
+        assert_eq!(state.mouse_up_mask(MouseButton::Left).unwrap(), 0);
     }
 
     #[test]
-    fn held_modifier_is_applied_to_later_key_downs() {
+    fn failed_mouse_down_is_removed_after_dispatch_error() {
+        let mut state = HeldInputState::default();
+        state
+            .reserve_mouse_down(MouseButton::Right, (0.0, 0.0))
+            .unwrap();
+        state.cancel_mouse_down(MouseButton::Right);
+        assert_eq!(state.mouse_button_mask(), 0);
+        assert!(state.mouse_up_mask(MouseButton::Right).is_err());
+    }
+
+    #[test]
+    fn held_modifier_is_applied_to_later_key_downs_and_removed_for_later_key_up() {
         let mut state = HeldInputState::default();
         let (ctrl_id, ctrl) = held_key_from_combo("Ctrl");
-        let modifiers = state.reserve_key_down(ctrl_id.clone()).unwrap();
-        assert_eq!(modifiers, 0);
-        state.finish_key_down(ctrl_id, ctrl, true);
-
-        let (a_id, _) = held_key_from_combo("A");
         assert_eq!(
-            state.reserve_key_down(a_id).unwrap(),
+            state.reserve_key_down(ctrl_id.clone(), ctrl).unwrap(),
             crate::cdp::modifiers::CTRL
         );
+
+        let (a_id, a) = held_key_from_combo("A");
+        assert_eq!(
+            state.reserve_key_down(a_id.clone(), a).unwrap(),
+            crate::cdp::modifiers::CTRL
+        );
+        assert_eq!(
+            state.key_up_event(&ctrl_id).unwrap().1,
+            crate::cdp::modifiers::CTRL
+        );
+        state.finish_key_up(&ctrl_id);
+        assert_eq!(state.key_up_event(&a_id).unwrap().1, 0);
     }
 
     #[test]
