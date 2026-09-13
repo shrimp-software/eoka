@@ -673,6 +673,72 @@ async fn test_held_input_and_release_all() {
 
 #[tokio::test]
 #[ignore = "requires Chrome"]
+async fn test_held_input_drag_coordinates_hover_and_human_pointer_through_page_state() {
+    if !chrome_available() {
+        eprintln!("Chrome not found, skipping test");
+        return;
+    }
+
+    let browser = Browser::launch().await.expect("Failed to launch browser");
+    let page = browser
+        .new_page("about:blank")
+        .await
+        .expect("Failed to create page");
+    page.goto(r#"data:text/html,<div id='target' style='width:160px;height:160px'></div><script>window.pointerEvents=[];const target=document.getElementById('target');for(const type of ['mousemove','mousedown','mouseup'])target.addEventListener(type,e=>window.pointerEvents.push(`${type}:${e.buttons}`))</script>"#)
+        .await
+        .expect("Failed to navigate");
+
+    let (x, y) = page
+        .find("#target")
+        .await
+        .expect("Missing target")
+        .center()
+        .await
+        .expect("Target is not visible");
+    page.mouse_down(x, y, MouseButton::Right)
+        .await
+        .expect("Failed to hold right mouse button");
+
+    let clone = page.clone();
+    clone.hover("#target").await.expect("Failed to hover");
+    clone
+        .human_hover("#target")
+        .await
+        .expect("Failed to human-hover");
+    clone
+        .find("#target")
+        .await
+        .expect("Missing target")
+        .human_click()
+        .await
+        .expect("Failed to human-click");
+
+    let events: Vec<String> = page
+        .evaluate("window.pointerEvents")
+        .await
+        .expect("Failed to read pointer events");
+    assert!(
+        events.iter().any(|event| event == "mousemove:2"),
+        "events: {events:?}"
+    );
+    let down = events
+        .iter()
+        .position(|event| event == "mousedown:3")
+        .expect("human click must add its left button to held right: {events:?}");
+    let up = events
+        .iter()
+        .position(|event| event == "mouseup:2")
+        .expect("human click must preserve held right on left release: {events:?}");
+    assert!(down < up, "events: {events:?}");
+
+    page.mouse_up(x, y, MouseButton::Right)
+        .await
+        .expect("Failed to release right mouse button");
+    browser.close().await.expect("Failed to close browser");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
 async fn test_held_input_serializes_clone_masks_and_current_key_up_modifiers() {
     if !chrome_available() {
         eprintln!("Chrome not found, skipping test");

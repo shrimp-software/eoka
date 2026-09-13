@@ -6,8 +6,9 @@
 use std::time::Duration;
 use tokio::time::sleep;
 
-use crate::cdp::{KeyEventType, MouseButton, MouseEventType, Session};
+use crate::cdp::{KeyEventType, Session};
 use crate::error::Result;
+use crate::page::Page;
 
 /// Speed mode for human simulation
 #[derive(Debug, Clone, Copy, Default)]
@@ -118,14 +119,17 @@ fn bezier_curve(start: Point, end: Point, num_points: usize) -> Vec<Point> {
 /// Human-like interaction helpers
 pub struct Human<'a> {
     session: &'a Session,
+    /// The Page that owns this helper's coordinated pointer state.
+    page: &'a Page,
     speed: HumanSpeed,
 }
 
 impl<'a> Human<'a> {
-    /// Create a new Human helper
-    pub fn new(session: &'a Session) -> Self {
+    /// Create a Human helper whose pointer input is coordinated by a Page.
+    pub fn new(page: &'a Page) -> Self {
         Self {
-            session,
+            session: &page.session,
+            page,
             speed: HumanSpeed::Normal,
         }
     }
@@ -151,11 +155,9 @@ impl<'a> Human<'a> {
 
         let path = bezier_curve((start_x, start_y), (target_x, target_y), num_points);
 
-        // Move through path
+        // Move through path using Page's coordinator when available.
         for (x, y) in path {
-            self.session
-                .dispatch_mouse_event(MouseEventType::MouseMoved, x, y, None, None)
-                .await?;
+            self.mouse_move(x, y).await?;
             sleep(Duration::from_millis(random_range(min_delay, max_delay))).await;
         }
 
@@ -173,34 +175,36 @@ impl<'a> Human<'a> {
         let click_x = target_x + random_f64_range(-2.0, 2.0);
         let click_y = target_y + random_f64_range(-2.0, 2.0);
 
-        // Mouse down
-        self.session
-            .dispatch_mouse_event(
-                MouseEventType::MousePressed,
-                click_x,
-                click_y,
-                Some(MouseButton::Left),
-                Some(1),
-            )
-            .await?;
+        self.mouse_down(click_x, click_y).await?;
 
         sleep(Duration::from_millis(random_range(50, 120))).await;
 
-        // Mouse up
-        self.session
-            .dispatch_mouse_event(
-                MouseEventType::MouseReleased,
-                click_x,
-                click_y,
-                Some(MouseButton::Left),
-                Some(1),
-            )
-            .await?;
+        self.mouse_up(click_x, click_y).await?;
 
         // Small delay after click
         sleep(Duration::from_millis(random_range(30, 100))).await;
 
         Ok(())
+    }
+
+    async fn mouse_move(&self, x: f64, y: f64) -> Result<()> {
+        self.page.mouse_move(x, y).await
+    }
+
+    async fn mouse_down(&self, x: f64, y: f64) -> Result<()> {
+        self.page
+            .mouse_down(x, y, crate::page::MouseButton::Left)
+            .await
+    }
+
+    async fn mouse_up(&self, x: f64, y: f64) -> Result<()> {
+        self.page
+            .mouse_up(x, y, crate::page::MouseButton::Left)
+            .await
+    }
+
+    async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
+        self.page.mouse_wheel(x, y, delta_x, delta_y).await
     }
 
     /// Type text with human-like timing
@@ -294,14 +298,13 @@ impl<'a> Human<'a> {
             let jitter = random_f64_range(-20.0, 20.0);
             let scroll_amount = per_scroll + jitter;
 
-            self.session
-                .dispatch_mouse_wheel(
-                    random_f64_range(400.0, 800.0),
-                    random_f64_range(300.0, 600.0),
-                    0.0,
-                    scroll_amount,
-                )
-                .await?;
+            self.mouse_wheel(
+                random_f64_range(400.0, 800.0),
+                random_f64_range(300.0, 600.0),
+                0.0,
+                scroll_amount,
+            )
+            .await?;
 
             sleep(Duration::from_millis(random_range(30, 100))).await;
         }

@@ -419,49 +419,6 @@ impl Session {
         Ok(result.frame_tree)
     }
 
-    /// Dispatch a mouse event (click, move, or wheel)
-    pub(crate) async fn dispatch_mouse_event(
-        &self,
-        event_type: MouseEventType,
-        x: f64,
-        y: f64,
-        button: Option<MouseButton>,
-        click_count: Option<i32>,
-    ) -> Result<()> {
-        self.dispatch_mouse_event_full(InputDispatchMouseEvent {
-            r#type: event_type,
-            x,
-            y,
-            button,
-            click_count,
-            buttons: None,
-            delta_x: None,
-            delta_y: None,
-        })
-        .await
-    }
-
-    /// Dispatch a mouse wheel scroll event
-    pub(crate) async fn dispatch_mouse_wheel(
-        &self,
-        x: f64,
-        y: f64,
-        delta_x: f64,
-        delta_y: f64,
-    ) -> Result<()> {
-        self.dispatch_mouse_event_full(InputDispatchMouseEvent {
-            r#type: MouseEventType::MouseWheel,
-            x,
-            y,
-            button: None,
-            click_count: None,
-            buttons: None,
-            delta_x: Some(delta_x),
-            delta_y: Some(delta_y),
-        })
-        .await
-    }
-
     /// Dispatch a raw mouse event with full control over all fields
     pub(crate) async fn dispatch_mouse_event_full(
         &self,

@@ -681,6 +681,30 @@ impl Page {
         Ok(())
     }
 
+    /// Dispatch a wheel event through the shared pointer coordinator.
+    pub(crate) async fn mouse_wheel(
+        &self,
+        x: f64,
+        y: f64,
+        delta_x: f64,
+        delta_y: f64,
+    ) -> Result<()> {
+        let state = self.held_input.lock().await;
+        let buttons = state.mouse_button_mask();
+        self.session
+            .dispatch_mouse_event_full(crate::cdp::InputDispatchMouseEvent {
+                r#type: MouseEventType::MouseWheel,
+                x,
+                y,
+                button: None,
+                click_count: None,
+                buttons: (buttons != 0).then_some(buttons),
+                delta_x: Some(delta_x),
+                delta_y: Some(delta_y),
+            })
+            .await
+    }
+
     /// Release a held mouse button at viewport coordinates.
     ///
     /// Local held state is cleared even if CDP rejects the release, so it
@@ -893,9 +917,11 @@ impl Page {
             })
         }
     }
-    /// Get a Human helper for human-like interactions
+    /// Get a Human helper for human-like interactions.
+    ///
+    /// Its pointer actions share this Page's held-input coordinator.
     pub fn human(&self) -> Human<'_> {
-        Human::new(&self.session)
+        Human::new(self)
     }
 
     /// Human-like click on an element
@@ -1658,9 +1684,7 @@ impl Page {
     /// Hover over element (for revealing menus)
     pub async fn hover(&self, selector: &str) -> Result<()> {
         let (x, y) = self.find(selector).await?.center().await?;
-        self.session
-            .dispatch_mouse_event(MouseEventType::MouseMoved, x, y, None, None)
-            .await
+        self.mouse_move(x, y).await
     }
 
     /// Human-like hover with Bezier curve movement
@@ -1668,7 +1692,7 @@ impl Page {
         let element = self.find(selector).await?;
         element.scroll_into_view().await?;
         let (x, y) = element.center().await?;
-        Human::new(&self.session).move_to(x, y).await?;
+        self.human().move_to(x, y).await?;
         sleep_ms(SETTLE_MS).await;
         Ok(())
     }
