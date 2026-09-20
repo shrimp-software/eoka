@@ -180,7 +180,52 @@ page.upload_files("input[type='file']", &["/a.pdf", "/b.pdf"]).await?;
 let count: i32 = page.evaluate("document.querySelectorAll('li').length").await?;
 page.execute("window.scrollTo(0, 1000)").await?;
 let title: String = page.evaluate_in_frame("iframe#widget", "document.title").await?;
+
+for frame in page.frames().await? {
+    let title: String = page.evaluate_in_frame_id(&frame.id, "document.title").await?;
+    let ancestors = page.frame_ancestor_ids(&frame.id).await?;
+}
 ```
+
+`frames()` includes nested out-of-process iframes belonging to this page.
+ID-based evaluation uses an isolated world without enabling `Runtime`; it does
+not expose the page's main-world JavaScript globals. Ancestors are ordered from
+the immediate parent to the root, excluding the queried frame. These are
+snapshot APIs, not stable navigation identities; reacquire IDs after navigation.
+Explicit JavaScript `null` decodes as JSON null (or `None`); `undefined` still errors.
+
+`page.frame_element_content_quad(frame_id, selector, index)` returns eight
+coordinates in content-corner order, preserving reflections through open and
+closed shadow-slot ancestry. Coordinates are relative to the owning CDP
+session's viewport, **not necessarily the root page or local iframe**. Selectors
+are limited to 4096 bytes and 64 matches; the index must be below 64. Missing,
+detached, fragmented and degenerate boxes fail. This is geometry, not a
+visibility/hit-test guarantee. Temporary remote objects are released on success;
+errors/cancellation schedule bounded best-effort cleanup.
+
+### Low-level request ownership
+
+`eoka::cdp::Transport` provides an opt-in request-stage Fetch route per session:
+
+- `install_request_route(session, bounded_sender, dropped_counter)` claims
+  ownership; a duplicate owner is rejected. Delivered `RequestPause` values
+  belong to the consumer and must be resolved once, including on shutdown.
+- `set_request_interception(session, Some(patterns))` configures interception.
+  `None` restores the base policy. Header stripping/proxy authentication may
+  require wildcard request interception; consumers then filter URLs themselves.
+- `remove_request_route(session)` removes **future** ownership only. Unowned,
+  full-queue and closed-queue events are auto-continued; queue failures increment
+  the supplied counter. Already-delivered pauses still need resolution.
+
+`RequestPause::continue_request()` preserves the header-stripping policy. For
+cancellable work, use `continue_request_with_dispatch()` or
+`Transport::send_to_session_with_dispatch()` with a fresh
+`eoka::cdp::transport::CommandDispatch` token. `may_have_been_sent()` is
+irreversible uncertainty, **not** acknowledgment: never replay a possibly sent
+resolution after an error/timeout. A false observation permits handoff only
+after the originating future has terminated or been dropped. Tokens cannot be
+reused. Cancellation removes the local pending waiter, not the remote command.
+Raw pause payloads can contain sensitive request metadata; avoid logging them.
 
 ### Page Info & Debug
 
