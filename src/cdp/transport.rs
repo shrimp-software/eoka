@@ -199,7 +199,6 @@ fn is_risky(method: &str) -> bool {
     )
 }
 
-#[derive(Clone)]
 struct ResponseRoute {
     events: mpsc::Sender<Value>,
     dropped: Arc<AtomicU64>,
@@ -1146,23 +1145,19 @@ fn drain_chrome_stderr(
             }
         };
         tracing::trace!("Chrome stderr: {}", line);
-        if sender.is_some() {
-            stderr_tail.push(line.clone());
+        if sender.is_none() {
+            continue;
+        }
+        if let Some((_, endpoint)) = line.split_once("DevTools listening on ws://") {
+            let _ = sender
+                .take()
+                .unwrap()
+                .send(Ok(format!("ws://{}", endpoint.trim())));
+            stderr_tail.clear();
+        } else {
+            stderr_tail.push(line);
             if stderr_tail.len() > 20 {
                 stderr_tail.remove(0);
-            }
-            if line.contains("DevTools listening on") {
-                if let Some(url_start) = line.find("ws://") {
-                    if sender
-                        .take()
-                        .unwrap()
-                        .send(Ok(line[url_start..].trim().to_string()))
-                        .is_err()
-                    {
-                        tracing::debug!("Chrome launch receiver dropped before URL delivery");
-                    }
-                    stderr_tail.clear();
-                }
             }
         }
     }

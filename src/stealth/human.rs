@@ -215,20 +215,11 @@ impl<'a> Human<'a> {
         coordinated_mouse_wheel(self.session, &self.held_input, x, y, delta_x, delta_y).await
     }
 
-    /// Press at `(x, y)`, drag horizontally by `dx` pixels, release.
-    ///
-    /// Designed for slider-captcha drags, where the trajectory itself is
-    /// scored: ease-out velocity (fast start, decelerating approach), small
-    /// y-jitter, then an overshoot past the target and a settle back onto the
-    /// exact offset before release — real humans rarely stop dead on target.
-    ///
-    /// The operation exclusively owns the target input coordinator until release;
-    /// existing non-left buttons are preserved, and an already-held left button fails.
-    /// Cancellation schedules a bounded release; retain this helper to confirm it
-    /// with [`Human::finish_drag_cleanup`].
-    ///
-    /// `dx` may be negative (drag left). Overshoot is skipped when `dx` is
-    /// too small to make it plausible.
+    /// Drag by signed `dx` pixels with easing, Y jitter and optional overshoot.
+    /// Exclusively holds the target input coordinator until release, preserving
+    /// other buttons and rejecting an already-held left button.
+    /// Cancellation schedules a bounded release; retain this helper and call
+    /// [`Human::finish_drag_cleanup`] before further input.
     pub async fn drag_by(&self, x: f64, y: f64, dx: f64) -> Result<()> {
         validate_drag(x, y, dx)?;
         let mut release = self.approach_drag(x, y).await?;
@@ -237,7 +228,6 @@ impl<'a> Human<'a> {
             release.press().await?;
             sleep(Duration::from_millis(random_range(60, 140))).await;
 
-            // Overshoot only when the drag is long enough to make it plausible.
             let overshoot = if dx.abs() > 40.0 {
                 random_f64_range(4.0, 14.0).min(dx.abs() * 0.3) * dx.signum()
             } else {
@@ -254,8 +244,7 @@ impl<'a> Human<'a> {
 
             let path = bezier_curve((x, y), (over_x, end_y), num_points);
 
-            // Ease-out: delay grows along the path so the drag decelerates into
-            // the target instead of arriving at constant speed.
+            // Increase delays toward the endpoint.
             let n = path.len().max(2);
             for (i, (px, py)) in path.into_iter().enumerate() {
                 let t = i as f64 / (n - 1) as f64;
@@ -270,7 +259,6 @@ impl<'a> Human<'a> {
                 sleep(Duration::from_millis(eased.max(min_delay))).await;
             }
 
-            // Settle back from the overshoot onto the exact target.
             if overshoot != 0.0 {
                 sleep(Duration::from_millis(random_range(60, 150))).await;
                 let settle_points = random_range(3, 6);

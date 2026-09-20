@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    pin::pin,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -102,22 +103,8 @@ impl fmt::Debug for CapturedFrameResponse {
             .field("method", &self.method)
             .field("status", &self.status)
             .field("captured_at", &self.captured_at)
-            .field(
-                "request_header_names",
-                &self
-                    .request_headers
-                    .iter()
-                    .map(|(n, _)| n)
-                    .collect::<Vec<_>>(),
-            )
-            .field(
-                "response_header_names",
-                &self
-                    .response_headers
-                    .iter()
-                    .map(|(n, _)| n)
-                    .collect::<Vec<_>>(),
-            )
+            .field("request_headers", &self.request_headers.len())
+            .field("response_headers", &self.response_headers.len())
             .field("headers_truncated", &self.headers_truncated)
             .field("body_bytes", &self.body.as_ref().map(Vec::len))
             .field("body_truncated", &self.body_truncated)
@@ -144,16 +131,10 @@ pub struct FrameResponseCaptureReport {
     pub worker_failed: bool,
 }
 
-#[derive(Default)]
-struct State {
-    report: FrameResponseCaptureReport,
-    retained_bytes: usize,
-}
-
 /// Owns a dedicated CDP session and capture worker. Drop requests cleanup;
 /// use stop to await cleanup. Retained evidence survives removal of the frame.
 pub struct FrameResponseCapture {
-    state: Arc<Mutex<State>>,
+    report: Arc<Mutex<FrameResponseCaptureReport>>,
     dropped: Arc<AtomicU64>,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<tokio::task::JoinHandle<()>>,
@@ -163,10 +144,9 @@ impl FrameResponseCapture {
     /// Clone currently retained evidence without stopping the worker.
     pub fn snapshot(&self) -> FrameResponseCaptureReport {
         let mut report = self
-            .state
+            .report
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .report
             .clone();
         report.dropped_events = self.dropped.load(Ordering::Relaxed);
         report
@@ -275,29 +255,30 @@ impl Page {
             .send("Fetch.enable", &json!({"patterns":patterns}))
             .await?;
         let (stop, stopped) = oneshot::channel();
-        let state = Arc::new(Mutex::new(State::default()));
-        let worker_state = state.clone();
+        let report = Arc::new(Mutex::new(FrameResponseCaptureReport::default()));
+        let worker_report = report.clone();
         let frame_id = frame_id.to_owned();
         let worker = tokio::spawn(async move {
-            {
-                let capture = Box::pin(capture_loop(
+            let _ = select(
+                pin!(capture_loop(
                     &session,
                     &frame_id,
                     options,
                     receiver,
-                    worker_state.clone(),
-                ));
-                let _ = select(capture, Box::pin(stopped)).await;
-            }
+                    &worker_report
+                )),
+                pin!(stopped),
+            )
+            .await;
             {
-                let mut state = worker_state.lock().unwrap_or_else(|e| e.into_inner());
-                state.report.dropped_responses += state.report.in_flight;
-                state.report.in_flight = 0;
+                let mut report = worker_report.lock().unwrap_or_else(|e| e.into_inner());
+                report.dropped_responses += report.in_flight;
+                report.in_flight = 0;
             }
             lease.close().await;
         });
         Ok(FrameResponseCapture {
-            state,
+            report,
             dropped,
             stop: Some(stop),
             worker: Some(worker),
@@ -431,23 +412,22 @@ async fn capture_loop(
     frame_id: &str,
     options: FrameResponseCaptureOptions,
     mut events: mpsc::Receiver<Value>,
-    state: Arc<Mutex<State>>,
+    report: &Mutex<FrameResponseCaptureReport>,
 ) {
+    let mut retained_bytes = 0;
     while let Some(params) = events.recv().await {
         if params["frameId"].as_str() == Some(frame_id) {
             let budget = {
-                let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.report.responses.len() >= options.max_responses {
-                    state.report.dropped_responses += 1;
+                let mut report = report.lock().unwrap_or_else(|e| e.into_inner());
+                if report.responses.len() >= options.max_responses {
+                    report.dropped_responses += 1;
                     None
                 } else {
-                    state.report.in_flight += 1;
+                    report.in_flight += 1;
                     Some(
-                        options.max_body_bytes.min(
-                            options
-                                .max_total_body_bytes
-                                .saturating_sub(state.retained_bytes),
-                        ),
+                        options
+                            .max_body_bytes
+                            .min(options.max_total_body_bytes.saturating_sub(retained_bytes)),
                     )
                 }
             };
@@ -496,10 +476,10 @@ async fn capture_loop(
                 if options.capture_bodies {
                     read_body(session, &params, budget, &mut response).await;
                 }
-                let mut state = state.lock().unwrap_or_else(|e| e.into_inner());
-                state.retained_bytes += response.body.as_ref().map_or(0, Vec::len);
-                state.report.responses.push(response);
-                state.report.in_flight -= 1;
+                retained_bytes += response.body.as_ref().map_or(0, Vec::len);
+                let mut report = report.lock().unwrap_or_else(|e| e.into_inner());
+                report.responses.push(response);
+                report.in_flight -= 1;
             }
         }
         let continued: Result<Value> = session
@@ -509,10 +489,9 @@ async fn capture_loop(
             )
             .await;
         if continued.is_err() {
-            state
+            report
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .report
                 .continuation_errors += 1;
             break;
         }
