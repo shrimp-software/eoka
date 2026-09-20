@@ -159,6 +159,13 @@ impl Connection {
             // Transport::close still terminates and reaps managed Chrome.
             tracing::debug!("Browser.close command did not complete: {}", error);
         }
+        if !self
+            .transport
+            .wait_for_owned_exit(std::time::Duration::from_secs(5))
+            .await?
+        {
+            tracing::warn!("Chrome did not exit after Browser.close; terminating it");
+        }
         self.transport.close().await
     }
 }

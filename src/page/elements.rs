@@ -5,6 +5,12 @@ use super::{
 use crate::error::{Error, Result};
 
 impl Page {
+    /// Drag horizontally from the selected element's center.
+    /// For explicit cancellation cleanup, retain a [`crate::stealth::Human`] helper.
+    pub async fn human_drag(&self, selector: &str, dx: f64) -> Result<()> {
+        self.find(selector).await?.human_drag_by(dx).await
+    }
+
     /// Find an element by CSS selector
     pub async fn find(&self, selector: &str) -> Result<Element> {
         let node_id = self

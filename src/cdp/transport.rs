@@ -199,6 +199,12 @@ fn is_risky(method: &str) -> bool {
     )
 }
 
+struct ResponseRoute {
+    events: mpsc::Sender<Value>,
+    dropped: Arc<AtomicU64>,
+}
+
+type ResponseRoutes = Arc<std::sync::Mutex<HashMap<String, ResponseRoute>>>;
 type RequestRoutes = Arc<std::sync::Mutex<HashMap<String, RequestRoute>>>;
 
 struct RequestRoute {
@@ -314,6 +320,20 @@ fn route_request_pause(
     false
 }
 
+fn route_response_pause(routes: &ResponseRoutes, session: Option<&str>, params: &Value) -> bool {
+    if params.get("responseStatusCode").is_none() && params.get("responseErrorReason").is_none() {
+        return false;
+    }
+    let routes = routes.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(route) = session.and_then(|s| routes.get(s)) {
+        if route.events.try_send(params.clone()).is_ok() {
+            return true;
+        }
+        route.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+    false
+}
+
 /// CDP transport with owned request-pause routing and automatic continuation.
 pub struct Transport {
     /// The Chrome child process (None when connecting to an existing instance)
@@ -326,6 +346,7 @@ pub struct Transport {
     pending: Arc<PendingMap>,
     /// Broadcasts parsed events to all subscribers.
     event_tx: broadcast::Sender<CdpMessage>,
+    response_routes: ResponseRoutes,
     request_routes: RequestRoutes,
     request_base_auth: bool,
     request_base_strip: bool,
@@ -404,6 +425,8 @@ impl Transport {
         let pending_clone = Arc::clone(&pending);
         let event_tx_clone = event_tx.clone();
         let reader_writer = Arc::clone(&writer);
+        let response_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let reader_responses = Arc::clone(&response_routes);
         let request_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let reader_requests = Arc::clone(&request_routes);
         let request_base_auth = proxy_auth.is_some();
@@ -413,7 +436,7 @@ impl Transport {
                 pending_clone,
                 event_tx_clone,
                 reader_writer,
-                reader_requests,
+                (reader_responses, reader_requests),
                 proxy_auth,
                 strip_x_client_data,
             )
@@ -428,6 +451,7 @@ impl Transport {
             event_tx,
             event_rx: Mutex::new(event_rx),
             request_routes,
+            response_routes,
             request_base_auth,
             request_base_strip: strip_x_client_data,
             cmd_timeout,
@@ -504,10 +528,11 @@ impl Transport {
         pending: Arc<PendingMap>,
         event_tx: broadcast::Sender<CdpMessage>,
         writer: SharedSink,
-        request_routes: RequestRoutes,
+        routes: (ResponseRoutes, RequestRoutes),
         proxy_auth: Option<(String, String)>,
         strip_x_client_data: bool,
     ) {
+        let (response_routes, request_routes) = routes;
         let exit_reason;
         // Separate command ID space for auth/interception auto-responses (won't
         // collide with main IDs for the first ~2 billion commands). Must stay
@@ -633,12 +658,14 @@ impl Transport {
                 // pauses every matching request; an unanswered pause would
                 // hang the page forever.
                 if method == "Fetch.requestPaused" {
-                    if route_request_pause(
-                        &request_routes,
-                        session_id.as_deref(),
-                        &params,
-                        strip_x_client_data,
-                    ) {
+                    if route_response_pause(&response_routes, session_id.as_deref(), &params)
+                        || route_request_pause(
+                            &request_routes,
+                            session_id.as_deref(),
+                            &params,
+                            strip_x_client_data,
+                        )
+                    {
                         continue;
                     }
                     if let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) {
@@ -911,6 +938,25 @@ impl Transport {
             .remove(session);
     }
 
+    pub(crate) fn install_response_route(
+        &self,
+        session: &str,
+        events: mpsc::Sender<Value>,
+        dropped: Arc<AtomicU64>,
+    ) {
+        self.response_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session.to_owned(), ResponseRoute { events, dropped });
+    }
+
+    pub(crate) fn remove_response_route(&self, session: &str) {
+        self.response_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session);
+    }
+
     /// Receive the next event from Chrome (single-consumer back-compat).
     /// Skips over lagged notifications and returns the next available event.
     pub async fn recv_event(&self) -> Option<CdpMessage> {
@@ -939,6 +985,22 @@ impl Transport {
                 }
                 Err(_) => return None,
             }
+        }
+    }
+
+    pub(crate) async fn wait_for_owned_exit(&self, timeout: Duration) -> Result<bool> {
+        let Some(child) = &self.child else {
+            return Ok(true);
+        };
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if child.lock().await.try_wait()?.is_some() {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
 
@@ -984,28 +1046,64 @@ impl Drop for Transport {
 
 /// Launch Chrome and get the WebSocket debugging URL
 pub fn launch_chrome(path: &std::path::Path, args: &[String]) -> Result<(Child, String)> {
-    launch_chrome_impl(path, args, None)
+    launch_chrome_impl(path, args, None, false)
 }
 
 pub(crate) fn launch_chrome_with_profile_dir(
     path: &std::path::Path,
     args: &[String],
     profile_dir: &Path,
+    live_session: bool,
 ) -> Result<(Child, String)> {
-    launch_chrome_impl(path, args, Some(profile_dir))
+    launch_chrome_impl(path, args, Some(profile_dir), live_session)
+}
+
+fn debugging_port_argument(args: &[String], live_session: bool) -> Result<Option<String>> {
+    if args
+        .iter()
+        .any(|arg| arg == "--remote-debugging-port" || arg.starts_with("--remote-debugging-port="))
+    {
+        return Ok(None);
+    }
+    let port = if live_session {
+        std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port()
+    } else {
+        0
+    };
+    Ok(Some(format!("--remote-debugging-port={port}")))
 }
 
 fn launch_chrome_impl(
     path: &std::path::Path,
     args: &[String],
     profile_dir: Option<&Path>,
+    live_session: bool,
 ) -> Result<(Child, String)> {
     use std::process::Command;
 
     let mut cmd = Command::new(path);
-    cmd.args(args)
-        .args(["--remote-debugging-port=0"]) // Let Chrome pick a free port
-        .stdin(Stdio::null())
+    cmd.args(args);
+    let debugging_argument = debugging_port_argument(args, live_session)?;
+    if let Some(argument) = &debugging_argument {
+        cmd.arg(argument);
+    }
+    let effective_port = debugging_argument.as_deref().or_else(|| {
+        args.iter()
+            .rev()
+            .find(|arg| {
+                arg.as_str() == "--remote-debugging-port"
+                    || arg.starts_with("--remote-debugging-port=")
+            })
+            .map(String::as_str)
+    });
+    let fallback_profile_dir = if effective_port == Some("--remote-debugging-port=0") {
+        profile_dir
+    } else {
+        None
+    };
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped()); // We need stderr to get the DevTools URL
 
@@ -1019,50 +1117,61 @@ fn launch_chrome_impl(
         .ok_or(Error::Launch("No stderr from Chrome".into()))?;
 
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stderr);
-        let mut stderr_tail = Vec::new();
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(error) => {
-                    let _ = tx.send(Err(format!("failed to read Chrome stderr: {}", error)));
-                    return;
-                }
-            };
+    std::thread::spawn(move || drain_chrome_stderr(BufReader::new(stderr), tx));
 
-            tracing::trace!("Chrome stderr: {}", line);
-            stderr_tail.push(line.clone());
-            if stderr_tail.len() > 20 {
-                stderr_tail.remove(0);
-            }
-
-            if line.contains("DevTools listening on") {
-                if let Some(url_start) = line.find("ws://") {
-                    if tx.send(Ok(line[url_start..].trim().to_string())).is_err() {
-                        tracing::debug!("Chrome launch receiver dropped before URL delivery");
-                    }
-                    return;
-                }
-            }
-        }
-        let stderr = stderr_tail.join("\n");
-        let message = if stderr.is_empty() {
-            "Chrome exited before printing DevTools URL and produced no stderr".to_string()
-        } else {
-            format!(
-                "Chrome exited before printing DevTools URL. stderr:\n{}",
-                stderr
-            )
-        };
-        let _ = tx.send(Err(message));
-    });
-
-    let ws_url = wait_for_chrome_devtools_url(&mut child, &rx, profile_dir)?;
+    let ws_url = wait_for_chrome_devtools_url(&mut child, &rx, fallback_profile_dir)?;
 
     tracing::info!("Chrome DevTools URL: {}", ws_url);
 
     Ok((child, ws_url))
+}
+
+fn drain_chrome_stderr(
+    reader: impl BufRead,
+    sender: std::sync::mpsc::Sender<std::result::Result<String, String>>,
+) {
+    let mut sender = Some(sender);
+    let mut stderr_tail = Vec::new();
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                if let Some(sender) = sender.take() {
+                    let _ = sender.send(Err(format!("failed to read Chrome stderr: {error}")));
+                } else {
+                    tracing::warn!("Chrome stderr reader failed after startup: {error}");
+                }
+                return;
+            }
+        };
+        tracing::trace!("Chrome stderr: {}", line);
+        if sender.is_none() {
+            continue;
+        }
+        if let Some((_, endpoint)) = line.split_once("DevTools listening on ws://") {
+            let _ = sender
+                .take()
+                .unwrap()
+                .send(Ok(format!("ws://{}", endpoint.trim())));
+            stderr_tail.clear();
+        } else {
+            stderr_tail.push(line);
+            if stderr_tail.len() > 20 {
+                stderr_tail.remove(0);
+            }
+        }
+    }
+    if let Some(sender) = sender {
+        let message = if stderr_tail.is_empty() {
+            "Chrome exited before printing DevTools URL and produced no stderr".to_string()
+        } else {
+            format!(
+                "Chrome exited before printing DevTools URL. stderr:\n{}",
+                stderr_tail.join("\n")
+            )
+        };
+        let _ = sender.send(Err(message));
+    }
 }
 
 fn wait_for_chrome_devtools_url(
@@ -1438,6 +1547,55 @@ mod tests {
     }
 
     #[test]
+    fn chrome_stderr_is_drained_after_the_devtools_url() {
+        let input = b"startup\nDevTools listening on ws://127.0.0.1:9333/devtools/browser/test\nGPU log after startup\n";
+        let mut reader = std::io::Cursor::new(input);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drain_chrome_stderr(&mut reader, sender);
+        assert_eq!(
+            receiver.recv().unwrap().unwrap(),
+            "ws://127.0.0.1:9333/devtools/browser/test"
+        );
+        assert_eq!(reader.position(), input.len() as u64);
+        assert!(receiver.try_recv().is_err());
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(receiver);
+        let mut reader = std::io::Cursor::new(input);
+        drain_chrome_stderr(&mut reader, sender);
+        assert_eq!(reader.position(), input.len() as u64);
+    }
+
+    #[test]
+    fn debugging_ports_preserve_explicit_configuration_and_native_launches() {
+        for native in [false, true] {
+            assert_eq!(
+                debugging_port_argument(&["--remote-debugging-port=9333".into()], native).unwrap(),
+                None
+            );
+            assert_eq!(
+                debugging_port_argument(&["--remote-debugging-port=0".into()], native).unwrap(),
+                None
+            );
+        }
+        assert_eq!(
+            debugging_port_argument(&[], false).unwrap(),
+            Some("--remote-debugging-port=0".into())
+        );
+        let native = debugging_port_argument(&[], true).unwrap().unwrap();
+        let port: u16 = native
+            .strip_prefix("--remote-debugging-port=")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_ne!(port, 0);
+        assert!(
+            debugging_port_argument(&["--remote-debugging-portability=1".into()], true)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn manual_interception_preserves_and_restores_base_auth_and_header_policy() {
         let pattern = vec![json!({"urlPattern":"*/accepted","requestStage":"Request"})];
         for (strip, auth) in [(true, false), (false, true), (true, true)] {
@@ -1504,6 +1662,34 @@ mod tests {
         assert_eq!(dropped.load(Ordering::Relaxed), 2);
         routes.lock().unwrap().remove("owned");
         assert!(!route_request_pause(&routes, Some("owned"), &request, true));
+    }
+
+    #[test]
+    fn response_routes_leave_unowned_and_overflowed_pauses_to_auto_continue() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let routes = Arc::new(std::sync::Mutex::new(HashMap::from([(
+            "owned".into(),
+            ResponseRoute {
+                events: sender,
+                dropped: dropped.clone(),
+            },
+        )])));
+        let response = json!({"requestId":"1", "responseStatusCode":200});
+        assert!(!route_response_pause(
+            &routes,
+            Some("owned"),
+            &json!({"requestId":"1"})
+        ));
+        assert!(!route_response_pause(&routes, Some("other"), &response));
+        assert!(!route_response_pause(&routes, None, &response));
+        assert!(route_response_pause(&routes, Some("owned"), &response));
+        assert!(!route_response_pause(&routes, Some("owned"), &response));
+        assert_eq!(dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(receiver.try_recv().unwrap(), response);
+        drop(receiver);
+        assert!(!route_response_pause(&routes, Some("owned"), &response));
+        assert_eq!(dropped.load(Ordering::Relaxed), 2);
     }
 
     #[test]

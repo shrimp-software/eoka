@@ -199,7 +199,152 @@ impl Snapshot {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Owner {
+    backend_node_id: i64,
+}
+
+#[derive(Deserialize)]
+struct Geometry {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    scale_x: f64,
+    scale_y: f64,
+    unsupported: bool,
+}
+
+const OWNER_GEOMETRY: &str = r#"function() {
+    let unsupported = typeof this.checkVisibility !== 'function' || !this.checkVisibility({checkOpacity:true,checkVisibilityCSS:true,contentVisibilityAuto:true});
+    let depth = 0;
+    for (let e = this; e; e = e.assignedSlot || e.parentElement || e.getRootNode().host) {
+        if (++depth > 64) { unsupported = true; break; }
+        const s = getComputedStyle(e);
+        if (s.transform !== 'none') {
+            const m = new DOMMatrixReadOnly(s.transform);
+            if (!m.is2D || Math.abs(m.b) > 1e-8 || Math.abs(m.c) > 1e-8 || m.a <= 0 || m.d <= 0) unsupported = true;
+        }
+        if (s.scale && s.scale !== 'none' && s.scale.split(/\s+/).some(v => !(parseFloat(v) > 0))) unsupported = true;
+        if (s.perspective !== 'none' || (s.rotate && s.rotate !== 'none' && s.rotate !== '0deg') ||
+            s.visibility !== 'visible' || s.display === 'none' || Number(s.opacity) === 0 ||
+            s.contentVisibility === 'hidden') unsupported = true;
+    }
+    const s = getComputedStyle(this), r = this.getBoundingClientRect();
+    const n = v => parseFloat(v) || 0;
+    const pl=n(s.paddingLeft), pr=n(s.paddingRight), pt=n(s.paddingTop), pb=n(s.paddingBottom);
+    const bl=n(s.borderLeftWidth), br=n(s.borderRightWidth), bt=n(s.borderTopWidth), bb=n(s.borderBottomWidth);
+    const bw=n(s.width)+(s.boxSizing==='border-box'?0:pl+pr+bl+br);
+    const bh=n(s.height)+(s.boxSizing==='border-box'?0:pt+pb+bt+bb);
+    const sx=bw>0?r.width/bw:0, sy=bh>0?r.height/bh:0;
+    return {x:r.left+(bl+pl)*sx, y:r.top+(bt+pt)*sy,
+        width:bw-pl-pr-bl-br, height:bh-pt-pb-bt-bb, scale_x:sx, scale_y:sy,
+        unsupported:unsupported || !this.getClientRects().length};
+}"#;
+
 impl Page {
+    pub(super) async fn frame_target_id(&self, frame_id: &str) -> Result<String> {
+        let snapshot = Snapshot::capture(self).await?;
+        Ok(snapshot.get(frame_id)?.session.target_id().to_owned())
+    }
+
+    /// Convert frame-local CSS coordinates to top-level viewport coordinates.
+    /// Accounts for borders, padding, scrolling, positive axis-aligned scale
+    /// and translation. Unsupported owner transforms and hidden owners fail,
+    /// including reflection through closed shadow slots. Points outside any
+    /// ancestor viewport are rejected. This is not an overlay hit-test guarantee.
+    pub async fn frame_point_to_viewport(
+        &self,
+        frame_id: &str,
+        x: f64,
+        y: f64,
+    ) -> Result<(f64, f64)> {
+        if !x.is_finite() || !y.is_finite() {
+            return Err(Error::cdp_msg("Frame coordinates must be finite"));
+        }
+        let snapshot = Snapshot::capture(self).await?;
+        let mut id = frame_id;
+        let (mut x, mut y) = (x, y);
+        loop {
+            let entry = snapshot.get(id)?;
+            let context = entry.session.create_isolated_world(id).await?;
+            let size: [f64; 2] = self.eval_impl(
+                entry
+                    .session
+                    .evaluate_in_context("[innerWidth, innerHeight]", context)
+                    .await?,
+            )?;
+            if x < 0.0 || y < 0.0 || x >= size[0] || y >= size[1] {
+                return Err(Error::cdp_msg(
+                    "Frame point is outside a viewport in its ancestor chain",
+                ));
+            }
+            let Some(parent_id) = entry.parent.as_deref() else {
+                return Ok((x, y));
+            };
+            let parent = snapshot.get(parent_id)?;
+            let owner: Owner = parent
+                .session
+                .send("DOM.getFrameOwner", &json!({"frameId": id}))
+                .await?;
+            let parent_context = parent.session.create_isolated_world(parent_id).await?;
+            let objects = FrameQuadObjects::new(parent.session.clone());
+            let resolved: Value = parent.session.send("DOM.resolveNode", &json!({
+                "backendNodeId": owner.backend_node_id, "executionContextId": parent_context,
+                "objectGroup":objects.group,
+            })).await?;
+            let object_id = resolved["object"]["objectId"]
+                .as_str()
+                .ok_or_else(|| Error::cdp_msg("Frame owner could not be resolved"))?;
+            let model: Value = parent
+                .session
+                .send("DOM.getBoxModel", &json!({"objectId":object_id}))
+                .await?;
+            let quad: [f64; 8] = serde_json::from_value(model["model"]["content"].clone())?;
+            if quad.iter().any(|v| !v.is_finite())
+                || quad[2] <= quad[0]
+                || quad[5] <= quad[3]
+                || (quad[1] - quad[3]).abs() > 1e-6
+                || (quad[2] - quad[4]).abs() > 1e-6
+                || (quad[5] - quad[7]).abs() > 1e-6
+                || (quad[6] - quad[0]).abs() > 1e-6
+            {
+                return Err(Error::cdp_msg("Unsupported rendered frame owner transform"));
+            }
+            let result: Result<RuntimeEvaluateResult> = parent
+                .session
+                .send(
+                    "Runtime.callFunctionOn",
+                    &json!({
+                        "objectId": object_id, "functionDeclaration": OWNER_GEOMETRY,
+                        "returnByValue": true,
+                    }),
+                )
+                .await;
+            let geometry: Geometry = self.eval_impl(result?)?;
+            objects.release().await?;
+            if geometry.unsupported
+                || geometry.width <= 0.0
+                || geometry.height <= 0.0
+                || !geometry.scale_x.is_finite()
+                || !geometry.scale_y.is_finite()
+                || geometry.scale_x <= 0.0
+                || geometry.scale_y <= 0.0
+            {
+                return Err(Error::cdp_msg(
+                    "Unsupported transformed or hidden frame owner",
+                ));
+            }
+            if (geometry.width - size[0]).abs() > 1.0 || (geometry.height - size[1]).abs() > 1.0 {
+                return Err(Error::cdp_msg("Frame owner and viewport dimensions differ"));
+            }
+            x = geometry.x + x * geometry.scale_x;
+            y = geometry.y + y * geometry.scale_y;
+            id = parent_id;
+        }
+    }
+
     /// Get this page's frame tree, including nested out-of-process iframe targets.
     pub async fn frames(&self) -> Result<Vec<FrameInfo>> {
         self.nested_frame_infos().await

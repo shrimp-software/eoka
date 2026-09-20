@@ -217,6 +217,9 @@ pub struct InputDispatchMouseEvent {
     /// middle=4, back=8, forward=16).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub buttons: Option<i32>,
+    /// Mouse pointer pressure: 0.5 while any button is held, zero otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delta_x: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -880,6 +883,7 @@ mod tests {
             button: Some(MouseButton::Left),
             click_count: Some(1),
             buttons: Some(1),
+            force: Some(0.5),
             delta_x: None,
             delta_y: None,
         };
@@ -893,6 +897,7 @@ mod tests {
                 "button": "left",
                 "clickCount": 1,
                 "buttons": 1,
+                "force": 0.5,
             })
         );
     }
@@ -906,6 +911,7 @@ mod tests {
             button: None,
             click_count: None,
             buttons: None,
+            force: None,
             delta_x: None,
             delta_y: None,
         };

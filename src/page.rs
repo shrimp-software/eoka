@@ -9,7 +9,13 @@ mod frames;
 mod input;
 mod navigation;
 mod network;
+mod response_capture;
 mod wait;
+
+pub use response_capture::{
+    CaptureBodyError, CapturedFrameResponse, FrameResponseCapture, FrameResponseCaptureOptions,
+    FrameResponseCaptureReport,
+};
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -21,7 +27,8 @@ use crate::StealthConfig;
 
 pub(crate) use input::{
     coordinated_key_char, coordinated_key_down, coordinated_key_up, coordinated_mouse_down,
-    coordinated_mouse_move, coordinated_mouse_up, coordinated_mouse_wheel, HeldInputState,
+    coordinated_mouse_move, coordinated_mouse_up, coordinated_mouse_wheel, DragInput,
+    HeldInputState,
 };
 
 // Re-export so the historical `eoka::page::Element` / `eoka::page::BoundingBox`

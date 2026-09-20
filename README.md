@@ -203,6 +203,41 @@ detached, fragmented and degenerate boxes fail. This is geometry, not a
 visibility/hit-test guarantee. Temporary remote objects are released on success;
 errors/cancellation schedule bounded best-effort cleanup.
 
+`page.frame_point_to_viewport(frame_id, x, y)` maps frame-local CSS points to the
+root viewport through nested/OOPIF borders, padding, scrolling and positive scaling.
+Hidden, reflected, rotated or out-of-viewport geometry is rejected, including
+closed shadow slots. Wait for rendering after layout changes; this is not a hit test.
+
+### Horizontal dragging and cleanup
+
+`page.human_drag(selector, dx)`, `element.human_drag_by(dx)` and
+`Human::drag_by(x, y, dx)` drag with overshoot and settling.
+`Human::drag_horizontal_by(x, y, dx)` keeps Y fixed and X monotonic.
+Drags preserve other held buttons and reject an already-held left button.
+Retain the helper across cancellation to confirm release before further input:
+
+```rust
+let human = page.human();
+let result = tokio::time::timeout(
+    std::time::Duration::from_secs(5),
+    human.drag_horizontal_by(120.0, 120.0, 150.0),
+).await;
+human.finish_drag_cleanup().await?;
+result??;
+```
+
+Release has a separate three-second timeout. Cancelled cleanup waits can be resumed;
+dropping the helper only schedules best-effort release. Cleanup failures require inspection.
+
+### Frame response capture
+
+`page.capture_frame_responses(frame_id, options)` captures responses for exactly
+one frame, surviving its removal. Use `snapshot()` for retained records and
+`stop().await` for cleanup and loss/error counters; Drop does not wait.
+Bodies and headers are opt-in. Defaults: 128 records, 64 KiB/body, 1 MiB total.
+Limits bound retention, not transient CDP payloads; Debug omits body/header values.
+Fetch headers do not prove which cookies were sent on the wire.
+
 ### Low-level request ownership
 
 `eoka::cdp::Transport` provides an opt-in request-stage Fetch route per session:
@@ -248,6 +283,12 @@ let page2 = browser.new_page("https://b.com").await?;
 browser.activate_tab(page1.target_id()).await?;
 browser.close_tab(page2.target_id()).await?;
 ```
+
+### Browser ownership and debugging ports
+
+Explicit debugging ports are preserved; live launches default to a nonzero port.
+`close()` gives owned browsers up to five seconds to flush state before termination.
+Attached browsers are only disconnected, regardless of live-mode configuration.
 
 ### Connect to an existing Chrome
 
