@@ -2,6 +2,8 @@
 //!
 //! High-level API for interacting with a browser page.
 
+mod frames;
+
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::Arc;
@@ -1182,10 +1184,7 @@ impl Page {
         result: crate::cdp::types::RuntimeEvaluateResult,
     ) -> Result<T> {
         let remote = self.check_js_result(result)?;
-        let value = remote
-            .value
-            .ok_or_else(|| Error::cdp_msg("No value returned from evaluate"))?;
-        Ok(serde_json::from_value(value)?)
+        Ok(serde_json::from_value(evaluated_value(remote)?)?)
     }
 
     /// Execute JavaScript without expecting a return value
@@ -1647,28 +1646,9 @@ impl Page {
             sleep_ms(INTERACTION_DELAY_MS).await;
         }
     }
-    /// Get a list of all frames on the page
+    /// Get this page's frame tree, including nested out-of-process iframe targets.
     pub async fn frames(&self) -> Result<Vec<FrameInfo>> {
-        let frame_tree = self.session.get_frame_tree().await?;
-        let mut frames = vec![FrameInfo {
-            id: frame_tree.frame.id.clone(),
-            url: frame_tree.frame.url.clone(),
-            name: frame_tree.frame.name.clone(),
-        }];
-
-        fn collect_frames(children: &[crate::cdp::types::FrameTree], frames: &mut Vec<FrameInfo>) {
-            for child in children {
-                frames.push(FrameInfo {
-                    id: child.frame.id.clone(),
-                    url: child.frame.url.clone(),
-                    name: child.frame.name.clone(),
-                });
-                collect_frames(&child.child_frames, frames);
-            }
-        }
-
-        collect_frames(&frame_tree.child_frames, &mut frames);
-        Ok(frames)
+        self.nested_frame_infos().await
     }
 
     /// Execute JavaScript inside an iframe.
@@ -1976,9 +1956,43 @@ pub struct PageState {
     pub form_count: u32,
 }
 
+fn evaluated_value(remote: crate::cdp::types::RemoteObject) -> Result<serde_json::Value> {
+    match (
+        remote.value,
+        remote.r#type.as_str(),
+        remote.subtype.as_deref(),
+    ) {
+        (Some(value), _, _) => Ok(value),
+        (None, "object", Some("null")) => Ok(serde_json::Value::Null),
+        _ => Err(Error::cdp_msg("No value returned from evaluate")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_null_is_a_value_but_undefined_is_not() {
+        let remote = serde_json::from_value(
+            serde_json::json!({"type":"object", "subtype":"null", "value":null}),
+        )
+        .unwrap();
+        let decoded: Option<String> =
+            serde_json::from_value(evaluated_value(remote).unwrap()).unwrap();
+        assert_eq!(decoded, None);
+        let remote = serde_json::from_value(serde_json::json!({"type":"undefined"})).unwrap();
+        assert!(evaluated_value(remote).is_err());
+        for value in [
+            serde_json::json!(0),
+            serde_json::json!(false),
+            serde_json::json!(""),
+            serde_json::json!({"a":1}),
+        ] {
+            let remote = serde_json::from_value(serde_json::json!({"value":value})).unwrap();
+            assert_eq!(evaluated_value(remote).unwrap(), value);
+        }
+    }
 
     #[test]
     fn test_escape_js_string() {
