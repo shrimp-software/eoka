@@ -354,7 +354,8 @@ fn prepare_browser_launch(config: Arc<StealthConfig>) -> Result<PreparedBrowserL
     args.push(format!("--user-data-dir={}", profile.path.display()));
 
     tracing::info!("Launching Chrome from {:?}", chrome_path);
-    let (child, ws_url) = launch_chrome_with_profile_dir(&chrome_path, &args, &profile.path)?;
+    let (child, ws_url) =
+        launch_chrome_with_profile_dir(&chrome_path, &args, &profile.path, config.live_session)?;
     Ok(PreparedBrowserLaunch {
         child: Some(child),
         ws_url,
@@ -593,7 +594,7 @@ impl Browser {
             connection,
             config,
             user_data_dir: None,
-            reused: false,
+            reused: true,
             fingerprint,
             evasion_script,
         })
@@ -723,12 +724,11 @@ impl Browser {
         Ok(())
     }
 
-    /// Close the browser. In live-session mode, or when we attached to a
-    /// Chrome we didn't spawn (see `try_attach_existing`), this is
-    /// equivalent to `disconnect()` — we never send `Browser.close` to a
-    /// Chrome we don't own.
+    /// Gracefully close an owned browser, including owned live-session launches.
+    /// Attached browsers are only disconnected, regardless of configuration.
+    /// Chrome has a bounded opportunity to flush state before forced termination.
     pub async fn close(self) -> Result<()> {
-        if self.config.live_session || self.reused {
+        if self.reused {
             self.connection.transport().close().await?;
         } else {
             self.connection.close().await?;

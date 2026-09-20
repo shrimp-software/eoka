@@ -89,6 +89,10 @@ pub use element::{BoundingBox, Element};
 pub use error::{Error, Result};
 pub use fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
 pub use network::{NetworkEvent, NetworkWatcher};
+pub use page::{
+    CaptureBodyError, CapturedFrameResponse, FrameResponseCapture, FrameResponseCaptureOptions,
+    FrameResponseCaptureReport,
+};
 pub use page::{CapturedRequest, FrameInfo, MouseButton, Page, PageState, ResponseBody, TextMatch};
 pub use session::{BrowserSession, BrowserState, SessionCookie};
 pub use stealth::{Fingerprint, HumanSpeed};

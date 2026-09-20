@@ -3,7 +3,10 @@
 //! Simulates realistic mouse movements and typing patterns to avoid
 //! behavior-based bot detection.
 
-use std::sync::Arc;
+mod drag;
+
+use drag::{validate_drag, PendingRelease};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::sleep;
 
@@ -127,6 +130,8 @@ pub struct Human<'a> {
     /// Per-target state obtained from Session, shared with every Page clone.
     held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
     speed: HumanSpeed,
+    pending_releases: Mutex<Vec<PendingRelease>>,
+    cleanup_wait: tokio::sync::Mutex<()>,
 }
 
 impl<'a> Human<'a> {
@@ -136,6 +141,8 @@ impl<'a> Human<'a> {
             session,
             held_input: session.held_input(),
             speed: HumanSpeed::Normal,
+            pending_releases: Mutex::new(Vec::new()),
+            cleanup_wait: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -206,6 +213,110 @@ impl<'a> Human<'a> {
 
     async fn mouse_wheel(&self, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<()> {
         coordinated_mouse_wheel(self.session, &self.held_input, x, y, delta_x, delta_y).await
+    }
+
+    /// Press at `(x, y)`, drag horizontally by `dx` pixels, release.
+    ///
+    /// Designed for slider-captcha drags, where the trajectory itself is
+    /// scored: ease-out velocity (fast start, decelerating approach), small
+    /// y-jitter, then an overshoot past the target and a settle back onto the
+    /// exact offset before release — real humans rarely stop dead on target.
+    ///
+    /// The operation exclusively owns the target input coordinator until release;
+    /// existing non-left buttons are preserved, and an already-held left button fails.
+    /// Cancellation schedules a bounded release; retain this helper to confirm it
+    /// with [`Human::finish_drag_cleanup`].
+    ///
+    /// `dx` may be negative (drag left). Overshoot is skipped when `dx` is
+    /// too small to make it plausible.
+    pub async fn drag_by(&self, x: f64, y: f64, dx: f64) -> Result<()> {
+        validate_drag(x, y, dx)?;
+        let mut release = self.approach_drag(x, y).await?;
+        sleep(Duration::from_millis(random_range(80, 200))).await;
+        let moved = async {
+            release.press().await?;
+            sleep(Duration::from_millis(random_range(60, 140))).await;
+
+            // Overshoot only when the drag is long enough to make it plausible.
+            let overshoot = if dx.abs() > 40.0 {
+                random_f64_range(4.0, 14.0).min(dx.abs() * 0.3) * dx.signum()
+            } else {
+                0.0
+            };
+
+            let target_x = (x + dx).max(0.0);
+            let over_x = (x + dx + overshoot).max(0.0);
+            let end_y = (y + random_f64_range(-3.0, 3.0)).max(0.0);
+
+            let distance = (over_x - x).abs();
+            let num_points = self.speed.mouse_points(distance);
+            let (min_delay, max_delay) = self.speed.move_delay_ms();
+
+            let path = bezier_curve((x, y), (over_x, end_y), num_points);
+
+            // Ease-out: delay grows along the path so the drag decelerates into
+            // the target instead of arriving at constant speed.
+            let n = path.len().max(2);
+            for (i, (px, py)) in path.into_iter().enumerate() {
+                let t = i as f64 / (n - 1) as f64;
+                let jitter_y = if i > 0 && i < n - 1 {
+                    random_f64_range(-1.5, 1.5)
+                } else {
+                    0.0
+                };
+                release.move_to(px, (py + jitter_y).max(0.0)).await?;
+                let delay = random_range(min_delay, max_delay);
+                let eased = (delay as f64 * (0.5 + 2.0 * t * t)) as u64;
+                sleep(Duration::from_millis(eased.max(min_delay))).await;
+            }
+
+            // Settle back from the overshoot onto the exact target.
+            if overshoot != 0.0 {
+                sleep(Duration::from_millis(random_range(60, 150))).await;
+                let settle_points = random_range(3, 6);
+                for i in 1..=settle_points {
+                    let t = i as f64 / settle_points as f64;
+                    let sx = over_x + (target_x - over_x) * t;
+                    let sy = (end_y + (y - end_y) * t + random_f64_range(-0.8, 0.8)).max(0.0);
+                    release.move_to(sx.max(0.0), sy).await?;
+                    sleep(Duration::from_millis(random_range(20, 60))).await;
+                }
+            }
+
+            sleep(Duration::from_millis(random_range(30, 100))).await;
+            release.x = target_x;
+            release.y = y;
+            Ok(())
+        }
+        .await;
+        release.release().await.and(moved)
+    }
+
+    /// Drag on a horizontal track without overshoot, reversal or vertical drift.
+    /// Intended for bounded sliders whose target is the end of the track.
+    /// Shares the ownership and cancellation contract of [`Human::drag_by`].
+    pub async fn drag_horizontal_by(&self, x: f64, y: f64, dx: f64) -> Result<()> {
+        validate_drag(x, y, dx)?;
+        let mut release = self.approach_drag(x, y).await?;
+        sleep(Duration::from_millis(100)).await;
+        let moved = async {
+            release.press().await?;
+            let (points, delay) = match self.speed {
+                HumanSpeed::Fast => (25, 20),
+                HumanSpeed::Normal => (60, 20),
+                HumanSpeed::Slow => (100, 25),
+            };
+            sleep(Duration::from_millis(100)).await;
+            for i in 1..=points {
+                let t = i as f64 / points as f64;
+                let next_x = x + dx * (t * t * (3.0 - 2.0 * t));
+                release.move_to(next_x, y).await?;
+                sleep(Duration::from_millis(delay)).await;
+            }
+            Ok(())
+        }
+        .await;
+        release.release().await.and(moved)
     }
 
     /// Type text with human-like timing

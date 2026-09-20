@@ -203,6 +203,54 @@ detached, fragmented and degenerate boxes fail. This is geometry, not a
 visibility/hit-test guarantee. Temporary remote objects are released on success;
 errors/cancellation schedule bounded best-effort cleanup.
 
+`page.frame_point_to_viewport(frame_id, x, y)` converts frame-local CSS points to
+root-page viewport coordinates, including nested/OOPIF borders, padding, scrolling
+and positive axis-aligned scaling/translation. Unsupported transforms, hidden
+owners and points outside ancestor viewports fail closed. Native owner quads
+also catch reflections through closed shadow slots. This does not guarantee that
+an overlay will not intercept input; wait for rendering after layout changes.
+
+### Horizontal dragging and cleanup
+
+`page.human_drag(selector, dx)` and `element.human_drag_by(dx)` provide human-like
+horizontal drags. `Human::drag_by(x, y, dx)` includes overshoot and settling;
+`Human::drag_horizontal_by(x, y, dx)` stays at a fixed Y with monotonic X motion.
+Both support negative displacement and validate coordinates before input.
+
+A drag exclusively owns the existing per-target input coordinator, preserves
+other held buttons and rejects an already-held left button without releasing it.
+Native mouse pressure is 0.5 while buttons are held and zero when unpressed;
+wheel events leave pressure unset. Cancellation schedules a bounded release on
+the active runtime. Retain the helper to confirm cleanup before further input:
+
+```rust
+let human = page.human();
+let result = tokio::time::timeout(
+    std::time::Duration::from_secs(5),
+    human.drag_horizontal_by(120.0, 120.0, 150.0),
+).await;
+human.finish_drag_cleanup().await?;
+result??;
+```
+
+Cleanup may take up to three additional seconds. Cancelling the cleanup wait
+retains its tasks/results for another call. Dropping the helper permits best-effort
+release but cannot confirm success; failures or a lost runtime require inspection.
+
+### Frame response capture
+
+`page.capture_frame_responses(frame_id, FrameResponseCaptureOptions::default())`
+starts bounded response-stage capture scoped to exactly one page-owned frame,
+not its descendants. It uses a dedicated CDP session; records can survive immediate
+frame removal. `snapshot()` reads retained evidence and `stop().await` confirms
+worker cleanup. Drop requests cleanup without waiting.
+
+Bodies and headers are opt-in and may contain secrets. Defaults retain at most
+128 records, 64 KiB per body and 1 MiB of body data in total. Reports expose loss,
+truncation, body and continuation errors. Body limits bound retained evidence,
+not transient CDP payloads. Debug output omits body/header values. Fetch headers
+are not authoritative evidence of cookies actually sent on the wire.
+
 ### Low-level request ownership
 
 `eoka::cdp::Transport` provides an opt-in request-stage Fetch route per session:
@@ -248,6 +296,17 @@ let page2 = browser.new_page("https://b.com").await?;
 browser.activate_tab(page1.target_id()).await?;
 browser.close_tab(page2.target_id()).await?;
 ```
+
+### Browser ownership and debugging ports
+
+Explicit `--remote-debugging-port` arguments are preserved. Live launches without
+an explicit port use a nonzero loopback-selected port, and explicit/nonzero
+launches do not trust a stale profile `DevToolsActivePort`. Chrome stderr continues
+to be drained after discovery.
+
+`close()` gracefully closes owned browsers, including live-mode launches, allowing
+up to five seconds for Chrome to flush persistent state before termination.
+Attached browsers are only disconnected, even when attached with a non-live config.
 
 ### Connect to an existing Chrome
 

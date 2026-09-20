@@ -55,6 +55,13 @@ impl Element {
         self.page.human().move_and_click(x, y).await
     }
 
+    /// Drag horizontally from this element's center using human-like motion.
+    /// See [`crate::stealth::Human::drag_by`] for ownership and cleanup semantics.
+    pub async fn human_drag_by(&self, dx: f64) -> Result<()> {
+        let (x, y) = self.center().await?;
+        self.page.human().drag_by(x, y, dx).await
+    }
+
     /// Get outer HTML
     pub async fn outer_html(&self) -> Result<String> {
         self.page.session.get_outer_html(self.node_id).await

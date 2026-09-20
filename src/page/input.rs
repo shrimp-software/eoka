@@ -1,3 +1,6 @@
+mod drag;
+pub(crate) use drag::DragInput;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -249,6 +252,7 @@ pub(crate) async fn coordinated_mouse_wheel(
             button: None,
             click_count: None,
             buttons: (buttons != 0).then_some(buttons),
+            force: None,
             delta_x: Some(delta_x),
             delta_y: Some(delta_y),
         })
@@ -333,6 +337,7 @@ async fn dispatch_coordinated_mouse_event(
             button: button.map(MouseButton::cdp),
             click_count,
             buttons: (buttons != 0).then_some(buttons),
+            force: Some(if buttons == 0 { 0.0 } else { 0.5 }),
             delta_x: None,
             delta_y: None,
         })
@@ -469,6 +474,7 @@ impl Page {
                 button: button.map(MouseButton::cdp),
                 click_count,
                 buttons: (buttons != 0).then_some(buttons),
+                force: Some(if buttons == 0 { 0.0 } else { 0.5 }),
                 delta_x: None,
                 delta_y: None,
             })
