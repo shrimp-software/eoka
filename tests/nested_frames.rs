@@ -206,6 +206,10 @@ async fn nested_frame_routing_ancestry_native_quads_and_stale_ids() {
             .frame_point_to_viewport(&inner.id, 60.0, 60.0)
             .await
             .is_err());
+        assert!(other
+            .frame_point_for_input(&inner.id, 60.0, 60.0)
+            .await
+            .is_err());
         assert!(other.frame_ancestor_ids(&inner.id).await.is_err());
         assert!(other
             .frame_element_content_quad(&inner.id, "#target", 0)
@@ -231,6 +235,10 @@ async fn nested_frame_routing_ancestry_native_quads_and_stale_ids() {
             .frame_point_to_viewport(&inner.id, 60.0, 60.0)
             .await
             .is_err());
+        assert!(page
+            .frame_point_for_input(&inner.id, 60.0, 60.0)
+            .await
+            .is_err());
         browser.close().await.unwrap();
     }
 }
@@ -248,6 +256,41 @@ async fn assert_coordinates(page: &Page, frame_id: &str) {
         .unwrap();
     assert!((x - 164.0).abs() < 1.0, "x={x}");
     assert!((y - 184.0).abs() < 1.0, "y={y}");
+    assert_eq!(
+        page.frame_point_for_input(frame_id, 60.0, 60.0)
+            .await
+            .unwrap(),
+        (x, y)
+    );
+    for ancestor in page.frame_ancestor_ids(frame_id).await.unwrap() {
+        for tag in ["div", "iframe"] {
+            page.evaluate_in_frame_id::<bool>(&ancestor, &format!("(() => {{const cover=document.createElement('{tag}');cover.id='input-cover';cover.style='position:fixed;inset:0;width:100%;height:100%;border:0;z-index:10000';document.body.appendChild(cover);return true}})()")).await.unwrap();
+            assert!(
+                page.frame_point_for_input(frame_id, 60.0, 60.0)
+                    .await
+                    .is_err(),
+                "{tag} overlay in {ancestor} accepted"
+            );
+            assert_eq!(
+                page.frame_point_to_viewport(frame_id, 60.0, 60.0)
+                    .await
+                    .unwrap(),
+                (x, y)
+            );
+            page.evaluate_in_frame_id::<bool>(
+                &ancestor,
+                "(document.querySelector('#input-cover').remove(),true)",
+            )
+            .await
+            .unwrap();
+        }
+    }
+    assert_eq!(
+        page.frame_point_for_input(frame_id, 60.0, 60.0)
+            .await
+            .unwrap(),
+        (x, y)
+    );
     page.click_at(x, y).await.unwrap();
     let clicked: [f64; 2] = page
         .evaluate_in_frame_id(frame_id, "JSON.parse(document.body.dataset.clicked)")
@@ -262,6 +305,12 @@ async fn assert_coordinates(page: &Page, frame_id: &str) {
         .unwrap();
     assert!((scaled.0 - 158.2).abs() < 1.0, "scaled={scaled:?}");
     assert!((scaled.1 - 181.2).abs() < 1.0, "scaled={scaled:?}");
+    assert_eq!(
+        page.frame_point_for_input(frame_id, 60.0, 60.0)
+            .await
+            .unwrap(),
+        scaled
+    );
     page.evaluate_in_frame_id::<bool>(frame_id, "(delete document.body.dataset.clicked, true)")
         .await
         .unwrap();
@@ -301,6 +350,13 @@ async fn assert_coordinates(page: &Page, frame_id: &str) {
         .await
         .unwrap();
     assert!((scrolled_y - 169.0).abs() < 1.0, "scrolled_y={scrolled_y}");
+    assert_eq!(
+        page.frame_point_for_input(frame_id, 60.0, 60.0)
+            .await
+            .unwrap()
+            .1,
+        scrolled_y
+    );
     let _: bool = page
         .evaluate_sync("(document.querySelector('iframe').style.display='none', true)")
         .await

@@ -243,6 +243,16 @@ const OWNER_GEOMETRY: &str = r#"function() {
         unsupported:unsupported || !this.getClientRects().length};
 }"#;
 
+const OWNER_HIT_TEST: &str = r#"function(x, y) {
+    let hit = this.ownerDocument.elementFromPoint(x, y);
+    for (let depth = 0; hit?.shadowRoot && depth < 64; depth++) {
+        const inner = hit.shadowRoot.elementFromPoint(x, y);
+        if (inner === hit) break;
+        hit = inner;
+    }
+    return hit === this;
+}"#;
+
 impl Page {
     pub(super) async fn frame_target_id(&self, frame_id: &str) -> Result<String> {
         let snapshot = Snapshot::capture(self).await?;
@@ -259,6 +269,31 @@ impl Page {
         frame_id: &str,
         x: f64,
         y: f64,
+    ) -> Result<(f64, f64)> {
+        self.map_frame_point(frame_id, x, y, false).await
+    }
+
+    /// Map a frame-local input point to the root viewport, rejecting covered iframe owners.
+    /// Each parent document must hit its owning iframe at the mapped point.
+    /// Includes the geometry checks of [`Page::frame_point_to_viewport`].
+    /// Does not hit-test a leaf element or prevent mutations after this snapshot;
+    /// callers must validate their target and dispatch input without changing the point.
+    /// Inaccessible shadow-root hit paths fail closed.
+    pub async fn frame_point_for_input(
+        &self,
+        frame_id: &str,
+        x: f64,
+        y: f64,
+    ) -> Result<(f64, f64)> {
+        self.map_frame_point(frame_id, x, y, true).await
+    }
+
+    async fn map_frame_point(
+        &self,
+        frame_id: &str,
+        x: f64,
+        y: f64,
+        hit_test: bool,
     ) -> Result<(f64, f64)> {
         if !x.is_finite() || !y.is_finite() {
             return Err(Error::cdp_msg("Frame coordinates must be finite"));
@@ -323,7 +358,6 @@ impl Page {
                 )
                 .await;
             let geometry: Geometry = self.eval_impl(result?)?;
-            objects.release().await?;
             if geometry.unsupported
                 || geometry.width <= 0.0
                 || geometry.height <= 0.0
@@ -341,6 +375,26 @@ impl Page {
             }
             x = geometry.x + x * geometry.scale_x;
             y = geometry.y + y * geometry.scale_y;
+            if hit_test {
+                let result: RuntimeEvaluateResult = parent
+                    .session
+                    .send(
+                        "Runtime.callFunctionOn",
+                        &json!({
+                            "objectId": object_id,
+                            "functionDeclaration": OWNER_HIT_TEST,
+                            "arguments":[{"value":x},{"value":y}],
+                            "returnByValue":true,
+                        }),
+                    )
+                    .await?;
+                if !self.eval_impl::<bool>(result)? {
+                    return Err(Error::cdp_msg(
+                        "Frame input point is covered by another element",
+                    ));
+                }
+            }
+            objects.release().await?;
             id = parent_id;
         }
     }

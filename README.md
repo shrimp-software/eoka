@@ -208,6 +208,12 @@ root viewport through nested/OOPIF borders, padding, scrolling and positive scal
 Hidden, reflected, rotated or out-of-viewport geometry is rejected, including
 closed shadow slots. Wait for rendering after layout changes; this is not a hit test.
 
+For input, `page.frame_point_for_input(frame_id, x, y)` also requires each parent
+document to hit the owning iframe at the mapped point. Overlays (including other
+iframes) and inaccessible shadow-root hit paths are rejected. Validate the leaf
+element separately and use the returned point unchanged; these are snapshot-time
+checks, not protection against subsequent page mutation.
+
 ### Horizontal dragging and cleanup
 
 `page.human_drag(selector, dx)`, `element.human_drag_by(dx)` and
