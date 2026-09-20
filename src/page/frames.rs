@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{FrameInfo, Page};
+use super::{escape_js_string, FrameInfo, Page};
 use crate::cdp::{Frame, FrameTree, RuntimeEvaluateResult, Session, TargetGetTargets};
 use crate::error::{Error, Result};
 
@@ -200,6 +200,41 @@ impl Snapshot {
 }
 
 impl Page {
+    /// Get this page's frame tree, including nested out-of-process iframe targets.
+    pub async fn frames(&self) -> Result<Vec<FrameInfo>> {
+        self.nested_frame_infos().await
+    }
+
+    /// Execute JavaScript inside an iframe.
+    ///
+    /// # Safety
+    ///
+    /// `expression` is evaluated as **code** (via the `Function` constructor),
+    /// not as a string literal. Do not pass untrusted user input as the
+    /// expression — it will be executed in the iframe's JS context.
+    pub async fn evaluate_in_frame<T: serde::de::DeserializeOwned>(
+        &self,
+        frame_selector: &str,
+        expression: &str,
+    ) -> Result<T> {
+        let escaped_frame = escape_js_string(frame_selector);
+        let escaped_expr = escape_js_string(expression);
+
+        // Use Function constructor instead of eval (less likely to be blocked by CSP)
+        let js = format!(
+            r#"
+            (() => {{
+                const iframe = document.querySelector('{escaped_frame}');
+                if (!iframe || !iframe.contentWindow) throw new Error('Frame not found: {escaped_frame}');
+                const _exec = new iframe.contentWindow.Function('return (' + '{escaped_expr}' + ')');
+                return _exec.call(iframe.contentWindow);
+            }})()
+            "#,
+        );
+
+        self.evaluate(&js).await
+    }
+
     /// Return snapshot-time ancestor IDs, from the immediate parent to this page's root.
     ///
     /// The queried frame is excluded; the root has no ancestors. Stale or unrelated
