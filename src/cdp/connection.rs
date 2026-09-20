@@ -10,12 +10,30 @@ use super::types::*;
 use crate::error::Result;
 use crate::page::HeldInputState;
 
+type HeldInputRegistry = Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<HeldInputState>>>>>;
+
+fn held_input_for_target(
+    registry: &HeldInputRegistry,
+    target_id: &str,
+) -> Arc<tokio::sync::Mutex<HeldInputState>> {
+    let mut held_inputs = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    held_inputs.retain(|_, state| state.strong_count() != 0);
+    if let Some(state) = held_inputs.get(target_id).and_then(Weak::upgrade) {
+        return state;
+    }
+    let state = Arc::new(tokio::sync::Mutex::new(HeldInputState::default()));
+    held_inputs.insert(target_id.to_string(), Arc::downgrade(&state));
+    state
+}
+
 /// A CDP connection to Chrome
 pub struct Connection {
     transport: Arc<Transport>,
     /// Held-input state scoped by browser target, not CDP attachment session.
     /// Weak entries avoid retaining stale state after all Page handles drop.
-    held_inputs: Mutex<HashMap<String, Weak<tokio::sync::Mutex<HeldInputState>>>>,
+    held_inputs: HeldInputRegistry,
 }
 
 impl Connection {
@@ -23,7 +41,7 @@ impl Connection {
     pub(crate) fn new(transport: Transport) -> Self {
         Self {
             transport: Arc::new(transport),
-            held_inputs: Mutex::new(HashMap::new()),
+            held_inputs: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -77,7 +95,8 @@ impl Connection {
             transport: Arc::clone(&self.transport),
             session_id: result.session_id,
             target_id: target_id.to_string(),
-            held_input: self.held_input_for_target(target_id),
+            held_input: held_input_for_target(&self.held_inputs, target_id),
+            held_inputs: Arc::clone(&self.held_inputs),
         })
     }
 
@@ -105,21 +124,6 @@ impl Connection {
             .send("Target.getTargets", &TargetGetTargets {})
             .await?;
         Ok(result.target_infos)
-    }
-
-    fn held_input_for_target(&self, target_id: &str) -> Arc<tokio::sync::Mutex<HeldInputState>> {
-        let mut held_inputs = self
-            .held_inputs
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        held_inputs.retain(|_, state| state.strong_count() != 0);
-        if let Some(state) = held_inputs.get(target_id).and_then(Weak::upgrade) {
-            return state;
-        }
-
-        let state = Arc::new(tokio::sync::Mutex::new(HeldInputState::default()));
-        held_inputs.insert(target_id.to_string(), Arc::downgrade(&state));
-        state
     }
 
     fn remove_held_input(&self, target_id: &str) {
@@ -159,8 +163,8 @@ impl Connection {
     }
 }
 
-/// A CDP session attached to a specific target. Cheap to clone (an `Arc` + two
-/// small strings) — clones share the same underlying transport/target.
+/// A CDP session attached to a specific target. Cheap to clone; clones share
+/// the underlying transport and per-target held-input state.
 #[derive(Clone)]
 pub struct Session {
     transport: Arc<Transport>,
@@ -168,6 +172,7 @@ pub struct Session {
     target_id: String,
     /// Per-target native input state shared by Page and Human helpers.
     held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
+    held_inputs: HeldInputRegistry,
 }
 
 impl Session {
@@ -189,6 +194,69 @@ impl Session {
     /// Return the per-target held-input coordinator state.
     pub(crate) fn held_input(&self) -> Arc<tokio::sync::Mutex<HeldInputState>> {
         Arc::clone(&self.held_input)
+    }
+
+    pub(crate) async fn attach_frame_target(&self, target_id: &str) -> Result<Session> {
+        let result: TargetAttachToTargetResult = self
+            .transport
+            .send(
+                "Target.attachToTarget",
+                &TargetAttachToTarget {
+                    target_id: target_id.to_string(),
+                    flatten: Some(true),
+                },
+            )
+            .await?;
+        Ok(Session {
+            transport: Arc::clone(&self.transport),
+            session_id: result.session_id,
+            target_id: target_id.to_string(),
+            held_input: held_input_for_target(&self.held_inputs, target_id),
+            held_inputs: Arc::clone(&self.held_inputs),
+        })
+    }
+
+    pub(crate) async fn detach(&self) -> Result<()> {
+        self.transport
+            .send::<_, serde_json::Value>(
+                "Target.detachFromTarget",
+                &serde_json::json!({"sessionId":self.session_id}),
+            )
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn create_isolated_world(&self, frame_id: &str) -> Result<i64> {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct World {
+            execution_context_id: i64,
+        }
+
+        let result: World = self
+            .send(
+                "Page.createIsolatedWorld",
+                &serde_json::json!({
+                    "frameId":frame_id, "worldName":"eoka", "grantUniveralAccess":false,
+                }),
+            )
+            .await?;
+        Ok(result.execution_context_id)
+    }
+
+    pub(crate) async fn evaluate_in_context(
+        &self,
+        expression: &str,
+        context_id: i64,
+    ) -> Result<RuntimeEvaluateResult> {
+        self.send(
+            "Runtime.evaluate",
+            &serde_json::json!({
+                "expression":expression, "contextId":context_id,
+                "returnByValue":true, "awaitPromise":true,
+            }),
+        )
+        .await
     }
 
     /// Send a command to this session
