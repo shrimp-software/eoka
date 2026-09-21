@@ -22,8 +22,70 @@ pub(crate) fn parse_key_combo(combo: &str) -> (i32, &str) {
     (mods, key)
 }
 
+const PRINTABLE_KEYS: &[(&str, &str, &str, i32)] = &[
+    ("0", ")", "Digit0", 48),
+    ("1", "!", "Digit1", 49),
+    ("2", "@", "Digit2", 50),
+    ("3", "#", "Digit3", 51),
+    ("4", "$", "Digit4", 52),
+    ("5", "%", "Digit5", 53),
+    ("6", "^", "Digit6", 54),
+    ("7", "&", "Digit7", 55),
+    ("8", "*", "Digit8", 56),
+    ("9", "(", "Digit9", 57),
+    (";", ":", "Semicolon", 186),
+    ("=", "+", "Equal", 187),
+    (",", "<", "Comma", 188),
+    ("-", "_", "Minus", 189),
+    (".", ">", "Period", 190),
+    ("/", "?", "Slash", 191),
+    ("`", "~", "Backquote", 192),
+    ("[", "{", "BracketLeft", 219),
+    ("\\", "|", "Backslash", 220),
+    ("]", "}", "BracketRight", 221),
+    ("'", "\"", "Quote", 222),
+    (" ", " ", "Space", 32),
+];
+
+pub(crate) fn key_for_modifiers(key: &str, modifiers: i32) -> String {
+    if modifiers & crate::cdp::modifiers::SHIFT == 0 {
+        return key.to_owned();
+    }
+    if key.len() == 1 && key.as_bytes()[0].is_ascii_alphabetic() {
+        return key.to_ascii_uppercase();
+    }
+    PRINTABLE_KEYS
+        .iter()
+        .find(|(base, _, _, _)| *base == key)
+        .map_or(key, |(_, shifted, _, _)| *shifted)
+        .to_owned()
+}
+
+pub(crate) fn key_text(key: &str) -> Option<&str> {
+    if key == "Enter" {
+        return Some("\r");
+    }
+    let mut chars = key.chars();
+    let ch = chars.next()?;
+    (!ch.is_control() && chars.next().is_none()).then_some(key)
+}
+
 pub(crate) fn key_to_codes(key: &str) -> (&str, &str, Option<i32>) {
+    if let Some((_, _, code, vk)) = PRINTABLE_KEYS
+        .iter()
+        .find(|(base, shifted, _, _)| *base == key || *shifted == key)
+    {
+        return (key, code, Some(*vk));
+    }
     static KEYS: &[(&str, &str, &str, i32)] = &[
+        ("ctrl", "Control", "ControlLeft", 17),
+        ("control", "Control", "ControlLeft", 17),
+        ("alt", "Alt", "AltLeft", 18),
+        ("option", "Alt", "AltLeft", 18),
+        ("shift", "Shift", "ShiftLeft", 16),
+        ("cmd", "Meta", "MetaLeft", 91),
+        ("meta", "Meta", "MetaLeft", 91),
+        ("command", "Meta", "MetaLeft", 91),
         ("enter", "Enter", "Enter", 13),
         ("return", "Enter", "Enter", 13),
         ("tab", "Tab", "Tab", 9),
@@ -86,8 +148,14 @@ pub(crate) fn key_to_codes(key: &str) -> (&str, &str, Option<i32>) {
     let lower = key.to_lowercase();
     KEYS.iter()
         .find(|(name, _, _, _)| *name == lower)
-        .map(|(_, k, c, vk)| (*k, *c, Some(*vk)))
-        .unwrap_or((key, key, None))
+        .map(|(_, k, c, vk)| {
+            (
+                if key.chars().count() == 1 { key } else { *k },
+                *c,
+                Some(*vk),
+            )
+        })
+        .unwrap_or((key, if key.chars().count() == 1 { "" } else { key }, None))
 }
 
 #[cfg(test)]
@@ -189,6 +257,27 @@ mod tests {
         assert_eq!(key, "ArrowUp");
         assert_eq!(code, "ArrowUp");
         assert_eq!(vk, Some(38));
+    }
+
+    #[test]
+    fn printable_layout_preserves_literals_and_maps_shift() {
+        use crate::cdp::modifiers::SHIFT;
+        for &(base, shifted, code, vk) in PRINTABLE_KEYS {
+            assert_eq!(key_to_codes(base), (base, code, Some(vk)));
+            assert_eq!(key_to_codes(shifted), (shifted, code, Some(vk)));
+            assert_eq!(key_for_modifiers(base, SHIFT), shifted);
+            assert_eq!(key_for_modifiers(shifted, SHIFT), shifted);
+        }
+        assert_eq!(key_to_codes("O"), ("O", "KeyO", Some(79)));
+        assert_eq!(key_to_codes("Shift"), ("Shift", "ShiftLeft", Some(16)));
+        assert_eq!(key_to_codes("Ctrl"), ("Control", "ControlLeft", Some(17)));
+        for key in ["é", "😀"] {
+            assert_eq!(key_to_codes(key), (key, "", None));
+            assert_eq!(key_text(key), Some(key));
+            assert_eq!(key_for_modifiers(key, SHIFT), key);
+        }
+        assert_eq!(key_text("some text"), None);
+        assert_eq!(key_text("\u{0001}"), None);
     }
 
     #[test]
