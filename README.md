@@ -152,6 +152,13 @@ elem.scroll_into_view().await?;
 
 ### Keyboard, Hover, Select, Upload
 
+Printable `press_key` / `key_down` events carry native text: `"o"` inserts `o`,
+`"O"` inserts `O`, and `"Shift+o"` inserts `O`. Shift uses US-keyboard ASCII
+mappings; single Unicode characters are literal. Ctrl/Alt/Meta shortcuts, key-up
+and input cleanup do not insert text. Browser focus, read-only fields and page
+`preventDefault()` handlers still determine whether an edit occurs. For whole
+strings or composed text, use `type_text`.
+
 ```rust
 page.press_key("Enter").await?;
 page.press_key("Ctrl+A").await?;

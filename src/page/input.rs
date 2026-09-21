@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::{sleep_ms, MouseButton, Page, INTERACTION_DELAY_MS};
 use crate::cdp::{MouseButton as CdpMouseButton, MouseEventType, Session};
 use crate::error::{Error, Result};
-use crate::keyboard::{key_to_codes, parse_key_combo};
+use crate::keyboard::{key_for_modifiers, key_text, key_to_codes, parse_key_combo};
 use crate::stealth::Human;
 
 impl MouseButton {
@@ -344,6 +344,39 @@ async fn dispatch_coordinated_mouse_event(
         .await
 }
 
+fn key_event(
+    held_key: &HeldKey,
+    event_type: crate::cdp::KeyEventType,
+    modifiers: i32,
+) -> crate::cdp::InputDispatchKeyEventFull {
+    use crate::cdp::{
+        modifiers::{ALT, CTRL, META},
+        KeyEventType,
+    };
+
+    let key = key_for_modifiers(&held_key.key, modifiers);
+    let text =
+        if matches!(event_type, KeyEventType::KeyDown) && modifiers & (ALT | CTRL | META) == 0 {
+            key_text(&key).map(str::to_owned)
+        } else {
+            None
+        };
+    let unmodified_text = text
+        .as_ref()
+        .and_then(|_| key_text(&held_key.key))
+        .map(str::to_owned);
+    crate::cdp::InputDispatchKeyEventFull {
+        r#type: event_type,
+        modifiers: (modifiers != 0).then_some(modifiers),
+        key: Some(key),
+        code: Some(held_key.code.clone()),
+        text,
+        unmodified_text,
+        windows_virtual_key_code: held_key.virtual_key_code,
+        native_virtual_key_code: held_key.virtual_key_code,
+    }
+}
+
 async fn dispatch_coordinated_key_event(
     session: &Session,
     held_key: &HeldKey,
@@ -351,15 +384,7 @@ async fn dispatch_coordinated_key_event(
     modifiers: i32,
 ) -> Result<()> {
     session
-        .dispatch_key_event_full(crate::cdp::InputDispatchKeyEventFull {
-            r#type: event_type,
-            modifiers: (modifiers != 0).then_some(modifiers),
-            key: Some(held_key.key.clone()),
-            code: Some(held_key.code.clone()),
-            windows_virtual_key_code: held_key.virtual_key_code,
-            native_virtual_key_code: held_key.virtual_key_code,
-            ..Default::default()
-        })
+        .dispatch_key_event_full(key_event(held_key, event_type, modifiers))
         .await
 }
 
@@ -494,6 +519,12 @@ impl Page {
     }
 
     /// Press key with optional modifiers (e.g., "Enter", "Ctrl+A", "Cmd+Shift+S").
+    ///
+    /// Printable keys retain their case and carry text on key-down, so Chrome
+    /// generates native editing events unless the page cancels the default action.
+    /// Shift uses US-keyboard ASCII mappings; other single Unicode characters are
+    /// sent literally. Control, Alt and Meta suppress text. For complete strings
+    /// or composed text, use [`Page::type_text`] rather than a key combination.
     pub async fn press_key(&self, key: &str) -> Result<()> {
         self.key_down(key).await?;
         sleep_ms(INTERACTION_DELAY_MS).await;
@@ -504,7 +535,9 @@ impl Page {
     ///
     /// For example, `key_down("Ctrl+A")` dispatches `A` with the Control
     /// modifier. To hold a modifier across calls, use `key_down("Ctrl")`,
-    /// then call `key_down("A")`. Duplicate key-down calls return
+    /// then call `key_down("A")`. Printable key-downs can insert text; key-up and
+    /// cleanup never insert text. A literal `"A"` means uppercase, while `"a"`
+    /// means lowercase unless Shift is held. Duplicate key-down calls return
     /// [`Error::InputState`].
     pub async fn key_down(&self, key: &str) -> Result<()> {
         coordinated_key_down(&self.session, &self.held_input, key).await
@@ -551,6 +584,40 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_payload_carries_text_only_on_unmodified_or_shift_key_down() {
+        use crate::cdp::{
+            modifiers::{ALT, CTRL, META, SHIFT},
+            KeyEventType,
+        };
+        let (_, key) = held_key_from_combo("o");
+        for modifiers in [0, SHIFT, CTRL, ALT, META, CTRL | SHIFT] {
+            let down = key_event(&key, KeyEventType::KeyDown, modifiers);
+            assert_eq!(
+                down.key.as_deref(),
+                Some(if modifiers & SHIFT != 0 { "O" } else { "o" })
+            );
+            let expected = match modifiers {
+                0 => Some("o"),
+                SHIFT => Some("O"),
+                _ => None,
+            };
+            assert_eq!(down.text.as_deref(), expected);
+            assert_eq!(down.unmodified_text.as_deref(), expected.map(|_| "o"));
+            let up = key_event(&key, KeyEventType::KeyUp, modifiers);
+            assert!(up.text.is_none() && up.unmodified_text.is_none());
+        }
+        for name in ["Tab", "Backspace", "ArrowLeft", "Shift", "Ctrl"] {
+            let (_, key) = held_key_from_combo(name);
+            assert!(key_event(&key, KeyEventType::KeyDown, 0).text.is_none());
+        }
+        let (_, enter) = held_key_from_combo("Enter");
+        assert_eq!(
+            key_event(&enter, KeyEventType::KeyDown, 0).text.as_deref(),
+            Some("\r")
+        );
+    }
 
     #[test]
     fn mouse_reservation_is_included_in_its_dispatched_mask() {

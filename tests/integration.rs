@@ -800,13 +800,13 @@ async fn test_held_input_duplicate_attachment_shares_target_state() {
         .await
         .expect("Failed to press control");
     second
-        .key_down("A")
+        .key_down("a")
         .await
-        .expect("Second Page failed to press A");
+        .expect("Second Page failed to press a");
     second
-        .key_up("A")
+        .key_up("a")
         .await
-        .expect("Second Page failed to release A");
+        .expect("Second Page failed to release a");
     first
         .key_up("Ctrl")
         .await
@@ -884,7 +884,7 @@ async fn test_held_input_human_session_constructor_and_modifier_key_press() {
         .expect("Failed to press control");
     page.human()
         .with_speed(HumanSpeed::Fast)
-        .press_key("A")
+        .press_key("a")
         .await
         .expect("Human key press failed");
     page.key_up("Ctrl")
@@ -958,11 +958,11 @@ async fn test_held_input_serializes_clone_masks_and_current_key_up_modifiers() {
     page.key_down("Ctrl")
         .await
         .expect("Failed to press control");
-    page.key_down("A").await.expect("Failed to press A");
+    page.key_down("a").await.expect("Failed to press a");
     page.key_up("Ctrl")
         .await
         .expect("Failed to release control");
-    page.key_up("A").await.expect("Failed to release A");
+    page.key_up("a").await.expect("Failed to release a");
     let key_events: Vec<String> = page
         .evaluate("window.keyEvents")
         .await
