@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{escape_js_string, FrameInfo, Page};
+use super::{FrameInfo, Page};
 use crate::cdp::{Frame, FrameTree, RuntimeEvaluateResult, Session, TargetGetTargets};
 use crate::error::{Error, Result};
 
@@ -44,19 +44,19 @@ impl Drop for AttachedFrame {
     }
 }
 
-struct FrameQuadObjects {
+struct FrameObjects {
     session: Session,
     group: String,
     active: bool,
 }
 
-impl FrameQuadObjects {
+impl FrameObjects {
     fn new(session: Session) -> Self {
         static NEXT_GROUP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
             session,
             group: format!(
-                "eoka-frame-quad-{}",
+                "eoka-frame-objects-{}",
                 NEXT_GROUP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ),
             active: true,
@@ -64,31 +64,31 @@ impl FrameQuadObjects {
     }
 
     async fn release(mut self) -> Result<()> {
-        release_quad_objects(&self.session, &self.group).await?;
+        release_frame_objects(&self.session, &self.group).await?;
         self.active = false;
         Ok(())
     }
 }
 
-async fn release_quad_objects(session: &Session, group: &str) -> Result<()> {
+async fn release_frame_objects(session: &Session, group: &str) -> Result<()> {
     tokio::time::timeout(
         std::time::Duration::from_secs(2),
         session.send::<_, Value>("Runtime.releaseObjectGroup", &json!({"objectGroup":group})),
     )
     .await
-    .map_err(|_| Error::cdp_msg("Frame quad object cleanup timed out"))??;
+    .map_err(|_| Error::cdp_msg("Frame object cleanup timed out"))??;
     Ok(())
 }
 
-impl Drop for FrameQuadObjects {
+impl Drop for FrameObjects {
     fn drop(&mut self) {
         if self.active {
             let session = self.session.clone();
             let group = self.group.clone();
             if let Ok(runtime) = tokio::runtime::Handle::try_current() {
                 runtime.spawn(async move {
-                    if release_quad_objects(&session, &group).await.is_err() {
-                        tracing::debug!("Frame quad object cleanup unconfirmed");
+                    if release_frame_objects(&session, &group).await.is_err() {
+                        tracing::debug!("Frame object cleanup unconfirmed");
                     }
                 });
             }
@@ -324,7 +324,7 @@ impl Page {
                 .send("DOM.getFrameOwner", &json!({"frameId": id}))
                 .await?;
             let parent_context = parent.session.create_isolated_world(parent_id).await?;
-            let objects = FrameQuadObjects::new(parent.session.clone());
+            let objects = FrameObjects::new(parent.session.clone());
             let resolved: Value = parent.session.send("DOM.resolveNode", &json!({
                 "backendNodeId": owner.backend_node_id, "executionContextId": parent_context,
                 "objectGroup":objects.group,
@@ -404,34 +404,52 @@ impl Page {
         self.nested_frame_infos().await
     }
 
-    /// Execute JavaScript inside an iframe.
+    /// Evaluate JavaScript in an iframe selected by CSS in this page's top document.
     ///
-    /// # Safety
+    /// The selector must match exactly one `iframe` or `frame` element. Frame URLs
+    /// and numeric indices are not selectors; use [`Page::evaluate_in_frame_id`]
+    /// with IDs from [`Page::frames`] for nested frames or explicit selection.
+    /// Cross-origin/OOPIF frames are routed through CDP, in an isolated world:
+    /// DOM access works, but page-owned JavaScript globals are not available.
+    /// No parent-to-child `contentWindow` access or `Function` constructor is used.
     ///
-    /// `expression` is evaluated as **code** (via the `Function` constructor),
-    /// not as a string literal. Do not pass untrusted user input as the
-    /// expression — it will be executed in the iframe's JS context.
+    /// `expression` is executed as code. Do not supply untrusted code.
     pub async fn evaluate_in_frame<T: serde::de::DeserializeOwned>(
         &self,
         frame_selector: &str,
         expression: &str,
     ) -> Result<T> {
-        let escaped_frame = escape_js_string(frame_selector);
-        let escaped_expr = escape_js_string(expression);
-
-        // Use Function constructor instead of eval (less likely to be blocked by CSP)
-        let js = format!(
-            r#"
-            (() => {{
-                const iframe = document.querySelector('{escaped_frame}');
-                if (!iframe || !iframe.contentWindow) throw new Error('Frame not found: {escaped_frame}');
-                const _exec = new iframe.contentWindow.Function('return (' + '{escaped_expr}' + ')');
-                return _exec.call(iframe.contentWindow);
-            }})()
-            "#,
-        );
-
-        self.evaluate(&js).await
+        if frame_selector.len() > 4096 {
+            return Err(Error::cdp_msg("Frame selector exceeds 4096 bytes"));
+        }
+        let root = self.session.get_frame_tree().await?.frame.id;
+        let context = self.session.create_isolated_world(&root).await?;
+        let objects = FrameObjects::new(self.session.clone());
+        let selector = serde_json::to_string(frame_selector)?;
+        let selection = format!("(() => {{ const matches=document.querySelectorAll({selector}); if(matches.length!==1 || !['iframe','frame'].includes(matches[0].localName)) throw new Error('Frame selector must match exactly one iframe or frame element'); return matches[0]; }})()");
+        let remote: RuntimeEvaluateResult = self
+            .session
+            .send(
+                "Runtime.evaluate",
+                &json!({
+                    "expression":selection, "contextId":context, "objectGroup":objects.group,
+                    "returnByValue":false, "awaitPromise":false,
+                }),
+            )
+            .await?;
+        let object_id = self
+            .check_js_result(remote)?
+            .object_id
+            .ok_or_else(|| Error::cdp_msg("Frame element unavailable"))?;
+        let described: Value = self
+            .session
+            .send("DOM.describeNode", &json!({"objectId":object_id}))
+            .await?;
+        let frame_id = described["node"]["frameId"]
+            .as_str()
+            .ok_or_else(|| Error::cdp_msg("Selected frame has no attached document"))?;
+        objects.release().await?;
+        self.evaluate_in_frame_id(frame_id, expression).await
     }
 
     /// Return snapshot-time ancestor IDs, from the immediate parent to this page's root.
@@ -477,7 +495,7 @@ impl Page {
         let snapshot = Snapshot::capture(self).await?;
         let entry = snapshot.get(frame_id)?;
         let context = entry.session.create_isolated_world(frame_id).await?;
-        let objects = FrameQuadObjects::new(entry.session.clone());
+        let objects = FrameObjects::new(entry.session.clone());
         let selector = serde_json::to_string(selector)?;
         let expression = format!("(() => {{ const matches=document.querySelectorAll({selector}); if(matches.length>64 || !matches[{index}] || matches[{index}].getClientRects().length!==1) throw new Error('Unsupported frame quad selection'); return matches[{index}]; }})()");
         let remote: RuntimeEvaluateResult = entry
@@ -547,7 +565,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn frame_quad_objects_release_on_success_error_and_cancelled_replies() {
+    async fn frame_objects_release_on_success_error_and_cancelled_replies() {
         use futures_util::{SinkExt, StreamExt};
         use std::sync::{Arc, Mutex};
         use tokio_tungstenite::tungstenite::Message;

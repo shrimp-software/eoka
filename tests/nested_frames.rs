@@ -29,7 +29,7 @@ impl Fixture {
                     let path = request.split_whitespace().nth(1).unwrap_or("/");
                     let html = match path {
                         "/" => format!(r#"<style>body{{margin:0}} iframe{{position:absolute;left:60px;top:70px;width:500px;height:400px;border:5px solid black;padding:2px;}}</style><div id="open-host"><div id="closed-host"><iframe id="outer" src="http://{middle_host}:{port}/middle"></iframe></div></div>"#),
-                        "/middle" => format!(r#"<style>body{{margin:0}} iframe{{position:absolute;left:30px;top:40px;width:320px;height:200px;border:3px solid black;padding:4px;}}</style><iframe src="http://{inner_host}:{port}/inner"></iframe>"#),
+                        "/middle" => format!(r#"<style>body{{margin:0}} iframe{{position:absolute;left:30px;top:40px;width:320px;height:200px;border:3px solid black;padding:4px;}}</style><input id="email" type="email"><script>window.pageOnly=123</script><iframe src="http://{inner_host}:{port}/inner"></iframe>"#),
                         _ => r#"<style>body{margin:0}button{position:absolute;left:40px;top:40px;width:80px;height:60px}</style><button id="target">click</button><script>document.querySelector('button').onclick=e=>{document.body.dataset.clicked=JSON.stringify([e.clientX,e.clientY])}</script>"#.to_string(),
                     };
                     let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", html.len(), html);
@@ -98,6 +98,57 @@ async fn nested_frame_routing_ancestry_native_quads_and_stale_ids() {
             vec![ancestry[1].clone()]
         );
         assert!(page.frame_ancestor_ids("unrelated-id").await.is_err());
+        let form: Value = page.evaluate_in_frame("#outer", r#"(() => {
+            document.querySelector('#email').value='fixture@example.invalid';
+            document.body.dataset.calls=String(Number(document.body.dataset.calls || 0)+1);
+            return {host:location.hostname,email:document.querySelector('#email').value,mainGlobal:typeof pageOnly};
+        })()"#).await.unwrap();
+        assert_eq!(form["host"], if isolated { "b.test" } else { "a.test" });
+        assert_eq!(form["email"], "fixture@example.invalid");
+        assert_eq!(form["mainGlobal"], "undefined");
+        assert_eq!(
+            page.evaluate_in_frame::<String>("#outer", "document.body.dataset.calls")
+                .await
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            page.evaluate_in_frame::<Value>("#outer", "null")
+                .await
+                .unwrap(),
+            Value::Null
+        );
+        page.execute_sync(r#"document.querySelector('#outer').setAttribute('data-label',"a'b")"#)
+            .await
+            .unwrap();
+        assert_eq!(
+            page.evaluate_in_frame::<u32>(r#"iframe[data-label="a'b"]"#, "1+1")
+                .await
+                .unwrap(),
+            2
+        );
+        for invalid in ["0", "#missing", "body", fixture.url.as_str()] {
+            assert!(page
+                .evaluate_in_frame::<Value>(invalid, "document.body.dataset.wrong='yes'")
+                .await
+                .is_err());
+        }
+        page.execute_sync(
+            "document.body.appendChild(document.createElement('iframe')).id='duplicate-frame'",
+        )
+        .await
+        .unwrap();
+        assert!(page
+            .evaluate_in_frame::<Value>("iframe", "document.body.dataset.wrong='yes'")
+            .await
+            .is_err());
+        page.execute_sync("document.querySelector('#duplicate-frame').remove()")
+            .await
+            .unwrap();
+        assert!(!page
+            .evaluate_in_frame::<bool>("#outer", "'wrong' in document.body.dataset")
+            .await
+            .unwrap());
         let targets: Value = page
             .session()
             .transport()

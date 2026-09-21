@@ -188,8 +188,11 @@ for frame in page.frames().await? {
 ```
 
 `frames()` includes nested out-of-process iframes belonging to this page.
-ID-based evaluation uses an isolated world without enabling `Runtime`; it does
-not expose the page's main-world JavaScript globals. Ancestors are ordered from
+Both evaluation methods use CDP isolated worlds without enabling `Runtime`; they
+can access cross-origin frame DOM, but not page-owned JavaScript globals.
+`evaluate_in_frame` requires a CSS selector matching exactly one frame element in
+the top document; use IDs for nested frames. Bare URLs and numeric indices are
+not selectors. Ancestors are ordered from
 the immediate parent to the root, excluding the queried frame. These are
 snapshot APIs, not stable navigation identities; reacquire IDs after navigation.
 Explicit JavaScript `null` decodes as JSON null (or `None`); `undefined` still errors.
