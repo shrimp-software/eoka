@@ -188,8 +188,11 @@ for frame in page.frames().await? {
 ```
 
 `frames()` includes nested out-of-process iframes belonging to this page.
-ID-based evaluation uses an isolated world without enabling `Runtime`; it does
-not expose the page's main-world JavaScript globals. Ancestors are ordered from
+Both evaluation methods use CDP isolated worlds without enabling `Runtime`; they
+can access cross-origin frame DOM, but not page-owned JavaScript globals.
+`evaluate_in_frame` requires a CSS selector matching exactly one frame element in
+the top document; use IDs for nested frames. Bare URLs and numeric indices are
+not selectors. Ancestors are ordered from
 the immediate parent to the root, excluding the queried frame. These are
 snapshot APIs, not stable navigation identities; reacquire IDs after navigation.
 Explicit JavaScript `null` decodes as JSON null (or `None`); `undefined` still errors.
@@ -207,6 +210,12 @@ errors/cancellation schedule bounded best-effort cleanup.
 root viewport through nested/OOPIF borders, padding, scrolling and positive scaling.
 Hidden, reflected, rotated or out-of-viewport geometry is rejected, including
 closed shadow slots. Wait for rendering after layout changes; this is not a hit test.
+
+For input, `page.frame_point_for_input(frame_id, x, y)` also requires each parent
+document to hit the owning iframe at the mapped point. Overlays (including other
+iframes) and inaccessible shadow-root hit paths are rejected. Validate the leaf
+element separately and use the returned point unchanged; these are snapshot-time
+checks, not protection against subsequent page mutation.
 
 ### Horizontal dragging and cleanup
 
