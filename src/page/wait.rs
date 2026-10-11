@@ -1,4 +1,4 @@
-use super::{is_element_cdp_error, sleep_ms, Element, Page, INTERACTION_DELAY_MS};
+use super::{is_element_cdp_error, sleep_ms, Element, Page};
 use crate::error::{Error, Result};
 
 /// Polling interval (ms) used by wait_for_* loop iterations.
@@ -152,79 +152,16 @@ impl Page {
         .await
     }
 
-    /// Wait for network to become idle (no pending XHR/fetch for `idle_time_ms`)
+    /// Wait for the loaded top document's fetch/XHR requests to finish and stay
+    /// idle for `idle_time_ms`. Includes response bodies and requests started
+    /// before this call. WebSockets, workers and subframes are outside this scope.
+    /// Newly attached, previously untracked tabs require a full navigation or
+    /// reload first; Eoka never reloads automatically. The timeout bounds the
+    /// complete wait, including any pending header cleanup.
     pub async fn wait_for_network_idle(&self, idle_time_ms: u64, timeout_ms: u64) -> Result<()> {
-        let start = std::time::Instant::now();
-        let timeout = std::time::Duration::from_millis(timeout_ms);
-        let idle_duration = std::time::Duration::from_millis(idle_time_ms);
-
-        let key = &self.net_idle_key;
-        let check_idle_js = format!(
-            r#"
-            (() => {{
-                var K = '{key}';
-                if (window[K] === undefined) {{
-                    Object.defineProperty(window, K, {{
-                        value: {{ n: 0 }}, writable: true, enumerable: false, configurable: true
-                    }});
-                    var st = window[K];
-                    const of = window.fetch;
-                    const wf = function fetch(...a) {{
-                        st.n++;
-                        return of.apply(this, a).finally(() => {{ st.n--; }});
-                    }};
-                    try {{ wf.toString = () => 'function fetch() {{ [native code] }}'; }} catch(e) {{}}
-                    window.fetch = wf;
-                    const oo = XMLHttpRequest.prototype.open;
-                    const os = XMLHttpRequest.prototype.send;
-                    XMLHttpRequest.prototype.open = function(...a) {{ this[K] = true; return oo.apply(this, a); }};
-                    XMLHttpRequest.prototype.send = function(...a) {{
-                        if (this[K]) {{
-                            st.n++;
-                            this.addEventListener('loadend', () => {{ st.n--; }});
-                        }}
-                        return os.apply(this, a);
-                    }};
-                }}
-                var pend = window[K].n;
-                return (document.readyState === 'complete') ? pend : -1;
-            }})()
-        "#
-        );
-
-        let mut idle_start: Option<std::time::Instant> = None;
-
-        loop {
-            let pending: i32 = self.evaluate_sync(&check_idle_js).await?;
-
-            if pending == 0 {
-                match idle_start {
-                    Some(start) if start.elapsed() >= idle_duration => {
-                        return Ok(());
-                    }
-                    None => {
-                        idle_start = Some(std::time::Instant::now());
-                    }
-                    _ => {}
-                }
-            } else {
-                idle_start = None;
-            }
-
-            if start.elapsed() > timeout {
-                tracing::warn!(
-                    "wait_for_network_idle timed out after {}ms with {} pending request(s)",
-                    timeout_ms,
-                    pending
-                );
-                return Err(Error::Timeout(format!(
-                    "Network not idle after {}ms ({} pending requests)",
-                    timeout_ms, pending
-                )));
-            }
-
-            sleep_ms(INTERACTION_DELAY_MS).await;
-        }
+        self.session
+            .wait_for_network_idle(idle_time_ms, timeout_ms)
+            .await
     }
 
     /// Retry an operation multiple times with delays between attempts

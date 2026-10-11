@@ -151,6 +151,7 @@ impl Page {
     }
 
     /// Remove all extra HTTP headers set via set_extra_headers.
+    /// Also retries failed temporary-header cleanup on its original CDP session.
     pub async fn clear_extra_headers(&self) -> Result<()> {
         self.session.clear_extra_headers().await
     }

@@ -145,8 +145,6 @@ pub struct Page {
     /// CDP node IDs are positive, so zero represents an empty cache. Fetching
     /// twice during a race is harmless and avoids a poisonable lock.
     root_node: Arc<AtomicI32>,
-    /// Randomized per-page property key for the network-idle request counter.
-    net_idle_key: String,
     /// Pointer and keyboard state shared by this Page and all Element/Page clones.
     held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
 }
@@ -154,13 +152,11 @@ pub struct Page {
 impl Page {
     /// Create a new Page wrapping a CDP session
     pub(crate) fn new(session: Session, config: Arc<StealthConfig>) -> Self {
-        let net_idle_key = format!("_{:012x}", fastrand::u64(..) & 0xffff_ffff_ffff);
         let held_input = session.held_input();
         Self {
             session,
             config,
             root_node: Arc::new(AtomicI32::new(0)),
-            net_idle_key,
             held_input,
         }
     }

@@ -2,7 +2,7 @@
 name = "eoka"
 version = "0.5.15"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 license = "MIT"
 description = "Stealth browser automation for Rust. Puppeteer/Playwright alternative with anti-bot bypass."
 keywords = ["puppeteer", "playwright", "headless", "selenium", "web-scraping"]
@@ -46,7 +46,7 @@ fastrand = "2"
 base64 = "0.23"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Examples are auto-discovered from examples/*.rs — no explicit [[example]] tables needed.

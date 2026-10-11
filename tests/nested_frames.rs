@@ -159,7 +159,11 @@ async fn nested_frame_routing_ancestry_native_quads_and_stale_ids() {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|t| t["type"] == "iframe")
+            // The removed duplicate iframe can remain listed until destruction.
+            // Assert the routing of the two fixture frames we actually exercise.
+            .filter(|t| {
+                t["type"] == "iframe" && (t["targetId"] == inner.id || t["targetId"] == ancestry[0])
+            })
             .count();
         if isolated {
             assert!(oopifs >= 2, "fixture must exercise OOPIF routing");

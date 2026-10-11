@@ -8,7 +8,8 @@ Stealth browser automation in Rust. Passes bot detection without the bloat.
 
 ## Requirements
 
-Chrome or Chromium installed. eoka launches and controls it via CDP.
+Rust 1.85 or newer, and Chrome or Chromium installed. eoka launches and controls
+the browser via CDP.
 
 ## Install
 
@@ -132,6 +133,15 @@ page.wait_for_url_contains("dashboard", 10_000).await?;
 page.wait_for_url_change(10_000).await?;
 page.wait_for_network_idle(500, 30_000).await?;     // XHR/fetch idle
 ```
+
+Network idle uses a private CDP session installed before a new page navigates.
+It waits for the top document to load and for its fetch/XHR requests, including
+response bodies, to remain idle for the requested interval. It includes requests
+already running when the wait starts and is independent of request capture.
+Workers, subframes, and WebSockets are outside this scope. A previously untracked
+tab attached with `attach_page` needs a full navigation or reload before this
+wait can succeed; changing only the URL fragment is insufficient. Disconnection
+or tracking failure returns an error, and the timeout bounds the entire wait.
 
 ### Elements
 
@@ -336,6 +346,14 @@ page.back().await?;
 page.forward().await?;
 ```
 
+`goto_with_headers` clears extra headers to an empty map after navigation, error,
+or cancellation; it does not restore earlier persistent headers. Navigation and
+header changes through handles for the same target are serialized. After
+cancellation, cleanup runs for up to five seconds and subsequent page commands
+wait for it. A cleanup failure remains an error until `clear_extra_headers()`
+successfully retries restoration, including on the original attachment session.
+Raw transport commands bypass this coordination.
+
 ### Network & Cookies
 
 ```rust
@@ -448,6 +466,21 @@ StealthConfig::visible()   // headless: false
 StealthConfig::debug()     // headless: false, debug: true
 ```
 
+## Development checks
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-features --locked -- -D warnings
+cargo test --all-features --locked
+cargo build --examples --locked
+cargo +1.85.0 check --lib --all-features --locked
+xvfb-run -a cargo test --all-features --locked --no-fail-fast --tests -- --ignored --test-threads=1
+```
+
+The last command requires Chrome and Xvfb and runs every ignored browser test.
+CI pins Chrome for Testing 155.0.8059.39 and retains the browser-test log. These
+local HTTP fixtures check browser behavior; they do not establish detector bypass.
+
 ## Detection Results
 
 Patches Chrome binary, injects 15 evasion scripts, blocks detectable CDP commands at the transport layer, simulates human input with Bezier curves.
@@ -457,13 +490,17 @@ Patches Chrome binary, injects 15 evasion scripts, blocks detectable CDP command
 
 ## How it Works
 
-~9K lines of Rust (about 1.3K of that is tests). No chromiumoxide, no puppeteer-extra. Hand-written CDP types for the ~30 commands actually needed. Minimal dependency graph.
+Eoka uses hand-written CDP schemas and a small dependency graph. Transport,
+interception policy, Chrome process management, and session commands have
+separate modules. JavaScript evasions are embedded from individual `.js` assets
+at compile time.
 
 ```
 src/
-├── cdp/           # raw websocket transport, command filtering
-├── stealth/       # evasions, binary patcher, human simulation
-├── browser.rs     # chrome launcher
+├── cdp/           # connections, transport and domain-specific schemas
+├── stealth/       # script assets, fingerprints, binary patcher, human simulation
+├── browser.rs     # browser API and session setup
+├── browser/       # launch preparation, profile ownership and geo alignment
 ├── page.rs        # page api
 └── session.rs     # cookie export
 ```
