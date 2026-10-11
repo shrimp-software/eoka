@@ -619,21 +619,26 @@ impl Transport {
                     .and_then(|s| s.as_str())
                     .map(String::from);
 
-                // Auto-handle proxy auth challenges
+                // Proxy credentials must never be supplied to an origin server.
                 if method == "Fetch.authRequired" {
                     if let Some((ref username, ref password)) = proxy_auth {
                         if let Some(request_id) = params.get("requestId").and_then(|v| v.as_str()) {
+                            let challenge_response = if params
+                                .pointer("/authChallenge/source")
+                                .and_then(Value::as_str)
+                                == Some("Proxy")
+                            {
+                                json!({"response": "ProvideCredentials", "username": username, "password": password})
+                            } else {
+                                json!({"response": "CancelAuth"})
+                            };
                             auth_cmd_id += 1;
                             let mut response = json!({
                                 "id": auth_cmd_id,
                                 "method": "Fetch.continueWithAuth",
                                 "params": {
                                     "requestId": request_id,
-                                    "authChallengeResponse": {
-                                        "response": "ProvideCredentials",
-                                        "username": username,
-                                        "password": password
-                                    }
+                                    "authChallengeResponse": challenge_response
                                 }
                             });
                             // Include sessionId if present
@@ -1265,6 +1270,83 @@ mod tests {
 
     async fn pending_test_peer() -> (Transport, WebSocketStream<TcpStream>) {
         test_peer_with_header_policy(false).await
+    }
+
+    #[tokio::test]
+    async fn proxy_credentials_only_answer_explicit_proxy_challenges() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            tokio_tungstenite::accept_async(socket).await.unwrap()
+        });
+        let stream = Transport::ws_connect(&url).await.unwrap();
+        let transport = Transport::build(
+            None,
+            stream,
+            Some(("fixture-user".into(), "fixture-password".into())),
+            2,
+            false,
+            false,
+        );
+        let mut peer = server.await.unwrap();
+        for source in [Some("Server"), None, Some("Unknown"), Some("Proxy")] {
+            let mut challenge =
+                json!({"origin":"http://fixture.invalid", "scheme":"basic", "realm":"fixture"});
+            if let Some(source) = source {
+                challenge["source"] = json!(source);
+            }
+            peer.send(Message::Text(
+                json!({
+                    "method":"Fetch.authRequired", "sessionId":"challenged-session",
+                    "params":{"requestId":"challenged-request", "authChallenge":challenge}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            let reply = tokio::time::timeout(Duration::from_secs(2), peer.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let reply: Value = serde_json::from_str(reply.to_text().unwrap()).unwrap();
+            assert_eq!(reply["sessionId"], "challenged-session");
+            assert_eq!(reply["method"], "Fetch.continueWithAuth");
+            assert_eq!(reply["params"]["requestId"], "challenged-request");
+            let expected = if source == Some("Proxy") {
+                json!({"response":"ProvideCredentials", "username":"fixture-user", "password":"fixture-password"})
+            } else {
+                json!({"response":"CancelAuth"})
+            };
+            assert_eq!(reply["params"]["authChallengeResponse"], expected);
+        }
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn auth_without_proxy_credentials_is_left_to_the_caller() {
+        let (transport, mut peer) = pending_test_peer().await;
+        let mut events = transport.subscribe();
+        peer.send(Message::Text(
+            json!({
+                "method":"Fetch.authRequired", "sessionId":"caller",
+                "params":{"requestId":"request", "authChallenge":{"source":"Server"}}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, CdpMessage::Event { method, .. } if method == "Fetch.authRequired")
+        );
+        transport.close().await.unwrap();
     }
 
     async fn test_peer_with_header_policy(strip: bool) -> (Transport, WebSocketStream<TcpStream>) {
