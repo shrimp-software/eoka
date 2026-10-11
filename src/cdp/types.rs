@@ -526,7 +526,7 @@ pub struct DOMGetOuterHTML {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DOMGetOuterHTMLResult {
-    #[serde(default)]
+    #[serde(rename = "outerHTML")]
     pub outer_html: String,
 }
 
@@ -850,6 +850,20 @@ pub struct FetchEnable {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn outer_html_uses_the_protocol_acronym_and_rejects_missing_markup() {
+        let response: super::DOMGetOuterHTMLResult =
+            serde_json::from_value(serde_json::json!({"outerHTML":"<b>markup</b>"})).unwrap();
+        assert_eq!(response.outer_html, "<b>markup</b>");
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({"outerHtml":"wrong"}),
+            serde_json::json!({"outerHTML":null}),
+        ] {
+            assert!(serde_json::from_value::<super::DOMGetOuterHTMLResult>(value).is_err());
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

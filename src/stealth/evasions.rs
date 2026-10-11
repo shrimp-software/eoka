@@ -487,7 +487,19 @@ const _eoka_spoofWebGL = (proto) => {
 _eoka_spoofWebGL(WebGLRenderingContext.prototype);
 if (typeof WebGL2RenderingContext !== 'undefined') _eoka_spoofWebGL(WebGL2RenderingContext.prototype);
 
-// Canvas noise — deterministic, applied on a temp copy.
+// Both readback and export use the native getter and apply noise once.
+const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
+const _eoka_noisePixels = (img) => {
+    const data = img.data;
+    let s = (__EOKA_NOISE_SEED__ >>> 0) || 1;
+    for (let i = 0; i < data.length; i += 4) {
+        s = _eoka_lcg(s);
+        // Partially transparent RGB is quantized by the canvas backing store.
+        // Leave it alone so exporting cannot change the readback noise.
+        if (data[i + 3] === 255) data[i] = data[i] ^ (s & 1);
+    }
+    return img;
+};
 const _eoka_noiseCanvas = (canvas) => {
     const w = canvas.width | 0, h = canvas.height | 0;
     if (w <= 0 || h <= 0) return canvas;
@@ -496,16 +508,11 @@ const _eoka_noiseCanvas = (canvas) => {
         tmp.width = w; tmp.height = h;
         const tctx = tmp.getContext('2d');
         tctx.drawImage(canvas, 0, 0);
-        const img = tctx.getImageData(0, 0, w, h);
-        const data = img.data;
-        let s = (__EOKA_NOISE_SEED__ >>> 0) || 1;
-        for (let i = 0; i < data.length; i += 4) {
-            s = _eoka_lcg(s);
-            data[i] = data[i] ^ (s & 1);
-        }
-        tctx.putImageData(img, 0, 0);
+        const img = origGetImageData.call(tctx, 0, 0, w, h);
+        tctx.putImageData(_eoka_noisePixels(img), 0, 0);
         return tmp;
     } catch(e) {
+        // Preserve native export failures, including tainted canvas errors.
         return canvas;
     }
 };
@@ -522,18 +529,8 @@ if (origToBlob) {
     }, 'toBlob');
 }
 
-// getImageData must see the same LSB noise as toDataURL/toBlob, otherwise a
-// page comparing the pixel buffer against the data URL catches the hook.
-const origGetImageData = CanvasRenderingContext2D.prototype.getImageData;
 CanvasRenderingContext2D.prototype.getImageData = _eoka_mark(function getImageData(...args) {
-    const img = origGetImageData.apply(this, args);
-    const data = img.data;
-    let s = (__EOKA_NOISE_SEED__ >>> 0) || 1;
-    for (let i = 0; i < data.length; i += 4) {
-        s = _eoka_lcg(s);
-        data[i] = data[i] ^ (s & 1);
-    }
-    return img;
+    return _eoka_noisePixels(origGetImageData.apply(this, args));
 }, 'getImageData');
 
 // Audio noise — deterministic, applied once per channel buffer.
