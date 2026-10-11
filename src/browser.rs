@@ -641,7 +641,8 @@ impl Browser {
     /// Common logic shared by new_page, new_blank_page, and attach_page.
     /// In live-session mode, skips the evasion-script injection so we don't
     /// pollute the user's tab with extra `addScriptToEvaluateOnNewDocument`.
-    async fn setup_session(&self, session: &crate::cdp::Session) -> Result<()> {
+    async fn setup_session(&self, session: &crate::cdp::Session, fresh: bool) -> Result<()> {
+        session.monitor_network(fresh).await?;
         session.page_enable().await?;
 
         let proxy_auth =
@@ -682,7 +683,7 @@ impl Browser {
             .await?;
 
         let session = self.connection.attach_to_target(&target_id).await?;
-        self.setup_session(&session).await?;
+        self.setup_session(&session, true).await?;
 
         // Navigate to URL
         let nav_result = session.navigate(url, None).await?;
@@ -704,7 +705,7 @@ impl Browser {
             .await?;
 
         let session = self.connection.attach_to_target(&target_id).await?;
-        self.setup_session(&session).await?;
+        self.setup_session(&session, true).await?;
 
         Ok(Page::new(session, Arc::clone(&self.config)))
     }
@@ -733,7 +734,7 @@ impl Browser {
     /// Use `tabs()` to discover popup target IDs, then call this to get a Page handle.
     pub async fn attach_page(&self, target_id: &str) -> Result<Page> {
         let session = self.connection.attach_to_target(target_id).await?;
-        self.setup_session(&session).await?;
+        self.setup_session(&session, false).await?;
         Ok(Page::new(session, Arc::clone(&self.config)))
     }
 

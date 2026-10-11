@@ -16,6 +16,7 @@ type TargetRegistry = Arc<Mutex<HashMap<String, Arc<TargetState>>>>;
 struct TargetState {
     held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
     headers: Arc<super::headers::HeaderState>,
+    monitor: tokio::sync::Mutex<Option<Arc<super::network_idle::NetworkMonitor>>>,
 }
 
 fn state_for_target(registry: &TargetRegistry, target_id: &str) -> Arc<TargetState> {
@@ -109,7 +110,7 @@ impl Connection {
             )
             .await?;
         if result.success {
-            self.remove_target(target_id);
+            self.remove_target(target_id).await;
         }
         Ok(result.success)
     }
@@ -123,11 +124,17 @@ impl Connection {
         Ok(result.target_infos)
     }
 
-    fn remove_target(&self, target_id: &str) {
-        self.targets
+    async fn remove_target(&self, target_id: &str) {
+        let state = self
+            .targets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(target_id);
+        if let Some(state) = state {
+            if let Some(monitor) = state.monitor.lock().await.as_ref() {
+                monitor.closed();
+            }
+        }
     }
 
     /// Activate (focus) a target
@@ -168,7 +175,7 @@ impl Connection {
 }
 
 /// A CDP session attached to a specific target. Cheap to clone; clones share
-/// the underlying transport and per-target input and header state.
+/// the underlying transport and per-target input, header and network state.
 #[derive(Clone)]
 pub struct Session {
     transport: Arc<Transport>,
@@ -198,6 +205,31 @@ impl Session {
     /// Return the per-target held-input coordinator state.
     pub(crate) fn held_input(&self) -> Arc<tokio::sync::Mutex<HeldInputState>> {
         Arc::clone(&self.target.held_input)
+    }
+
+    pub(crate) async fn monitor_network(&self, fresh: bool) -> Result<()> {
+        let mut monitor = self.target.monitor.lock().await;
+        if monitor.is_none() {
+            *monitor = Some(Arc::new(
+                super::network_idle::NetworkMonitor::start(&self.transport, &self.target_id, fresh)
+                    .await?,
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn wait_for_network_idle(&self, idle_ms: u64, timeout_ms: u64) -> Result<()> {
+        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            self.target.headers.wait().await?;
+            let monitor = self.target.monitor.lock().await.clone().ok_or_else(|| {
+                crate::Error::cdp_msg("Network idle monitoring is not initialized")
+            })?;
+            monitor.wait(idle_ms, timeout_ms).await
+        })
+        .await
+        .map_err(|_| {
+            crate::Error::Timeout("Network did not become idle before the deadline".into())
+        })?
     }
 
     pub(crate) async fn attach_frame_target(&self, target_id: &str) -> Result<Session> {

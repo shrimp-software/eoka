@@ -20,6 +20,7 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
+use super::network_idle::{self, IdleRoutes, IdleState};
 use crate::error::{Error, Result};
 
 /// The connected WebSocket stream and its split write/read halves.
@@ -348,6 +349,7 @@ pub struct Transport {
     event_tx: broadcast::Sender<CdpMessage>,
     response_routes: ResponseRoutes,
     request_routes: RequestRoutes,
+    idle_routes: IdleRoutes,
     request_base_auth: bool,
     request_base_strip: bool,
     /// Persistent receiver backing `recv_event`/`try_recv_event` (back-compat).
@@ -436,6 +438,8 @@ impl Transport {
         let reader_responses = Arc::clone(&response_routes);
         let request_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let reader_requests = Arc::clone(&request_routes);
+        let idle_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let reader_idle = Arc::clone(&idle_routes);
         let request_base_auth = proxy_auth.is_some();
         let reader_handle = tokio::spawn(async move {
             Self::reader_loop(
@@ -443,7 +447,7 @@ impl Transport {
                 pending_clone,
                 event_tx_clone,
                 reader_writer,
-                (reader_responses, reader_requests),
+                (reader_responses, reader_requests, reader_idle),
                 proxy_auth,
                 strip_x_client_data,
             )
@@ -459,6 +463,7 @@ impl Transport {
             event_rx: Mutex::new(event_rx),
             request_routes,
             response_routes,
+            idle_routes,
             request_base_auth,
             request_base_strip: strip_x_client_data,
             cmd_timeout,
@@ -535,11 +540,11 @@ impl Transport {
         pending: Arc<PendingMap>,
         event_tx: broadcast::Sender<CdpMessage>,
         writer: SharedSink,
-        routes: (ResponseRoutes, RequestRoutes),
+        routes: (ResponseRoutes, RequestRoutes, IdleRoutes),
         proxy_auth: Option<(String, String)>,
         strip_x_client_data: bool,
     ) {
-        let (response_routes, request_routes) = routes;
+        let (response_routes, request_routes, idle_routes) = routes;
         let exit_reason;
         // Separate command ID space for auth/interception auto-responses (won't
         // collide with main IDs for the first ~2 billion commands). Must stay
@@ -618,6 +623,10 @@ impl Transport {
                     .get("sessionId")
                     .and_then(|s| s.as_str())
                     .map(String::from);
+
+                if network_idle::route_event(&idle_routes, session_id.as_deref(), method, &params) {
+                    continue;
+                }
 
                 // Proxy credentials must never be supplied to an origin server.
                 if method == "Fetch.authRequired" {
@@ -738,6 +747,7 @@ impl Transport {
 
         // Drain all pending requests so callers fail immediately instead of
         // hanging until the per-command timeout fires.
+        network_idle::disconnect(&idle_routes);
         let context = format!("WebSocket connection lost: {}", exit_reason);
         let n = fail_pending(&pending, &context);
         if n > 0 {
@@ -898,6 +908,20 @@ impl Transport {
             .await
     }
 
+    pub(super) fn install_idle_route(&self, session: &str, state: &Arc<IdleState>) {
+        self.idle_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session.into(), Arc::downgrade(state));
+    }
+
+    pub(super) fn remove_idle_route(&self, session: &str) {
+        self.idle_routes
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(session);
+    }
+
     /// Subscribe to CDP events. Each subscriber gets its own receiver; events
     /// published after subscribing are delivered to all live receivers.
     pub fn subscribe(&self) -> broadcast::Receiver<CdpMessage> {
@@ -1029,6 +1053,7 @@ impl Transport {
         if let Some(handle) = &self.reader_handle {
             handle.abort();
         }
+        network_idle::disconnect(&self.idle_routes);
         fail_pending(&self.pending, "CDP transport closed");
 
         if let Some(ref child) = self.child {
@@ -1044,6 +1069,7 @@ impl Drop for Transport {
         if let Some(handle) = self.reader_handle.take() {
             handle.abort();
         }
+        network_idle::disconnect(&self.idle_routes);
         fail_pending(&self.pending, "CDP transport dropped");
 
         if let Some(ref child) = self.child {
