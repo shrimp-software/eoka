@@ -56,21 +56,27 @@ are resolved to their underlying ELF executable; do not skip that regression.
 ```
 src/
 ├── lib.rs              # Public API: Browser, Page, StealthConfig, Result
-├── browser.rs          # Chrome launcher, stealth args
+├── browser.rs          # Browser API, tabs and session setup
+├── browser/launch.rs   # Chrome launch preparation and profile ownership
 ├── page.rs             # Page abstraction, Element, request capture
 ├── session.rs          # Cookie import/export
 ├── error.rs            # Error types (ElementNotVisible, RetryExhausted, etc.)
 ├── cdp/
-│   ├── transport.rs    # WebSocket client + command filtering
-│   ├── connection.rs   # Browser/Session CDP wrappers
+│   ├── transport.rs    # WebSocket commands, cancellation and shutdown
+│   ├── transport/      # Reader, Fetch interception, Chrome process lifecycle
+│   ├── connection.rs   # Connection and shared target/session state
+│   ├── connection/     # Session commands grouped by page/network/document/input
 │   ├── headers.rs      # Target-scoped temporary header cleanup and recovery
 │   ├── network_idle.rs # Private CDP request tracking, independent of capture
-│   └── types.rs        # Hand-written CDP types (~30 commands)
+│   ├── types.rs        # Protocol type re-exports
+│   └── types/          # Hand-written CDP schemas grouped by domain
 └── stealth/
-    ├── evasions.rs     # 15 JavaScript injection scripts
+    ├── evasions.rs     # Script selection and fingerprint substitution
+    ├── evasions/scripts/ # JavaScript assets, embedded at compile time
     ├── patcher.rs      # Binary patching (Aho-Corasick)
     ├── human.rs        # Bezier curves, typing simulation
-    └── fingerprint.rs  # User agent generation
+    ├── fingerprint.rs  # Fingerprint generation and persistence
+    └── fingerprint/catalog.rs # Platform defaults and lookup tables
 ```
 
 ## Public API Overview
@@ -192,7 +198,7 @@ src/
 ## Key Design Decisions
 
 ### CDP Command Filtering
-Transport blocks detectable commands at `src/cdp/transport.rs:24-37`:
+Transport blocks detectable commands in `src/cdp/transport.rs`:
 - `Runtime.enable` - BLOCKED (prevents consoleAPICalled detection)
 - `Debugger.enable` - BLOCKED
 - `HeapProfiler.*` - BLOCKED
@@ -239,7 +245,9 @@ Error::Cdp { method, code, message }  // Raw CDP error
 
 ## Evasion Scripts
 
-Located in `src/stealth/evasions.rs`:
+JavaScript lives in `src/stealth/evasions/scripts/`; public constants and script
+assembly remain in `src/stealth/evasions.rs`. `include_str!` embeds these assets
+at compile time, so no runtime file reads are needed.
 
 | Script | Purpose |
 |--------|---------|
@@ -262,12 +270,12 @@ Located in `src/stealth/evasions.rs`:
 ## Common Tasks
 
 ### Add new CDP command
-1. Add types to `src/cdp/types.rs`
-2. Add method to `Session` in `src/cdp/connection.rs`
-3. Check if command should be blocked/warned in `transport.rs`
+1. Add types to the matching domain in `src/cdp/types/`
+2. Add the `Session` method to the matching module in `src/cdp/connection/`
+3. Check whether the command should be blocked/warned in `transport.rs`; keep Fetch routing policy in `transport/interception.rs`
 
 ### Add new evasion
-1. Add const to `src/stealth/evasions.rs`
+1. Add a JavaScript asset in `src/stealth/evasions/scripts/` and its `include_str!` constant in `src/stealth/evasions.rs`
 2. Add to `build_evasion_script()` function
 3. Test with `cargo run --example rebrowser_test`
 

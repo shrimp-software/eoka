@@ -490,13 +490,17 @@ Patches Chrome binary, injects 15 evasion scripts, blocks detectable CDP command
 
 ## How it Works
 
-~9K lines of Rust (about 1.3K of that is tests). No chromiumoxide, no puppeteer-extra. Hand-written CDP types for the ~30 commands actually needed. Minimal dependency graph.
+Eoka uses hand-written CDP schemas and a small dependency graph. Transport,
+interception policy, Chrome process management, and session commands have
+separate modules. JavaScript evasions are embedded from individual `.js` assets
+at compile time.
 
 ```
 src/
-├── cdp/           # raw websocket transport, command filtering
-├── stealth/       # evasions, binary patcher, human simulation
-├── browser.rs     # chrome launcher
+├── cdp/           # connections, transport and domain-specific schemas
+├── stealth/       # script assets, fingerprints, binary patcher, human simulation
+├── browser.rs     # browser API and session setup
+├── browser/       # launch preparation, profile ownership and geo alignment
 ├── page.rs        # page api
 └── session.rs     # cookie export
 ```
