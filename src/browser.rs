@@ -421,6 +421,7 @@ fn accept_language_for(languages: &[String]) -> String {
 /// The main stealth browser
 pub struct Browser {
     connection: Connection,
+    download_slot: Arc<tokio::sync::Semaphore>,
     config: Arc<StealthConfig>,
     /// User data directory (cleaned up on close; None when connecting to existing instance)
     user_data_dir: Option<PathBuf>,
@@ -435,6 +436,27 @@ pub struct Browser {
 }
 
 impl Browser {
+    /// Whether this handle owns the Chrome process, rather than borrowing it.
+    pub fn owns_process(&self) -> bool {
+        !self.reused
+    }
+
+    /// Reserve native download settings and subscribe before triggering a download.
+    /// Only supported for owned processes. The directory must already exist.
+    pub async fn watch_downloads(&self, directory: &Path) -> Result<crate::DownloadWatch> {
+        if !self.owns_process() {
+            return Err(Error::cdp_msg(
+                "download_unsupported: attached browsers are not supported",
+            ));
+        }
+        crate::DownloadWatch::begin(
+            self.connection.transport().clone(),
+            self.download_slot.clone(),
+            directory,
+        )
+        .await
+    }
+
     /// Launch a new stealth browser with default config
     pub async fn launch() -> Result<Self> {
         Self::launch_with_config(StealthConfig::default()).await
@@ -515,6 +537,7 @@ impl Browser {
 
         let mut browser = Self {
             connection,
+            download_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             config,
             user_data_dir,
             reused: !spawned,
@@ -592,6 +615,7 @@ impl Browser {
         };
         Ok(Self {
             connection,
+            download_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             config,
             user_data_dir: None,
             reused: true,
