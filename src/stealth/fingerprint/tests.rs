@@ -78,79 +78,86 @@ fn test_platform_surfaces_are_coherent() {
             "x86",
             40,
             "Microsoft David",
-            "Segoe UI",
+            &["Segoe UI"][..],
         ),
         (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36",
             "arm",
             25,
             "Alex",
-            "Helvetica",
+            &["Helvetica"][..],
         ),
         (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36",
             "x86",
             30,
             "",
-            "DejaVu",
+            &["DejaVu", "Liberation", "Noto"][..],
         ),
     ];
-    for (ua, architecture, chrome_height, expected_voice, expected_font_prefix) in cases {
-        let fp = Fingerprint::resolve(Some(ua), None);
-        assert_eq!(fp.ch_architecture(), architecture);
-        assert_eq!(fp.ui_chrome_height(), chrome_height);
+    for seed in 0..64 {
+        fastrand::seed(seed);
+        for (ua, architecture, chrome_height, expected_voice, expected_font_prefixes) in cases {
+            let fp = Fingerprint::resolve(Some(ua), None);
+            assert_eq!(fp.ch_architecture(), architecture);
+            assert_eq!(fp.ui_chrome_height(), chrome_height);
 
-        if expected_voice.is_empty() {
-            assert!(fp.voices.is_empty(), "Linux claims must have no voices");
-        } else {
+            if expected_voice.is_empty() {
+                assert!(fp.voices.is_empty(), "Linux claims must have no voices");
+            } else {
+                assert!(
+                    fp.voices.iter().any(|v| v.name.starts_with(expected_voice)),
+                    "voices must match the claimed platform (expected {expected_voice})"
+                );
+            }
+
+            // Linux deliberately varies its installed fonts; a particular family
+            // can be absent. Require a platform-appropriate family without requiring
+            // DejaVu specifically, and keep rejecting other platforms' signatures.
             assert!(
-                fp.voices.iter().any(|v| v.name.starts_with(expected_voice)),
-                "voices must match the claimed platform (expected {expected_voice})"
+                fp.fonts.iter().any(|font| expected_font_prefixes
+                    .iter()
+                    .any(|prefix| font.starts_with(prefix))),
+                "fonts must match {expected_font_prefixes:?} (seed {seed}): {:?}",
+                fp.fonts
             );
-        }
+            let disallowed: &[&str] = match fp.platform {
+                Platform::Windows => &["Helvetica Neue", "Cantarell", "DejaVu Sans"],
+                Platform::MacOS => &["Segoe UI", "Cantarell", "DejaVu Sans"],
+                Platform::Linux => &["Segoe UI", "Helvetica Neue"],
+            };
+            for other_font in disallowed {
+                assert!(
+                    !fp.fonts.iter().any(|f| f.starts_with(other_font)),
+                    "cross-platform font {other_font} must not be claimed here"
+                );
+            }
 
-        // Fonts: the representative platform font must be claimed, and no
-        // other platform's signature font may appear.
-        assert!(
-            fp.fonts.iter().any(|f| f.starts_with(expected_font_prefix)),
-            "fonts must match the claimed platform (expected {expected_font_prefix})"
-        );
-        let disallowed: &[&str] = match expected_font_prefix {
-            "Segoe UI" => &["Helvetica Neue", "Cantarell", "DejaVu Sans"],
-            "Helvetica" => &["Segoe UI", "Cantarell", "DejaVu Sans"],
-            _ => &["Segoe UI", "Helvetica Neue"],
-        };
-        for other_font in disallowed {
-            assert!(
-                !fp.fonts.iter().any(|f| f.starts_with(other_font)),
-                "cross-platform font {other_font} must not be claimed here"
-            );
-        }
+            // Keyboard: Linux has no Keyboard API in stock Chrome; Win/macOS
+            // get a complete US layout.
+            let keyboard = fp.keyboard_map_json();
+            if expected_voice.is_empty() {
+                assert_eq!(keyboard, "null");
+            } else {
+                let map: serde_json::Map<String, serde_json::Value> =
+                    serde_json::from_str(&keyboard).expect("keyboard map must be valid JSON");
+                assert_eq!(map.get("KeyA").and_then(|v| v.as_str()), Some("a"));
+                assert_eq!(map.get("Digit1").and_then(|v| v.as_str()), Some("1"));
+                assert_eq!(map.get("Minus").and_then(|v| v.as_str()), Some("-"));
+                assert_eq!(map.len(), 26 + 10 + 12);
+            }
 
-        // Keyboard: Linux has no Keyboard API in stock Chrome; Win/macOS
-        // get a complete US layout.
-        let keyboard = fp.keyboard_map_json();
-        if expected_voice.is_empty() {
-            assert_eq!(keyboard, "null");
-        } else {
-            let map: serde_json::Map<String, serde_json::Value> =
-                serde_json::from_str(&keyboard).expect("keyboard map must be valid JSON");
-            assert_eq!(map.get("KeyA").and_then(|v| v.as_str()), Some("a"));
-            assert_eq!(map.get("Digit1").and_then(|v| v.as_str()), Some("1"));
-            assert_eq!(map.get("Minus").and_then(|v| v.as_str()), Some("-"));
-            assert_eq!(map.len(), 26 + 10 + 12);
-        }
-
-        let devices: serde_json::Value =
-            serde_json::from_str(&fp.media_devices_json()).expect("valid device JSON");
-        let array = devices.as_array().unwrap();
-        let expected_len = (fp.media_devices.audio_inputs
-            + fp.media_devices.audio_outputs
-            + fp.media_devices.video_inputs) as usize;
-        assert_eq!(array.len(), expected_len);
-        for device in array {
-            assert_eq!(device["label"], "");
-            assert!(device["kind"].is_string());
+            let devices: serde_json::Value =
+                serde_json::from_str(&fp.media_devices_json()).expect("valid device JSON");
+            let array = devices.as_array().unwrap();
+            let expected_len = (fp.media_devices.audio_inputs
+                + fp.media_devices.audio_outputs
+                + fp.media_devices.video_inputs) as usize;
+            assert_eq!(array.len(), expected_len);
+            for device in array {
+                assert_eq!(device["label"], "");
+                assert!(device["kind"].is_string());
+            }
         }
     }
 }
