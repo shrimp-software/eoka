@@ -2,7 +2,7 @@
 name = "eoka"
 version = "0.5.15"
 edition = "2021"
-rust-version = "1.74"
+rust-version = "1.85"
 license = "MIT"
 description = "Stealth browser automation for Rust. Puppeteer/Playwright alternative with anti-bot bypass."
 keywords = ["puppeteer", "playwright", "headless", "selenium", "web-scraping"]

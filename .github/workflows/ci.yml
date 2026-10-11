@@ -24,10 +24,10 @@ jobs:
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Build
-        run: cargo build --all-features
+        run: cargo build --all-features --locked
 
       - name: Run tests
-        run: cargo test --all-features
+        run: cargo test --all-features --locked
 
   clippy:
     name: Clippy
@@ -37,7 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: clippy
-      - run: cargo clippy --all-features -- -D warnings
+      - run: cargo clippy --all-features --locked -- -D warnings
 
   fmt:
     name: Format
@@ -48,3 +48,57 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  msrv:
+    name: Rust 1.85
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.85.0
+      - run: cargo check --lib --all-features --locked
+
+  browser:
+    name: Chrome browser tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CHROME_VERSION: 155.0.8059.39
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - name: Install pinned Chrome and Xvfb
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth libnss3 libatk-bridge2.0-0 libgbm1 libasound2t64
+          mkdir -p "$RUNNER_TEMP/eoka-chrome"
+          curl --fail --location --retry 3 \
+            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chrome-linux64.zip" \
+            --output "$RUNNER_TEMP/eoka-chrome/chrome.zip"
+          unzip -q "$RUNNER_TEMP/eoka-chrome/chrome.zip" -d "$RUNNER_TEMP/eoka-chrome"
+          # Keep the launcher beside the ELF so the patcher finds Chrome's resources.
+          cat > "$RUNNER_TEMP/eoka-chrome/chrome-linux64/google-chrome" <<'SH'
+          #!/bin/sh
+          exec "$(dirname "$(readlink -f "$0")")/chrome" "$@"
+          SH
+          chmod +x "$RUNNER_TEMP/eoka-chrome/chrome-linux64/google-chrome"
+          sudo ln -sf "$RUNNER_TEMP/eoka-chrome/chrome-linux64/google-chrome" /usr/bin/google-chrome
+          test -x /usr/bin/google-chrome
+          /usr/bin/google-chrome --version
+          rustc --version
+          command -v Xvfb
+          xvfb-run -a true
+      - name: Run every ignored browser test
+        shell: bash
+        run: |
+          set -o pipefail
+          xvfb-run -a cargo test --all-features --locked --no-fail-fast --tests -- --ignored --test-threads=1 2>&1 | tee browser-tests.log
+      - name: Upload browser test log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: browser-tests
+          path: browser-tests.log
+          retention-days: 14

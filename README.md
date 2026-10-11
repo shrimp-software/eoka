@@ -8,7 +8,8 @@ Stealth browser automation in Rust. Passes bot detection without the bloat.
 
 ## Requirements
 
-Chrome or Chromium installed. eoka launches and controls it via CDP.
+Rust 1.85 or newer, and Chrome or Chromium installed. eoka launches and controls
+the browser via CDP.
 
 ## Install
 
@@ -132,6 +133,15 @@ page.wait_for_url_contains("dashboard", 10_000).await?;
 page.wait_for_url_change(10_000).await?;
 page.wait_for_network_idle(500, 30_000).await?;     // XHR/fetch idle
 ```
+
+Network idle uses a private CDP session installed before a new page navigates.
+It waits for the top document to load and for its fetch/XHR requests, including
+response bodies, to remain idle for the requested interval. It includes requests
+already running when the wait starts and is independent of request capture.
+Workers, subframes, and WebSockets are outside this scope. A previously untracked
+tab attached with `attach_page` needs a full navigation or reload before this
+wait can succeed; changing only the URL fragment is insufficient. Disconnection
+or tracking failure returns an error, and the timeout bounds the entire wait.
 
 ### Elements
 
@@ -336,6 +346,14 @@ page.back().await?;
 page.forward().await?;
 ```
 
+`goto_with_headers` clears extra headers to an empty map after navigation, error,
+or cancellation; it does not restore earlier persistent headers. Navigation and
+header changes through handles for the same target are serialized. After
+cancellation, cleanup runs for up to five seconds and subsequent page commands
+wait for it. A cleanup failure remains an error until `clear_extra_headers()`
+successfully retries restoration, including on the original attachment session.
+Raw transport commands bypass this coordination.
+
 ### Network & Cookies
 
 ```rust
@@ -447,6 +465,21 @@ let browser = Browser::launch_with_config(config).await?;
 StealthConfig::visible()   // headless: false
 StealthConfig::debug()     // headless: false, debug: true
 ```
+
+## Development checks
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-features --locked -- -D warnings
+cargo test --all-features --locked
+cargo build --examples --locked
+cargo +1.85.0 check --lib --all-features --locked
+xvfb-run -a cargo test --all-features --locked --no-fail-fast --tests -- --ignored --test-threads=1
+```
+
+The last command requires Chrome and Xvfb and runs every ignored browser test.
+CI pins Chrome for Testing 155.0.8059.39 and retains the browser-test log. These
+local HTTP fixtures check browser behavior; they do not establish detector bypass.
 
 ## Detection Results
 

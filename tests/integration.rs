@@ -3,21 +3,20 @@
 //! These tests require Chrome to be installed and available.
 //! Run with: cargo test --test integration -- --ignored
 
+mod support;
+
 use eoka::stealth::{Human, HumanSpeed};
 use eoka::{Browser, MouseButton};
 
-/// Check if Chrome is available
-fn chrome_available() -> bool {
-    eoka::stealth::patcher::find_chrome().is_ok()
+/// Ignored browser tests must fail, rather than silently pass, without Chrome.
+fn require_chrome() {
+    eoka::stealth::patcher::find_chrome().expect("browser tests require Chrome");
 }
 
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_browser_launch() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     browser.close().await.expect("Failed to close browser");
@@ -26,10 +25,7 @@ async fn test_browser_launch() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_browser_launch_visible() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch_visible()
         .await
@@ -40,10 +36,7 @@ async fn test_browser_launch_visible() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_page_navigation() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -66,10 +59,7 @@ async fn test_page_navigation() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_page_title() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -90,10 +80,7 @@ async fn test_page_title() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_page_url() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -114,10 +101,7 @@ async fn test_page_url() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_screenshot() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -141,10 +125,7 @@ async fn test_screenshot() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_screenshot_jpeg() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -171,10 +152,7 @@ async fn test_screenshot_jpeg() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_element_finding() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -211,10 +189,7 @@ async fn test_element_finding() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_element_not_found() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -235,10 +210,7 @@ async fn test_element_not_found() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_evaluate_javascript() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -270,10 +242,7 @@ async fn test_evaluate_javascript() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_cookies() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -281,14 +250,12 @@ async fn test_cookies() {
         .await
         .expect("Failed to create page");
 
-    // Navigate to a real page (cookies need a proper domain)
-    page.goto("https://example.com")
-        .await
-        .expect("Failed to navigate");
-    page.wait(1000).await;
+    let fixture =
+        support::HttpFixture::start(|_| async { support::Response::html("cookie fixture") }).await;
+    page.goto(&fixture.url).await.expect("Failed to navigate");
 
     // Set a cookie
-    page.set_cookie("test_cookie", "test_value", Some("example.com"), Some("/"))
+    page.set_cookie("test_cookie", "test_value", None, Some("/"))
         .await
         .expect("Failed to set cookie");
 
@@ -304,10 +271,7 @@ async fn test_cookies() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_wait_for_element() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -342,10 +306,7 @@ async fn test_wait_for_element() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_wait_for_element_timeout() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -367,10 +328,7 @@ async fn test_wait_for_element_timeout() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_click_element() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -402,10 +360,7 @@ async fn test_click_element() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_type_into_input() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -439,10 +394,7 @@ async fn test_type_into_input() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_select_dropdown() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -490,10 +442,7 @@ async fn test_select_dropdown() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_select_invalid_option() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -521,10 +470,7 @@ async fn test_select_invalid_option() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_hover() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -556,10 +502,7 @@ async fn test_hover() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_press_key() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -608,10 +551,7 @@ async fn test_press_key() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_held_input_and_release_all() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -675,10 +615,7 @@ async fn test_held_input_and_release_all() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_held_input_drag_coordinates_hover_and_human_pointer_through_page_state() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -741,10 +678,7 @@ async fn test_held_input_drag_coordinates_hover_and_human_pointer_through_page_s
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_held_input_duplicate_attachment_shares_target_state() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let first = browser
@@ -830,10 +764,7 @@ async fn test_held_input_duplicate_attachment_shares_target_state() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_held_input_human_session_constructor_and_modifier_key_press() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -909,10 +840,7 @@ async fn test_held_input_human_session_constructor_and_modifier_key_press() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_held_input_serializes_clone_masks_and_current_key_up_modifiers() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -982,10 +910,7 @@ async fn test_held_input_serializes_clone_masks_and_current_key_up_modifiers() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_fill_range_dispatches_events_and_rejects_invalid_values() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -1048,10 +973,7 @@ async fn test_fill_range_dispatches_events_and_rejects_invalid_values() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_upload_file() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -1099,10 +1021,7 @@ async fn test_upload_file() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_select_multiple() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
     let page = browser
@@ -1140,10 +1059,7 @@ async fn test_select_multiple() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_multi_tab() {
-    if !chrome_available() {
-        eprintln!("Chrome not found, skipping test");
-        return;
-    }
+    require_chrome();
 
     let browser = Browser::launch().await.expect("Failed to launch browser");
 
@@ -1182,10 +1098,18 @@ async fn test_multi_tab() {
         .await
         .expect("Failed to close tab");
 
-    // Verify tab 2 is gone
-    let tabs = browser.tabs().await.expect("Failed to list tabs");
-    let tab2_still_exists = tabs.iter().any(|t| t.id == page2.target_id());
-    assert!(!tab2_still_exists, "Tab 2 should be closed");
+    // CDP acknowledges the close request before target destruction completes.
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        loop {
+            let tabs = browser.tabs().await.expect("Failed to list tabs");
+            if !tabs.iter().any(|t| t.id == page2.target_id()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("Tab 2 should be closed");
 
     browser.close().await.expect("Failed to close browser");
 }

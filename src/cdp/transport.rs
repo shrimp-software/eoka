@@ -390,7 +390,7 @@ impl Transport {
     pub fn is_closed(&self) -> bool {
         self.reader_handle
             .as_ref()
-            .map_or(true, |reader| reader.is_finished())
+            .is_none_or(|reader| reader.is_finished())
     }
 
     /// Create a new transport connecting to Chrome via WebSocket

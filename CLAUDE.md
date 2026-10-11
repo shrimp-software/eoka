@@ -4,6 +4,9 @@ Guidance for Claude Code when working with this repository.
 
 ## Build & Test
 
+Minimum supported Rust version: 1.85. CI checks the library on Rust 1.85.0.
+The committed `Cargo.lock` records the dependency graph used by CI and MSRV checks.
+
 ```bash
 cargo build                          # Build library
 cargo build --examples               # Build examples
@@ -31,17 +34,22 @@ cargo clippy --all-features -- -D warnings   # lint (CI-equivalent)
 cargo lint                           # alias for the above
 ```
 
-Pre-push gate (mirrors CI in `.github/workflows/ci.yml`):
+Pre-push gates (mirrors CI in `.github/workflows/ci.yml`; browser checks need
+Chrome and Xvfb):
 
 ```bash
-cargo fmt --all --check && cargo lint && cargo test --lib
+cargo fmt --all --check
+cargo clippy --all-features --locked -- -D warnings
+cargo test --all-features --locked
+cargo build --examples --locked
+cargo +1.85.0 check --lib --all-features --locked
+xvfb-run -a cargo test --all-features --locked --no-fail-fast --tests -- --ignored --test-threads=1
 ```
 
-Note: `stealth::patcher::tests::test_find_chrome_returns_elf` fails locally only
-when the system Chrome is a wrapper script (not an ELF). It's guarded by
-`if let Ok(path) = find_chrome()`, so it passes in CI (no Chrome installed) and
-on machines with a real Chrome. Skip it locally with
-`cargo test --lib -- --skip test_find_chrome_returns_elf`.
+CI pins Chrome for Testing 155.0.8059.39, verifies Chrome/Xvfb availability,
+runs every ignored browser test without skipping failures, and uploads the log.
+Cookie and lifecycle regressions use local HTTP fixtures. Chrome wrapper scripts
+are resolved to their underlying ELF executable; do not skip that regression.
 
 ## Architecture
 
@@ -55,6 +63,8 @@ src/
 ├── cdp/
 │   ├── transport.rs    # WebSocket client + command filtering
 │   ├── connection.rs   # Browser/Session CDP wrappers
+│   ├── headers.rs      # Target-scoped temporary header cleanup and recovery
+│   ├── network_idle.rs # Private CDP request tracking, independent of capture
 │   └── types.rs        # Hand-written CDP types (~30 commands)
 └── stealth/
     ├── evasions.rs     # 15 JavaScript injection scripts
@@ -86,7 +96,7 @@ src/
 ### Page - Navigation
 - `page.goto(url)` - Navigate to URL
 - `page.goto_with_referrer(url, referrer)` - Navigate with custom Referer
-- `page.goto_with_headers(url, headers)` - Navigate with custom HTTP headers
+- `page.goto_with_headers(url, headers)` - Target-serialized temporary headers; clears to empty after success/error/cancellation. Cleanup survives cancellation for up to five seconds. Later commands wait and retain failures until successful `clear_extra_headers()` recovery on the original session. Raw transport calls bypass this coordination.
 - `page.reload()` - Reload the page
 - `page.back()` / `page.forward()` - History navigation
 
@@ -112,7 +122,7 @@ src/
 - `page.wait_for_text(text, timeout)` - Wait for text to appear
 - `page.wait_for_url_contains(pattern, timeout)` - Wait for URL pattern
 - `page.wait_for_url_change(timeout)` - Wait for navigation
-- `page.wait_for_network_idle(idle_ms, timeout)` - Wait for XHR/fetch to complete
+- `page.wait_for_network_idle(idle_ms, timeout)` - Private CDP tracking of the loaded top document's fetch/XHR requests through body completion, including preexisting requests. Excludes workers/subframes/WebSockets. Previously untracked attached tabs need full navigation/reload; same-document navigation is insufficient. Tracking failures/disconnection return errors; the entire wait obeys the timeout.
 - `page.wait(ms)` - Fixed delay
 
 ### Page - Info & Debug
@@ -196,6 +206,11 @@ Google scores before any page JS runs. Eoka launches with
 interception auto-continued in the transport reader
 (`StealthConfig.strip_x_client_data`). Auto-responder CDP command IDs must
 stay within int32 — DevTools silently drops commands with larger ids.
+
+### Proxy Authentication
+Configured proxy credentials answer only explicit `Proxy` challenges.
+`Server`, missing, and unknown sources receive `CancelAuth` without credentials.
+Without configured proxy credentials, auth events remain available to the caller.
 
 ### Document Proxy
 CDP markers ($cdc_*) are hidden via Proxy on document object. See `src/stealth/evasions.rs` CDP_EVASION.
