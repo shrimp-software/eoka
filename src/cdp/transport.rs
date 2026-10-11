@@ -384,6 +384,13 @@ pub enum CdpMessage {
 }
 
 impl Transport {
+    /// Whether the WebSocket reader has exited.
+    pub fn is_closed(&self) -> bool {
+        self.reader_handle
+            .as_ref()
+            .map_or(true, |reader| reader.is_finished())
+    }
+
     /// Create a new transport connecting to Chrome via WebSocket
     pub async fn new(child: Child, ws_url: &str) -> Result<Self> {
         Self::new_with_options(child, ws_url, None, 30, false).await

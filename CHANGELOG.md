@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.15] - 2026-10-10
+
+### Added
+
+- Native download watching for owned browsers, with exclusive configuration,
+  typed progress events, popup ancestry, cancellation, and bounded restoration.
+- Attachment navigation that accepts Chrome's native download handoff.
+- Bounded credentialed text fetches with byte limits, headers-only inspection,
+  binary-body omission, and stream cancellation at the limit.
+
 ## [0.5.9] - 2026-09-12
 
 ### Changed

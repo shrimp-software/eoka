@@ -349,6 +349,35 @@ let body = page.get_response_body(id).await?;
 page.disable_request_capture().await?;
 ```
 
+For bounded text inspection with the page's credentials:
+
+```rust
+let request = eoka::BoundedFetchRequest::get("/api/me");
+let response = page.fetch_bounded(&request).await?;
+assert!(response.bytes_read <= 8192);
+```
+
+`max_bytes` accepts zero (headers only) through `MAX_TEXT_FETCH_BYTES` (16 MiB).
+Known binary MIME bodies are omitted. Reading cancels at the limit and reports
+conservative truncation; incomplete trailing UTF-8 is omitted. This bounds retained
+text, not Chrome's native buffers. The original `Page::fetch` API is unchanged.
+
+For native files, `browser.watch_downloads(&staging_directory)` exclusively configures
+`allowAndName` and subscribes before the caller triggers input. `DownloadWatch`
+exposes beginning/progress events, cancellation, popup ancestry, and explicit
+`stop()` cleanup. Only owned browsers are supported. Target discovery is enabled
+for the watch and disabled on restoration; this assumes no competing owner of
+browser download or target-discovery settings. Event loss/disconnection fails;
+failed restoration prevents further watchers on that browser. Drop schedules
+bounded restoration but cannot confirm it to the caller.
+
+`page.navigate_for_download(url, referrer)` accepts native attachment navigation;
+a returned navigation result alone never proves a file downloaded. Wait for native
+completion and verify the regular file under its GUID. Untrusted suggested names
+must not determine filesystem paths. Destination handling, jobs and no-overwrite
+publication live in the sister `eoka-tools` repository. Core regression:
+`cargo test --lib download::`.
+
 ### Configuration & Dialogs
 
 ```rust

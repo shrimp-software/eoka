@@ -62,8 +62,10 @@
 
 #![deny(missing_docs)]
 
+pub mod bounded_fetch;
 pub mod browser;
 pub mod cdp;
+pub mod download;
 pub mod element;
 pub mod error;
 pub mod fetch;
@@ -84,7 +86,11 @@ const _: () = {
 };
 
 // Re-exports
+pub use bounded_fetch::{BoundedFetchRequest, BoundedFetchResponse, MAX_TEXT_FETCH_BYTES};
 pub use browser::{Browser, TabInfo};
+pub use download::{
+    DownloadBeginning, DownloadEvent, DownloadProgress, DownloadWatch, NativeDownloadState,
+};
 pub use element::{BoundingBox, Element};
 pub use error::{Error, Result};
 pub use fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};

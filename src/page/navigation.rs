@@ -44,6 +44,19 @@ impl Page {
         self.navigate_impl(url, None).await
     }
 
+    /// Navigate an auxiliary tab to an attachment URL. Native events, not this
+    /// acknowledgment, determine whether a download actually started.
+    pub async fn navigate_for_download(&self, url: &str, referrer: Option<&str>) -> Result<()> {
+        let result = self.session.navigate(url, referrer).await?;
+        self.invalidate_document();
+        if result.is_download == Some(true)
+            || result.error_text.as_deref() == Some("net::ERR_ABORTED")
+        {
+            return Ok(());
+        }
+        Self::check_nav_result(&result)
+    }
+
     /// Reload the page
     pub async fn reload(&self) -> Result<()> {
         self.session.reload(false).await?;

@@ -97,6 +97,9 @@ pub struct PageNavigate {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageNavigateResult {
+    /// Whether Chrome converted this navigation into a download.
+    #[serde(default)]
+    pub is_download: Option<bool>,
     #[serde(default)]
     pub frame_id: String,
     #[serde(default)]
