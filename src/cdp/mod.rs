@@ -11,6 +11,7 @@
 
 pub mod connection;
 pub mod discover;
+mod headers;
 pub mod transport;
 pub(crate) mod types;
 

@@ -3,37 +3,34 @@
 //! Manages browser and page sessions over the CDP transport.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::{Arc, Mutex};
 
 use super::transport::Transport;
 use super::types::*;
 use crate::error::Result;
 use crate::page::HeldInputState;
 
-type HeldInputRegistry = Arc<Mutex<HashMap<String, Weak<tokio::sync::Mutex<HeldInputState>>>>>;
+type TargetRegistry = Arc<Mutex<HashMap<String, Arc<TargetState>>>>;
 
-fn held_input_for_target(
-    registry: &HeldInputRegistry,
-    target_id: &str,
-) -> Arc<tokio::sync::Mutex<HeldInputState>> {
-    let mut held_inputs = registry
+#[derive(Default)]
+struct TargetState {
+    held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
+    headers: Arc<super::headers::HeaderState>,
+}
+
+fn state_for_target(registry: &TargetRegistry, target_id: &str) -> Arc<TargetState> {
+    let mut targets = registry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    held_inputs.retain(|_, state| state.strong_count() != 0);
-    if let Some(state) = held_inputs.get(target_id).and_then(Weak::upgrade) {
-        return state;
-    }
-    let state = Arc::new(tokio::sync::Mutex::new(HeldInputState::default()));
-    held_inputs.insert(target_id.to_string(), Arc::downgrade(&state));
-    state
+    targets.entry(target_id.to_owned()).or_default().clone()
 }
 
 /// A CDP connection to Chrome
 pub struct Connection {
     transport: Arc<Transport>,
-    /// Held-input state scoped by browser target, not CDP attachment session.
-    /// Weak entries avoid retaining stale state after all Page handles drop.
-    held_inputs: HeldInputRegistry,
+    /// Target state survives dropped Page handles, including failed header cleanup.
+    /// Explicit target closure or connection teardown releases the retained state.
+    targets: TargetRegistry,
 }
 
 impl Connection {
@@ -41,7 +38,7 @@ impl Connection {
     pub(crate) fn new(transport: Transport) -> Self {
         Self {
             transport: Arc::new(transport),
-            held_inputs: Arc::new(Mutex::new(HashMap::new())),
+            targets: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -95,8 +92,8 @@ impl Connection {
             transport: Arc::clone(&self.transport),
             session_id: result.session_id,
             target_id: target_id.to_string(),
-            held_input: held_input_for_target(&self.held_inputs, target_id),
-            held_inputs: Arc::clone(&self.held_inputs),
+            target: state_for_target(&self.targets, target_id),
+            targets: Arc::clone(&self.targets),
         })
     }
 
@@ -112,7 +109,7 @@ impl Connection {
             )
             .await?;
         if result.success {
-            self.remove_held_input(target_id);
+            self.remove_target(target_id);
         }
         Ok(result.success)
     }
@@ -126,8 +123,8 @@ impl Connection {
         Ok(result.target_infos)
     }
 
-    fn remove_held_input(&self, target_id: &str) {
-        self.held_inputs
+    fn remove_target(&self, target_id: &str) {
+        self.targets
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(target_id);
@@ -171,15 +168,15 @@ impl Connection {
 }
 
 /// A CDP session attached to a specific target. Cheap to clone; clones share
-/// the underlying transport and per-target held-input state.
+/// the underlying transport and per-target input and header state.
 #[derive(Clone)]
 pub struct Session {
     transport: Arc<Transport>,
     session_id: String,
     target_id: String,
     /// Per-target native input state shared by Page and Human helpers.
-    held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
-    held_inputs: HeldInputRegistry,
+    target: Arc<TargetState>,
+    targets: TargetRegistry,
 }
 
 impl Session {
@@ -200,7 +197,7 @@ impl Session {
 
     /// Return the per-target held-input coordinator state.
     pub(crate) fn held_input(&self) -> Arc<tokio::sync::Mutex<HeldInputState>> {
-        Arc::clone(&self.held_input)
+        Arc::clone(&self.target.held_input)
     }
 
     pub(crate) async fn attach_frame_target(&self, target_id: &str) -> Result<Session> {
@@ -218,8 +215,8 @@ impl Session {
             transport: Arc::clone(&self.transport),
             session_id: result.session_id,
             target_id: target_id.to_string(),
-            held_input: held_input_for_target(&self.held_inputs, target_id),
-            held_inputs: Arc::clone(&self.held_inputs),
+            target: state_for_target(&self.targets, target_id),
+            targets: Arc::clone(&self.targets),
         })
     }
 
@@ -272,6 +269,7 @@ impl Session {
         C: serde::Serialize,
         R: serde::de::DeserializeOwned,
     {
+        self.target.headers.wait().await?;
         self.transport
             .send_to_session(&self.session_id, method, params)
             .await
@@ -296,6 +294,15 @@ impl Session {
         url: &str,
         referrer: Option<&str>,
     ) -> Result<PageNavigateResult> {
+        let _scope = self.target.headers.lock().await?;
+        self.navigate_unlocked(url, referrer).await
+    }
+
+    pub(crate) async fn navigate_unlocked(
+        &self,
+        url: &str,
+        referrer: Option<&str>,
+    ) -> Result<PageNavigateResult> {
         self.send(
             "Page.navigate",
             &PageNavigate {
@@ -312,16 +319,29 @@ impl Session {
         &self,
         headers: std::collections::HashMap<String, String>,
     ) -> Result<()> {
-        self.send_void(
-            "Network.setExtraHTTPHeaders",
-            &NetworkSetExtraHTTPHeaders { headers },
-        )
-        .await
+        let _scope = self.target.headers.lock().await?;
+        self.set_extra_headers_unlocked(headers).await
     }
 
-    /// Remove all extra HTTP headers previously set via set_extra_headers.
+    pub(crate) async fn set_extra_headers_unlocked(
+        &self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<()> {
+        super::headers::set_headers(&self.transport, &self.session_id, headers).await
+    }
+
+    pub(crate) async fn temporary_headers(&self) -> Result<super::headers::TemporaryHeaders> {
+        self.target
+            .headers
+            .temporary(self.transport.clone(), &self.session_id)
+            .await
+    }
+
+    /// Clear headers, including restoration left pending by a cancelled navigation.
     pub(crate) async fn clear_extra_headers(&self) -> Result<()> {
-        self.set_extra_headers(std::collections::HashMap::new())
+        self.target
+            .headers
+            .clear(self.transport.clone(), &self.session_id)
             .await
     }
 
@@ -444,6 +464,7 @@ impl Session {
 
     /// Reload the page
     pub(crate) async fn reload(&self, ignore_cache: bool) -> Result<()> {
+        let _scope = self.target.headers.lock().await?;
         self.send_void(
             "Page.reload",
             &PageReload {
@@ -456,6 +477,7 @@ impl Session {
 
     /// Navigate to a history entry by offset (-1 = back, +1 = forward)
     async fn navigate_history(&self, offset: i32) -> Result<()> {
+        let _scope = self.target.headers.lock().await?;
         let history: PageGetNavigationHistoryResult = self
             .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
             .await?;

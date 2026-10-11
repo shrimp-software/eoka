@@ -85,16 +85,25 @@ impl Page {
     }
 
     /// Navigate to `url` while sending custom HTTP headers.
-    /// Headers are set before navigation and cleared afterward.
+    /// Headers are set before navigation and cleared to an empty map afterward,
+    /// including on error or cancellation; previous headers are not restored.
+    /// Navigation and header changes on the same target are serialized.
+    /// Cancelled cleanup continues in the background for up to five seconds.
+    /// Later commands wait for it and report any failure until a successful
+    /// `clear_extra_headers` explicitly recovers the target.
     pub async fn goto_with_headers(
         &self,
         url: &str,
         headers: HashMap<String, String>,
     ) -> Result<()> {
-        self.session.set_extra_headers(headers).await?;
-        let navigation = self.goto(url).await;
-        let cleanup = self.session.clear_extra_headers().await;
-        finish_temporary_headers(navigation, cleanup)
+        let guard = self.session.temporary_headers().await?;
+        let navigation = async {
+            self.session.set_extra_headers_unlocked(headers).await?;
+            let result = self.session.navigate_unlocked(url, None).await?;
+            self.finish_navigation(result).await
+        }
+        .await;
+        finish_temporary_headers(navigation, guard.finish().await)
     }
 
     /// Navigate to `url` with a custom Referer header.
@@ -105,6 +114,10 @@ impl Page {
     /// Shared navigation impl
     async fn navigate_impl(&self, url: &str, referrer: Option<&str>) -> Result<()> {
         let result = self.session.navigate(url, referrer).await?;
+        self.finish_navigation(result).await
+    }
+
+    async fn finish_navigation(&self, result: crate::cdp::types::PageNavigateResult) -> Result<()> {
         Self::check_nav_result(&result)?;
         self.invalidate_document();
         // Give Chrome a brief opportunity to install the new document, but do
