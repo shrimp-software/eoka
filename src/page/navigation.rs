@@ -1,24 +1,7 @@
 use std::collections::HashMap;
 
-use super::{sleep_ms, Page, SETTLE_MS};
+use super::Page;
 use crate::error::{Error, Result};
-
-/// Preserve the primary operation error when both an operation and its
-/// mandatory cleanup fail. A cleanup-only failure must still reach the caller.
-fn finish_temporary_headers<T>(operation: Result<T>, cleanup: Result<()>) -> Result<T> {
-    match (operation, cleanup) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), Ok(())) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(operation_error), Err(cleanup_error)) => {
-            tracing::error!(
-                "Failed to clear temporary HTTP headers after navigation error: {}",
-                cleanup_error
-            );
-            Err(operation_error)
-        }
-    }
-}
 
 impl Page {
     /// Check a navigation result for errors.
@@ -32,16 +15,19 @@ impl Page {
         Ok(())
     }
 
-    /// Start navigation to a URL.
-    ///
-    /// This returns once Chrome accepts the navigation rather than waiting for
-    /// `document.readyState`. A page can legally remain in `loading` forever
-    /// (for example, a single-page app with a long-lived resource), and making
-    /// navigation wait on that state turns a best-effort convenience into a
-    /// 30-second command stall. Call an explicit wait method when a later
-    /// action actually needs a particular element or condition.
+    /// Navigate and verify a new document or same-document navigation commit.
+    /// The full operation, including the target queue, obeys the configured deadline.
+    /// Use an explicit expectation when application readiness requires more than a commit.
     pub async fn goto(&self, url: &str) -> Result<()> {
-        self.navigate_impl(url, None).await
+        self.act(
+            crate::Action::Navigate {
+                url: url.into(),
+                referrer: None,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Navigate an auxiliary tab to an attachment URL. Native events, not this
@@ -59,23 +45,23 @@ impl Page {
 
     /// Reload the page
     pub async fn reload(&self) -> Result<()> {
-        self.session.reload(false).await?;
-        self.invalidate_document();
-        Ok(())
+        self.act(crate::Action::Reload, self.action_options.clone())
+            .await
+            .map(|_| ())
     }
 
     /// Go back in history
     pub async fn back(&self) -> Result<()> {
-        self.session.go_back().await?;
-        self.invalidate_document();
-        Ok(())
+        self.act(crate::Action::Back, self.action_options.clone())
+            .await
+            .map(|_| ())
     }
 
     /// Go forward in history
     pub async fn forward(&self) -> Result<()> {
-        self.session.go_forward().await?;
-        self.invalidate_document();
-        Ok(())
+        self.act(crate::Action::Forward, self.action_options.clone())
+            .await
+            .map(|_| ())
     }
 
     /// Get current URL
@@ -96,36 +82,28 @@ impl Page {
         url: &str,
         headers: HashMap<String, String>,
     ) -> Result<()> {
-        let guard = self.session.temporary_headers().await?;
-        let navigation = async {
-            self.session.set_extra_headers_unlocked(headers).await?;
-            let result = self.session.navigate_unlocked(url, None).await?;
-            self.finish_navigation(result).await
-        }
-        .await;
-        finish_temporary_headers(navigation, guard.finish().await)
+        self.act(
+            crate::Action::NavigateWithHeaders {
+                url: url.into(),
+                headers,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Navigate to `url` with a custom Referer header.
     pub async fn goto_with_referrer(&self, url: &str, referrer: &str) -> Result<()> {
-        self.navigate_impl(url, Some(referrer)).await
-    }
-
-    /// Shared navigation impl
-    async fn navigate_impl(&self, url: &str, referrer: Option<&str>) -> Result<()> {
-        let result = self.session.navigate(url, referrer).await?;
-        self.finish_navigation(result).await
-    }
-
-    async fn finish_navigation(&self, result: crate::cdp::types::PageNavigateResult) -> Result<()> {
-        Self::check_nav_result(&result)?;
-        self.invalidate_document();
-        // Give Chrome a brief opportunity to install the new document, but do
-        // not probe readyState here. A Runtime.evaluate issued while a SPA is
-        // tearing down its previous document can itself wait for the full CDP
-        // command timeout and block a persistent automation daemon.
-        sleep_ms(SETTLE_MS).await;
-        Ok(())
+        self.act(
+            crate::Action::Navigate {
+                url: url.into(),
+                referrer: Some(referrer.into()),
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Disable CSP enforcement for the current page.
@@ -159,25 +137,5 @@ impl Page {
     /// Dismiss a pending JS dialog (cancel / close).
     pub async fn dismiss_dialog(&self) -> Result<()> {
         self.session.handle_dialog(false, None).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_temporary_header_cleanup_error_reaches_caller() {
-        let result = finish_temporary_headers(Ok(()), Err(Error::transport("cleanup failed")));
-        assert!(matches!(result, Err(Error::Transport { .. })));
-    }
-
-    #[test]
-    fn test_navigation_error_wins_when_header_cleanup_also_fails() {
-        let result = finish_temporary_headers::<()>(
-            Err(Error::Navigation("navigation failed".into())),
-            Err(Error::transport("cleanup failed")),
-        );
-        assert!(matches!(result, Err(Error::Navigation(_))));
     }
 }

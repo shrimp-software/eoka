@@ -18,27 +18,27 @@ impl Page {
     /// Generic polling helper — calls `check` every `POLL_INTERVAL_MS` until it
     /// returns `Ok(Some(value))`, then returns that value. Operational errors
     /// propagate immediately; `Ok(None)` retries until the timeout.
-    async fn poll_until<T, F, Fut>(&self, timeout_ms: u64, error_msg: String, check: F) -> Result<T>
+    async fn poll_until<T, F, Fut>(timeout_ms: u64, error_msg: String, check: F) -> Result<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<Option<T>>>,
     {
-        let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_millis(timeout_ms);
-        loop {
-            if let Some(val) = check().await? {
-                return Ok(val);
+        tokio::time::timeout(timeout, async {
+            loop {
+                if let Some(val) = check().await? {
+                    return Ok(val);
+                }
+                sleep_ms(POLL_INTERVAL_MS).await;
             }
-            if start.elapsed() > timeout {
-                return Err(Error::Timeout(error_msg));
-            }
-            sleep_ms(POLL_INTERVAL_MS).await;
-        }
+        })
+        .await
+        .map_err(|_| Error::Timeout(error_msg))?
     }
 
     /// Wait for an element to appear in the DOM
     pub async fn wait_for(&self, selector: &str, timeout_ms: u64) -> Result<Element> {
-        self.poll_until(
+        Self::poll_until(
             timeout_ms,
             format!("Element '{}' not found within {}ms", selector, timeout_ms),
             || async { retry_if_not_found(self.find(selector).await) },
@@ -48,7 +48,7 @@ impl Page {
 
     /// Wait for an element to be visible and clickable
     pub async fn wait_for_visible(&self, selector: &str, timeout_ms: u64) -> Result<Element> {
-        self.poll_until(
+        Self::poll_until(
             timeout_ms,
             format!("Element '{}' not visible within {}ms", selector, timeout_ms),
             || async {
@@ -67,7 +67,7 @@ impl Page {
 
     /// Wait for an element to disappear
     pub async fn wait_for_hidden(&self, selector: &str, timeout_ms: u64) -> Result<()> {
-        self.poll_until(
+        Self::poll_until(
             timeout_ms,
             format!(
                 "Element '{}' still visible after {}ms",
@@ -96,7 +96,7 @@ impl Page {
 
     /// Wait for an element with specific text to appear
     pub async fn wait_for_text(&self, text: &str, timeout_ms: u64) -> Result<Element> {
-        self.poll_until(
+        Self::poll_until(
             timeout_ms,
             format!(
                 "Element with text '{}' not found within {}ms",
@@ -109,7 +109,7 @@ impl Page {
 
     /// Wait for the URL to contain a specific string
     pub async fn wait_for_url_contains(&self, pattern: &str, timeout_ms: u64) -> Result<()> {
-        self.poll_until(
+        Self::poll_until(
             timeout_ms,
             format!("URL did not contain '{}' within {}ms", pattern, timeout_ms),
             || async {
@@ -122,26 +122,30 @@ impl Page {
 
     /// Wait for URL to change from current URL
     pub async fn wait_for_url_change(&self, timeout_ms: u64) -> Result<String> {
-        let original_url = self.url().await?;
-        self.poll_until(
-            timeout_ms,
-            format!(
-                "URL did not change from '{}' within {}ms",
-                original_url, timeout_ms
-            ),
-            || async {
-                let url = self.url().await?;
-                Ok((url != original_url).then_some(url))
-            },
-        )
+        tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async {
+            let original_url = self.url().await?;
+            Self::poll_until(
+                timeout_ms,
+                format!(
+                    "URL did not change from '{}' within {}ms",
+                    original_url, timeout_ms
+                ),
+                || async {
+                    let url = self.url().await?;
+                    Ok((url != original_url).then_some(url))
+                },
+            )
+            .await
+        })
         .await
+        .map_err(|_| Error::Timeout("URL did not change before the deadline".into()))?
     }
 
     /// Wait for any of the given selectors to appear
     ///
     /// Returns the first selector that matches.
     pub async fn wait_for_any(&self, selectors: &[&str], timeout_ms: u64) -> Result<Element> {
-        self.poll_until(
+        Self::poll_until(
             timeout_ms,
             format!(
                 "None of selectors found within {}ms: {:?}",
@@ -181,6 +185,7 @@ impl Page {
         for attempt in 1..=attempts {
             match operation().await {
                 Ok(result) => return Ok(result),
+                Err(e @ Error::Action { .. }) => return Err(e),
                 Err(e) => {
                     last_error = e.to_string();
                     if attempt < attempts {
@@ -200,6 +205,18 @@ impl Page {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn slow_command_cannot_overrun_poll_deadline() {
+        let start = tokio::time::Instant::now();
+        let result: Result<()> = Page::poll_until(100, "bounded".into(), || async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok(Some(()))
+        })
+        .await;
+        assert!(matches!(result, Err(Error::Timeout(_))));
+        assert_eq!(start.elapsed(), std::time::Duration::from_millis(100));
+    }
 
     #[test]
     fn test_retry_if_not_found_only_retries_absence() {

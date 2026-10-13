@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run --example smoke
 
-use eoka::{Browser, Result};
+use eoka::{ActionOptions, Browser, Expectation, LocatorSpec, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,7 +23,13 @@ async fn main() -> Result<()> {
     // === Click ===
     page.goto(r#"data:text/html,<button id="btn" onclick="this.textContent='Clicked!'">Click Me</button>"#).await?;
     page.wait_for("#btn", 5000).await?;
-    page.click("#btn").await?;
+    page.locator("#btn")
+        .click(ActionOptions::expecting(Expectation::Text {
+            target: LocatorSpec::css("#btn"),
+            value: "Clicked!".into(),
+            contains: false,
+        }))
+        .await?;
     page.wait(100).await;
     let text: String = page
         .evaluate("document.getElementById('btn').textContent")
@@ -59,12 +65,17 @@ async fn main() -> Result<()> {
     println!("4. Element inspection on unfocusable elements: ok");
 
     // === Try-click ===
-    page.goto(r#"data:text/html,<a href="https://example.com">Sign In</a><button>Submit</button>"#)
+    page.goto(r#"data:text/html,<a href="https://example.com">Sign In</a><button onclick="this.textContent='Submitted'">Submit</button>"#)
         .await?;
     page.wait(500).await;
-    let found = page.try_click("#nonexistent").await?;
+    let configured = page.with_action_options(ActionOptions::expecting(Expectation::Text {
+        target: LocatorSpec::css("button"),
+        value: "Submitted".into(),
+        contains: false,
+    }));
+    let found = configured.try_click("#nonexistent").await?;
     assert!(!found);
-    let found = page.try_click_by_text("Submit").await?;
+    let found = configured.try_click_by_text("Submit").await?;
     assert!(found);
     println!("5. Try-click: ok");
 
@@ -83,7 +94,12 @@ async fn main() -> Result<()> {
     page.goto(r#"data:text/html,<input id="inp" type="text">"#)
         .await?;
     page.wait_for("#inp", 5000).await?;
-    page.type_into("#inp", "hello").await?;
+    page.with_action_options(ActionOptions::expecting(Expectation::Value {
+        target: LocatorSpec::css("#inp"),
+        value: "hello".into(),
+    }))
+    .type_into("#inp", "hello")
+    .await?;
     let val: String = page
         .evaluate("document.getElementById('inp').value")
         .await?;

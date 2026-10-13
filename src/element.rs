@@ -3,7 +3,8 @@
 //! DOM element wrapper and its bounding box type. Split out of `page.rs`.
 
 use crate::error::{Error, Result};
-use crate::page::{escape_js_string, sleep_ms, Page, INTERACTION_DELAY_MS};
+use crate::page::{escape_js_string, Page};
+use crate::{Action, LocatorQuery, LocatorSpec};
 
 /// Bounding box of an element
 #[derive(Debug, Clone, Copy)]
@@ -35,6 +36,14 @@ pub struct Element {
 }
 
 impl Element {
+    fn action_target(&self) -> LocatorSpec {
+        LocatorSpec {
+            query: LocatorQuery::Node { id: self.node_id },
+            frame_id: None,
+            index: None,
+        }
+    }
+
     /// Get the element's center coordinates
     pub async fn center(&self) -> Result<(f64, f64)> {
         let model = self.page.session.get_box_model(self.node_id).await?;
@@ -45,21 +54,48 @@ impl Element {
 
     /// Click this element
     pub async fn click(&self) -> Result<()> {
-        let (x, y) = self.center().await?;
-        self.page.click_at(x, y).await
+        self.page
+            .act(
+                Action::Click {
+                    target: self.action_target(),
+                    human: false,
+                    double: false,
+                },
+                self.page.action_options.clone(),
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Human-like click
     pub async fn human_click(&self) -> Result<()> {
-        let (x, y) = self.center().await?;
-        self.page.human().move_and_click(x, y).await
+        self.page
+            .act(
+                Action::Click {
+                    target: self.action_target(),
+                    human: true,
+                    double: false,
+                },
+                self.page.action_options.clone(),
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Drag horizontally from this element's center using human-like motion.
     /// See [`crate::stealth::Human::drag_by`] for ownership and cleanup semantics.
     pub async fn human_drag_by(&self, dx: f64) -> Result<()> {
-        let (x, y) = self.center().await?;
-        self.page.human().drag_by(x, y, dx).await
+        self.page
+            .act(
+                Action::Drag {
+                    target: self.action_target(),
+                    dx,
+                    dy: 0.0,
+                },
+                self.page.action_options.clone(),
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Get outer HTML
@@ -103,14 +139,30 @@ impl Element {
 
     /// Type text into this element
     pub async fn type_text(&self, text: &str) -> Result<()> {
-        self.click().await?;
-        sleep_ms(INTERACTION_DELAY_MS).await;
-        self.page.session.insert_text(text).await
+        self.page
+            .act(
+                Action::Type {
+                    target: self.action_target(),
+                    text: text.into(),
+                    human: false,
+                },
+                self.page.action_options.clone(),
+            )
+            .await
+            .map(|_| ())
     }
 
     /// Focus this element
     pub async fn focus(&self) -> Result<()> {
-        self.page.session.focus(self.node_id).await
+        self.page
+            .act(
+                Action::Focus {
+                    target: self.action_target(),
+                },
+                self.page.action_options.clone(),
+            )
+            .await
+            .map(|_| ())
     }
     /// Check if the element is visible (has a computable box model)
     pub async fn is_visible(&self) -> Result<bool> {
@@ -189,57 +241,6 @@ impl Element {
         self.eval_str("this.value || ''").await
     }
 
-    /// Return this element's effective input type, if it is an input.
-    pub(crate) async fn input_type(&self) -> Result<Option<String>> {
-        let value = self
-            .eval_on_element("this instanceof HTMLInputElement ? this.type : null")
-            .await?;
-        Ok(value.as_str().map(str::to_owned))
-    }
-
-    /// Set a range input through its property and notify application listeners.
-    ///
-    /// The assignment is first checked on a detached clone so unsupported,
-    /// out-of-range, or step-invalid requests do not mutate the live control.
-    /// Returns the browser-normalized value when it is accepted.
-    pub(crate) async fn set_range_value(&self, value: &str) -> Result<Option<String>> {
-        let object_id = self.page.session.resolve_node(self.node_id).await?;
-        let requested = serde_json::to_string(value)?;
-        let function = format!(
-            r#"function() {{
-                const requested = {requested};
-                const requestedNumber = Number(requested);
-                if (!Number.isFinite(requestedNumber)) return null;
-                const probe = this.cloneNode(false);
-                probe.value = requested;
-                const normalized = probe.value;
-                if (!probe.validity.valid || Number(normalized) !== requestedNumber) return null;
-                this.value = requested;
-                // Capture before listeners run: fill must reject handlers that
-                // overwrite the requested range value during input/change.
-                const assigned = this.value;
-                this.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                this.dispatchEvent(new Event('change', {{ bubbles: true }}));
-                return assigned;
-            }}"#
-        );
-        let result = self
-            .page
-            .session
-            .call_function_on(&object_id, &function)
-            .await?;
-        if let Some(exception) = result.exception_details {
-            return Err(Error::cdp_msg(format!(
-                "JavaScript error: {} at {}:{}",
-                exception.text, exception.line_number, exception.column_number
-            )));
-        }
-        Ok(result
-            .result
-            .value
-            .and_then(|value| value.as_str().map(str::to_owned)))
-    }
-
     /// Get computed CSS property value
     pub async fn css(&self, property: &str) -> Result<String> {
         let escaped = escape_js_string(property);
@@ -252,15 +253,15 @@ impl Element {
 
     /// Scroll this element into view
     pub async fn scroll_into_view(&self) -> Result<()> {
-        let object_id = self.page.session.resolve_node(self.node_id).await?;
         self.page
-            .session
-            .call_function_on(
-                &object_id,
-                "function() { this.scrollIntoView({ behavior: 'smooth', block: 'center' }); }",
+            .act(
+                Action::ScrollIntoView {
+                    target: self.action_target(),
+                },
+                self.page.action_options.clone(),
             )
-            .await?;
-        Ok(())
+            .await
+            .map(|_| ())
     }
 }
 

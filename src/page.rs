@@ -27,17 +27,13 @@ use crate::StealthConfig;
 
 pub(crate) use input::{
     coordinated_key_char, coordinated_key_down, coordinated_key_up, coordinated_mouse_down,
-    coordinated_mouse_move, coordinated_mouse_up, coordinated_mouse_wheel, DragInput,
+    coordinated_mouse_move, coordinated_mouse_up, coordinated_mouse_wheel, ActionInput, DragInput,
     HeldInputState,
 };
 
 // Re-export so the historical `eoka::page::Element` / `eoka::page::BoundingBox`
 // paths keep resolving after the split into `element.rs`.
 pub use crate::element::{BoundingBox, Element};
-
-/// Settle time (ms) used after actions (click, navigate, hover) to let the
-/// page react before the next step.
-const SETTLE_MS: u64 = 100;
 
 /// Brief pause (ms) between micro-interactions (e.g. focus→type, select_all→delete).
 pub(crate) const INTERACTION_DELAY_MS: u64 = 50;
@@ -91,7 +87,8 @@ fn is_element_cdp_error(e: &Error) -> bool {
                 || is_missing_node_message(message)
                 || message.contains("Node is not an element")
         }
-        Error::Launch(_)
+        Error::Action { .. }
+        | Error::Launch(_)
         | Error::Transport { .. }
         | Error::Navigation(_)
         | Error::Timeout(_)
@@ -140,6 +137,7 @@ pub enum MouseButton {
 #[derive(Clone)]
 pub struct Page {
     pub(crate) session: Session,
+    pub(crate) action_options: crate::ActionOptions,
     config: Arc<StealthConfig>,
     /// Cached root `DOM.getDocument` node id (invalidated on navigation).
     /// CDP node IDs are positive, so zero represents an empty cache. Fetching
@@ -154,11 +152,20 @@ impl Page {
     pub(crate) fn new(session: Session, config: Arc<StealthConfig>) -> Self {
         let held_input = session.held_input();
         Self {
+            action_options: crate::ActionOptions::default(),
             session,
             config,
             root_node: Arc::new(AtomicI32::new(0)),
             held_input,
         }
+    }
+
+    /// Return a page handle whose convenience actions use these options.
+    /// Other handles retain their options. Use `act` to receive the success receipt.
+    pub fn with_action_options(&self, options: crate::ActionOptions) -> Self {
+        let mut page = self.clone();
+        page.action_options = options;
+        page
     }
 
     /// Return the cached root document node id, fetching it once if needed.
@@ -173,7 +180,7 @@ impl Page {
     }
 
     /// Drop the cached document node (call after navigation).
-    fn invalidate_document(&self) {
+    pub(crate) fn invalidate_document(&self) {
         self.root_node.store(0, Ordering::Release);
     }
 

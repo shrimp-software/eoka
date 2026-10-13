@@ -1,14 +1,21 @@
-use super::{
-    escape_js_string, is_element_cdp_error, sleep_ms, Element, Page, TextMatch,
-    INTERACTION_DELAY_MS, SETTLE_MS,
-};
+use super::{escape_js_string, Element, Page, TextMatch};
 use crate::error::{Error, Result};
+use crate::{Action, LocatorSpec};
 
 impl Page {
     /// Drag horizontally from the selected element's center.
     /// For explicit cancellation cleanup, retain a [`crate::stealth::Human`] helper.
     pub async fn human_drag(&self, selector: &str, dx: f64) -> Result<()> {
-        self.find(selector).await?.human_drag_by(dx).await
+        self.act(
+            Action::Drag {
+                target: LocatorSpec::css(selector),
+                dx,
+                dy: 0.0,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Find an element by CSS selector
@@ -188,46 +195,84 @@ impl Page {
 
     /// Click on an element by selector
     pub async fn click(&self, selector: &str) -> Result<()> {
-        let element = self.find(selector).await?;
-        element.click().await
+        self.act(
+            Action::Click {
+                target: LocatorSpec::css(selector),
+                human: false,
+                double: false,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Type text into an element by selector
     pub async fn type_into(&self, selector: &str, text: &str) -> Result<()> {
-        let element = self.find(selector).await?;
-        element.click().await?;
-        sleep_ms(INTERACTION_DELAY_MS).await;
-        self.session.insert_text(text).await
+        self.act(
+            Action::Type {
+                target: LocatorSpec::css(selector),
+                text: text.into(),
+                human: false,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Click an element by its text content
     pub async fn click_by_text(&self, text: &str) -> Result<()> {
-        let element = self.find_by_text(text).await?;
-        element.click().await
+        self.act(
+            Action::Click {
+                target: LocatorSpec::text(text),
+                human: false,
+                double: false,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Try to click an element, returning Ok(false) if not found or not clickable
     #[must_use = "returns true if clicked, false if not found/visible"]
     pub async fn try_click(&self, selector: &str) -> Result<bool> {
-        self.try_click_impl(self.find(selector).await).await
+        self.try_action(Action::Click {
+            target: LocatorSpec::css(selector),
+            human: false,
+            double: false,
+        })
+        .await
     }
 
     /// Try to click an element by text, returning Ok(false) if not found or not clickable
     #[must_use = "returns true if clicked, false if not found/visible"]
     pub async fn try_click_by_text(&self, text: &str) -> Result<bool> {
-        self.try_click_impl(self.find_by_text(text).await).await
+        self.try_action(Action::Click {
+            target: LocatorSpec::text(text),
+            human: false,
+            double: false,
+        })
+        .await
     }
 
-    /// Shared impl for try_click and try_click_by_text
-    async fn try_click_impl(&self, find_result: Result<Element>) -> Result<bool> {
-        match find_result {
-            Ok(element) => match element.click().await {
-                Ok(()) => Ok(true),
-                Err(e) if is_element_cdp_error(&e) => Ok(false),
-                Err(e) => Err(e),
-            },
-            Err(e) if is_element_cdp_error(&e) => Ok(false),
-            Err(e) => Err(e),
+    async fn try_action(&self, action: Action) -> Result<bool> {
+        let mut options = self.action_options.clone();
+        options.wait_for_target = false;
+        match self.act(action, options).await {
+            Ok(_) => Ok(true),
+            Err(Error::Action {
+                receipt, source, ..
+            }) if receipt.dispatch == crate::DispatchState::NotSent
+                && matches!(
+                    *source,
+                    Error::ElementNotFound(_) | Error::ElementNotVisible { .. }
+                ) =>
+            {
+                Ok(false)
+            }
+            Err(error) => Err(error),
         }
     }
 
@@ -238,138 +283,94 @@ impl Page {
     /// min/max/step constraints; accepted range values dispatch bubbling
     /// `input` and `change` events.
     pub async fn fill(&self, selector: &str, value: &str) -> Result<()> {
-        let element = self.find(selector).await?;
-
-        if element.input_type().await?.as_deref() == Some("range") {
-            // Clicking a range is itself a value-changing native action. Focus
-            // it directly so this method emits only the assignment events.
-            element.focus().await?;
-            let expected = match element.set_range_value(value).await? {
-                Some(value) => value,
-                None => {
-                    return Err(Error::ValueMismatch {
-                        selector: selector.to_string(),
-                        expected: value.to_string(),
-                        actual: element.value().await?,
-                    });
-                }
-            };
-            return self
-                .verify_filled_value(&element, selector, &expected)
-                .await;
-        }
-
-        element.click().await?;
-        sleep_ms(INTERACTION_DELAY_MS).await;
-
-        // Focus + select via selector (don't rely on activeElement — popups can steal focus).
-        let escaped = escape_js_string(selector);
-        self.execute(&format!(
-            "(() => {{ const el = document.querySelector('{}'); if (el) {{ el.focus(); el.select(); }} }})()",
-            escaped
-        )).await?;
-        self.session.insert_text("").await?;
-        self.session.insert_text(value).await?;
-        self.verify_filled_value(&element, selector, value).await
-    }
-
-    async fn verify_filled_value(
-        &self,
-        element: &Element,
-        selector: &str,
-        expected: &str,
-    ) -> Result<()> {
-        let actual = element.value().await?;
-        if actual == expected {
-            Ok(())
-        } else {
-            Err(Error::ValueMismatch {
-                selector: selector.to_string(),
-                expected: expected.to_string(),
-                actual,
-            })
-        }
+        self.act(
+            Action::Fill {
+                target: LocatorSpec::css(selector),
+                value: value.into(),
+                human: false,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Human-like click on an element
     pub async fn human_click(&self, selector: &str) -> Result<()> {
-        let element = self.find(selector).await?;
-        let (x, y) = element.center().await?;
-        self.human_click_at_center_xy(x, y).await
+        self.act(
+            Action::Click {
+                target: LocatorSpec::css(selector),
+                human: true,
+                double: false,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Human-like typing into an element
     pub async fn human_type(&self, selector: &str, text: &str) -> Result<()> {
-        self.human_click(selector).await?;
-        sleep_ms(SETTLE_MS).await;
-        self.human_type_text(text).await
+        self.act(
+            Action::Type {
+                target: LocatorSpec::css(selector),
+                text: text.into(),
+                human: true,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Human-like click on an element found by text content
     pub async fn human_click_by_text(&self, text: &str) -> Result<()> {
-        let element = self.find_by_text(text).await?;
-        let (x, y) = element.center().await?;
-        self.human_click_at_center_xy(x, y).await
+        self.act(
+            Action::Click {
+                target: LocatorSpec::text(text),
+                human: true,
+                double: false,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Try to human-click an element, returning Ok(true) if clicked, Ok(false) if not found or not clickable
     #[must_use = "returns true if clicked, false if not found/visible"]
     pub async fn try_human_click(&self, selector: &str) -> Result<bool> {
-        self.try_human_click_impl(self.find(selector).await).await
+        self.try_action(Action::Click {
+            target: LocatorSpec::css(selector),
+            human: true,
+            double: false,
+        })
+        .await
     }
 
     /// Try to human-click an element by text, returning Ok(true) if clicked, Ok(false) if not found or not clickable
     #[must_use = "returns true if clicked, false if not found/visible"]
     pub async fn try_human_click_by_text(&self, text: &str) -> Result<bool> {
-        self.try_human_click_impl(self.find_by_text(text).await)
-            .await
+        self.try_action(Action::Click {
+            target: LocatorSpec::text(text),
+            human: true,
+            double: false,
+        })
+        .await
     }
 
     /// Human-like form fill: click, clear, type with natural delays
     pub async fn human_fill(&self, selector: &str, value: &str) -> Result<()> {
-        self.human_click(selector).await?;
-        sleep_ms(SETTLE_MS).await;
-        let escaped = escape_js_string(selector);
-        let select_js = format!(
-            "(() => {{ const el = document.querySelector('{escaped}'); \
-             if (el) {{ el.focus(); if (typeof el.select === 'function') el.select(); }} }})()"
-        );
-        self.execute(&select_js).await?;
-        sleep_ms(INTERACTION_DELAY_MS).await;
-        self.human_type_text(value).await
-    }
-
-    /// Type text, using human-like timing if configured
-    async fn human_type_text(&self, text: &str) -> Result<()> {
-        if self.config.human_typing {
-            self.human().type_text(text).await
-        } else {
-            self.session.insert_text(text).await
-        }
-    }
-
-    async fn human_click_at_center_xy(&self, x: f64, y: f64) -> Result<()> {
-        if self.config.human_mouse {
-            self.human().move_and_click(x, y).await
-        } else {
-            self.click_at(x, y).await
-        }
-    }
-
-    /// Shared impl for try_human_click and try_human_click_by_text
-    async fn try_human_click_impl(&self, find_result: Result<Element>) -> Result<bool> {
-        match find_result {
-            Ok(element) => match element.center().await {
-                Ok((x, y)) => {
-                    self.human_click_at_center_xy(x, y).await?;
-                    Ok(true)
-                }
-                Err(e) if is_element_cdp_error(&e) => Ok(false),
-                Err(e) => Err(e),
+        self.act(
+            Action::Fill {
+                target: LocatorSpec::css(selector),
+                value: value.into(),
+                human: true,
             },
-            Err(e) if is_element_cdp_error(&e) => Ok(false),
-            Err(e) => Err(e),
-        }
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Find the first element matching any of the given selectors
@@ -394,53 +395,79 @@ impl Page {
 
     /// Upload multiple files to a file input element
     pub async fn upload_files(&self, selector: &str, paths: &[&str]) -> Result<()> {
-        let element = self.find(selector).await?;
-        self.session
-            .set_file_input_files(
-                element.node_id,
-                paths.iter().map(|p| p.to_string()).collect(),
-            )
-            .await
+        self.act(
+            Action::Upload {
+                target: LocatorSpec::css(selector),
+                files: paths.iter().map(|v| (*v).into()).collect(),
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Select option by value
     pub async fn select(&self, selector: &str, value: &str) -> Result<()> {
-        let (sel, val) = (escape_js_string(selector), escape_js_string(value));
-        self.execute(&format!(
-            r#"(()=>{{const el=document.querySelector('{sel}');if(!el)throw new Error('Select not found');const opt=[...el.options].find(o=>o.value==='{val}');if(!opt)throw new Error('Option not found: {val}');el.value='{val}';el.dispatchEvent(new Event('change',{{bubbles:true}}))}})()"#
-        )).await
+        self.act(
+            Action::Select {
+                target: LocatorSpec::css(selector),
+                values: vec![value.into()],
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Select option by visible text
     pub async fn select_by_text(&self, selector: &str, text: &str) -> Result<()> {
-        let (sel, txt) = (escape_js_string(selector), escape_js_string(text));
-        self.execute(&format!(
-            r#"(()=>{{const el=document.querySelector('{sel}');if(!el)throw new Error('Select not found');const opt=[...el.options].find(o=>o.text.trim()==='{txt}');if(!opt)throw new Error('Option not found: {txt}');el.value=opt.value;el.dispatchEvent(new Event('change',{{bubbles:true}}))}})()"#
-        )).await
+        self.act(
+            Action::SelectText {
+                target: LocatorSpec::css(selector),
+                text: text.into(),
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Select multiple options by values
     pub async fn select_multiple(&self, selector: &str, values: &[&str]) -> Result<()> {
-        let sel = escape_js_string(selector);
-        let vals = serde_json::to_string(values).unwrap_or_else(|_| "[]".into());
-        self.execute(&format!(
-            r#"(()=>{{const el=document.querySelector('{sel}');if(!el)throw new Error('Select not found');const v={vals};for(const o of el.options)o.selected=v.includes(o.value);el.dispatchEvent(new Event('change',{{bubbles:true}}))}})()"#
-        )).await
+        self.act(
+            Action::Select {
+                target: LocatorSpec::css(selector),
+                values: values.iter().map(|v| (*v).into()).collect(),
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Hover over element (for revealing menus)
     pub async fn hover(&self, selector: &str) -> Result<()> {
-        let (x, y) = self.find(selector).await?.center().await?;
-        self.mouse_move(x, y).await
+        self.act(
+            Action::Hover {
+                target: LocatorSpec::css(selector),
+                human: false,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Human-like hover with Bezier curve movement
     pub async fn human_hover(&self, selector: &str) -> Result<()> {
-        let element = self.find(selector).await?;
-        element.scroll_into_view().await?;
-        let (x, y) = element.center().await?;
-        self.human().move_to(x, y).await?;
-        sleep_ms(SETTLE_MS).await;
-        Ok(())
+        self.act(
+            Action::Hover {
+                target: LocatorSpec::css(selector),
+                human: true,
+            },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 }

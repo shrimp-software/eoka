@@ -79,6 +79,19 @@ src/
     └── fingerprint/catalog.rs # Platform defaults and lookup tables
 ```
 
+## Action contract (0.6)
+
+See [MIGRATION-0.6.md](MIGRATION-0.6.md). `Page::act(Action, ActionOptions)` and
+`Page::locator`/`locator_text` provide receipts, strict execution-time resolution,
+actionability checks, one deadline, per-target serialization and bounded held-input
+cleanup. Click/type/key/submit/drag require an explicit expectation. Existing Page
+and Element convenience methods use `Page::with_action_options`; Element handles
+stay pinned and never retarget replacements. Fill/select/upload/focus/hover/scroll
+and navigation verify intrinsic results. `with_retry` never replays action errors.
+`Error::Action { code, receipt, source }` distinguishes not dispatched, uncertain,
+and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
+`src/action/` owns this engine; persistence and file policy remain in eoka-tools.
+
 ## Public API Overview
 
 ### Browser
@@ -309,6 +322,7 @@ Minimal by design:
 ```rust
 pub use browser::{Browser, TabInfo};
 pub use error::{Error, Result};
+pub use action::{Action, ActionOptions, ActionReceipt, ActionOutcome, DispatchState, DispatchObserver, Expectation, Locator, LocatorQuery, LocatorSpec};
 pub use network::{NetworkEvent, NetworkWatcher};
 pub use page::{
     BoundingBox,      // Element position/size

@@ -8,6 +8,7 @@ const PAGE: &str = r#"<!doctype html><html><body style="margin:0">
 </div>
 <script>
 window.__log = [];
+document.addEventListener('mouseup',()=>document.getElementById('result').textContent='done');
 for (const t of ['mousedown','mousemove','mouseup']) {
   document.addEventListener(t, e => window.__log.push({t, x: e.clientX, y: e.clientY, b: e.buttons}), true);
 }
@@ -15,7 +16,7 @@ window.__pointerLog=[];
 for (const t of ['pointerdown','pointermove','pointerup']) {
   document.addEventListener(t,e=>window.__pointerLog.push({t,mx:e.movementX,button:e.button,buttons:e.buttons,pressure:e.pressure,trusted:e.isTrusted,focus:document.hasFocus(),visibility:document.visibilityState}),true);
 }
-</script></body></html>"#;
+</script><p id="result">pending</p></body></html>"#;
 
 async fn fixture(browser: &Browser) -> Page {
     browser
@@ -30,7 +31,14 @@ async fn drag_by_produces_human_shaped_trajectory() {
     let browser = Browser::launch().await.unwrap();
     let page = fixture(&browser).await;
     let dx = 150.0;
-    page.human_drag("#handle", dx).await.expect("drag");
+    page.with_action_options(eoka::ActionOptions::expecting(eoka::Expectation::Text {
+        target: eoka::LocatorSpec::css("#result"),
+        value: "done".into(),
+        contains: false,
+    }))
+    .human_drag("#handle", dx)
+    .await
+    .expect("drag");
 
     let log: Vec<Value> = page.evaluate_sync("window.__log").await.unwrap();
     browser.close().await.unwrap();

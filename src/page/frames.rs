@@ -254,7 +254,7 @@ const OWNER_HIT_TEST: &str = r#"function(x, y) {
 }"#;
 
 impl Page {
-    pub(super) async fn frame_target_id(&self, frame_id: &str) -> Result<String> {
+    pub(crate) async fn frame_target_id(&self, frame_id: &str) -> Result<String> {
         let snapshot = Snapshot::capture(self).await?;
         Ok(snapshot.get(frame_id)?.session.target_id().to_owned())
     }

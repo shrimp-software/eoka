@@ -1,4 +1,10 @@
-use eoka::{Browser, Page};
+use eoka::{ActionOptions, Browser, Expectation, LocatorSpec, Page};
+fn value(target: &str, value: &str) -> ActionOptions {
+    ActionOptions::expecting(Expectation::Value {
+        target: LocatorSpec::css(target),
+        value: value.into(),
+    })
+}
 use serde_json::Value;
 
 async fn fixture() -> (Browser, Page) {
@@ -36,7 +42,10 @@ async fn printable_keys_emit_native_text_once() {
         page.execute_sync("document.querySelector('#field').value='';events=[]")
             .await
             .unwrap();
-        page.press_key(key).await.unwrap();
+        page.with_action_options(value("#field", expected))
+            .press_key(key)
+            .await
+            .unwrap();
         let value: String = page
             .evaluate_sync("document.querySelector('#field').value")
             .await
@@ -58,7 +67,10 @@ async fn printable_keys_emit_native_text_once() {
     page.execute_sync("document.querySelector('#area').focus();events=[]")
         .await
         .unwrap();
-    page.press_key("Enter").await.unwrap();
+    page.with_action_options(value("#area", "\n"))
+        .press_key("Enter")
+        .await
+        .unwrap();
     assert_eq!(
         page.evaluate_sync::<String>("document.querySelector('#area').value")
             .await
@@ -68,7 +80,10 @@ async fn printable_keys_emit_native_text_once() {
     page.execute_sync("document.querySelector('#editor').focus();events=[]")
         .await
         .unwrap();
-    page.press_key("o").await.unwrap();
+    page.with_action_options(value("#editor", "o"))
+        .press_key("o")
+        .await
+        .unwrap();
     assert_eq!(
         page.evaluate_sync::<String>("document.querySelector('#editor').textContent")
             .await
@@ -84,23 +99,29 @@ async fn held_modifiers_shortcuts_and_prevent_default_preserve_native_semantics(
     let (browser, page) = fixture().await;
     let attached = browser.attach_page(page.target_id()).await.unwrap();
     page.key_down("Shift").await.unwrap();
-    attached.press_key("o").await.unwrap();
+    attached.dispatch_key("o").await.unwrap();
     attached.key_up("Shift").await.unwrap();
-    page.press_key("o").await.unwrap();
+    page.dispatch_key("o").await.unwrap();
     assert_eq!(
         page.evaluate_sync::<String>("document.querySelector('#field').value")
             .await
             .unwrap(),
         "Oo"
     );
-    page.select_all().await.unwrap();
+    page.dispatch_key(if cfg!(target_os = "macos") {
+        "Cmd+A"
+    } else {
+        "Ctrl+A"
+    })
+    .await
+    .unwrap();
     assert_eq!(
         page.evaluate_sync::<String>("document.querySelector('#field').value")
             .await
             .unwrap(),
         "Oo"
     );
-    page.press_key("Backspace").await.unwrap();
+    page.dispatch_key("Backspace").await.unwrap();
     assert_eq!(
         page.evaluate_sync::<String>("document.querySelector('#field').value")
             .await
@@ -117,7 +138,7 @@ async fn held_modifiers_shortcuts_and_prevent_default_preserve_native_semantics(
         "o"
     );
     page.execute_sync("document.querySelector('#field').value='';events=[];document.addEventListener('keydown',event=>{if(event.key==='q')event.preventDefault()})").await.unwrap();
-    page.press_key("q").await.unwrap();
+    page.dispatch_key("q").await.unwrap();
     assert_eq!(
         page.evaluate_sync::<String>("document.querySelector('#field').value")
             .await

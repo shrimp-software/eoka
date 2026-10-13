@@ -137,17 +137,6 @@ impl Session {
             .await
     }
 
-    /// Focus an element
-    pub(crate) async fn focus(&self, node_id: i32) -> Result<()> {
-        self.send_void(
-            "DOM.focus",
-            &DOMFocus {
-                node_id: Some(node_id),
-            },
-        )
-        .await
-    }
-
     /// Evaluate JavaScript and return a remote object reference (not by value).
     pub(crate) async fn evaluate_for_remote_object(
         &self,
@@ -237,24 +226,6 @@ impl Session {
                 object_group: object_group.map(String::from),
                 return_by_value: Some(return_by_value),
                 await_promise: Some(await_promise),
-            },
-        )
-        .await
-    }
-
-    /// Set files for a file input element
-    pub(crate) async fn set_file_input_files(
-        &self,
-        node_id: i32,
-        files: Vec<String>,
-    ) -> Result<()> {
-        self.send_void(
-            "DOM.setFileInputFiles",
-            &DOMSetFileInputFiles {
-                files,
-                node_id: Some(node_id),
-                backend_node_id: None,
-                object_id: None,
             },
         )
         .await

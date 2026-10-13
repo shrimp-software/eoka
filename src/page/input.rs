@@ -1,4 +1,6 @@
+mod action;
 mod drag;
+pub(crate) use action::ActionInput;
 pub(crate) use drag::DragInput;
 
 use std::collections::HashMap;
@@ -446,6 +448,7 @@ impl Page {
             .await
             {
                 first_error.get_or_insert(error);
+                continue;
             }
             state.finish_key_up(&id);
         }
@@ -472,13 +475,20 @@ impl Page {
                 .await
             {
                 first_error.get_or_insert(error);
+                continue;
             }
             state.finish_mouse_up(button);
         }
 
         match first_error {
             Some(error) => Err(error),
-            None => Ok(()),
+            None => {
+                self.session
+                    .action_state()
+                    .cleanup_failed
+                    .store(false, std::sync::atomic::Ordering::Release);
+                Ok(())
+            }
         }
     }
 
@@ -508,7 +518,12 @@ impl Page {
 
     /// Type text into focused element
     pub async fn type_text(&self, text: &str) -> Result<()> {
-        self.session.insert_text(text).await
+        self.act(
+            crate::Action::InsertText { text: text.into() },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Get a Human helper for human-like interactions.
@@ -526,8 +541,18 @@ impl Page {
     /// sent literally. Control, Alt and Meta suppress text. For complete strings
     /// or composed text, use [`Page::type_text`] rather than a key combination.
     pub async fn press_key(&self, key: &str) -> Result<()> {
+        self.act(
+            crate::Action::PressKey { key: key.into() },
+            self.action_options.clone(),
+        )
+        .await
+        .map(|_| ())
+    }
+
+    /// Dispatch a key-down/up sequence without verifying an application outcome.
+    /// This primitive preserves manually held modifiers. Use `act` for consequential actions.
+    pub async fn dispatch_key(&self, key: &str) -> Result<()> {
         self.key_down(key).await?;
-        sleep_ms(INTERACTION_DELAY_MS).await;
         self.key_up(key).await
     }
 

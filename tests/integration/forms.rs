@@ -18,9 +18,13 @@ async fn test_type_into_input() {
     .expect("Failed to navigate");
 
     // Type into the input
-    page.type_into("#input", "Hello World")
-        .await
-        .expect("Failed to type");
+    page.with_action_options(eoka::ActionOptions::expecting(eoka::Expectation::Value {
+        target: eoka::LocatorSpec::css("#input"),
+        value: "Hello World".into(),
+    }))
+    .type_into("#input", "Hello World")
+    .await
+    .expect("Failed to type");
 
     // Check the value
     let value: String = page
@@ -144,7 +148,14 @@ async fn test_fill_range_dispatches_events_and_rejects_invalid_values() {
     page.execute("document.getElementById('range').addEventListener('input', event => { event.target.value = '2'; }, { once: true })")
         .await
         .expect("Failed to install range listener");
-    assert!(page.fill("#range", "6").await.is_err());
+    assert!(page
+        .with_action_options(eoka::ActionOptions {
+            timeout_ms: 300,
+            ..Default::default()
+        })
+        .fill("#range", "8")
+        .await
+        .is_err());
     assert_eq!(
         page.evaluate::<String>("document.getElementById('range').value")
             .await

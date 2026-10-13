@@ -90,7 +90,7 @@ fn random_bool(probability: f64) -> bool {
 type Point = (f64, f64);
 
 /// Generate Bezier curve for natural mouse movement
-fn bezier_curve(start: Point, end: Point, num_points: usize) -> Vec<Point> {
+pub(crate) fn bezier_curve(start: Point, end: Point, num_points: usize) -> Vec<Point> {
     let num_points = num_points.max(2);
 
     let cp1 = (

@@ -1,6 +1,6 @@
 [package]
 name = "eoka"
-version = "0.5.15"
+version = "0.6.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -44,6 +44,13 @@ fastrand = "2"
 
 # Base64 for screenshots
 base64 = "0.23"
+
+[features]
+schema = ["dep:schemars"]
+
+[dependencies.schemars]
+version = "1.0"
+optional = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }
