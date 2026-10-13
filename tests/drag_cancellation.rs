@@ -93,7 +93,23 @@ async fn cancellation_before_press_does_not_release_and_lost_target_is_reported(
             _ = &mut drag => panic!("drag ended too early"),
             _ = wait_for_press(&page) => {}
         }
+        let mut events = page.session().transport().subscribe();
         browser.close_tab(page.target_id()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if let eoka::cdp::transport::CdpMessage::Event { method, params, .. } =
+                    events.recv().await.unwrap()
+                {
+                    if method == "Target.detachedFromTarget"
+                        && params["sessionId"] == page.session().session_id()
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
     }
     assert!(
         tokio::time::timeout(Duration::from_secs(4), human.finish_drag_cleanup())

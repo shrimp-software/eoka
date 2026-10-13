@@ -55,6 +55,15 @@ pub(super) async fn prepare(
         let props = node.properties().await?;
         let upload = matches!(action, Action::Upload { .. });
         let editable = matches!(action, Action::Fill { .. } | Action::Type { .. });
+        if editable
+            && props["input"] == true
+            && (props["fillMode"].is_null()
+                || (matches!(action, Action::Type { .. }) && props["fillMode"] != "text"))
+        {
+            return Err(Error::cdp_msg(
+                "unsupported_input: target does not support this input action; use fill for native date/time controls",
+            ));
+        }
         let pointer = matches!(
             action,
             Action::Click { .. } | Action::Hover { .. } | Action::Drag { .. }
@@ -74,7 +83,7 @@ pub(super) async fn prepare(
             continue;
         }
         if pointer || matches!(action, Action::ScrollIntoView { .. }) {
-            if props["inViewport"] != true {
+            if props["inViewport"] != true || (pointer && props["receives"] != true) {
                 mutation(&node,dispatch,"function(){this.scrollIntoView({block:'center',inline:'center',behavior:'instant'})}",vec![],true).await?;
             }
             let stable = node.call("function(){return new Promise(resolve=>requestAnimationFrame(()=>{const a=this.getBoundingClientRect();requestAnimationFrame(()=>{const b=this.getBoundingClientRect();resolve(this.isConnected && ['x','y','width','height'].every(k=>Math.abs(a[k]-b[k])<0.5))})}))}",vec![]).await?;
@@ -243,10 +252,14 @@ pub(super) async fn perform(
         Action::Fill { value, human, .. } => {
             let node = required()?;
             let props = node.properties().await?;
-            let expected = if props["type"] == "range" {
-                let normalized = node.call("function(v){const p=this.cloneNode(false);p.value=v;return Number.isFinite(Number(v)) && p.validity.valid && Number(p.value)===Number(v) ? p.value : null}",vec![json!(value)]).await?;
+            let expected = if props["fillMode"] == "native" {
+                let normalized = node
+                    .call(include_str!("normalize_fill.js"), vec![json!(value)])
+                    .await?;
                 if normalized.is_null() {
-                    return Err(Error::cdp_msg("Invalid range value"));
+                    return Err(Error::cdp_msg(
+                        "invalid_input_value: value cannot be represented by this native input",
+                    ));
                 }
                 normalized
             } else {
@@ -255,7 +268,7 @@ pub(super) async fn perform(
             if props["value"] == expected {
                 return Ok(Verification::Noop);
             }
-            if props["type"] == "range" {
+            if props["fillMode"] == "native" {
                 mutation(node,dispatch,"function(v){this.value=v;this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}))}",vec![expected.clone()],false).await?;
             } else {
                 mutation(node,dispatch,"function(){this.focus();if(this.isContentEditable){const r=this.ownerDocument.createRange();r.selectNodeContents(this);const s=this.ownerDocument.getSelection();s.removeAllRanges();s.addRange(r)}else{this.select()}}",vec![],true).await?;
