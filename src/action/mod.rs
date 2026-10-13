@@ -5,6 +5,7 @@ mod perform;
 mod runner;
 mod types;
 
+pub(crate) use locator::is_visible;
 pub use locator::Locator;
 pub use types::*;
 

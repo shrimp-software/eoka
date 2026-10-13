@@ -195,6 +195,13 @@ impl Drop for Node {
     }
 }
 
+pub(crate) async fn is_visible(page: &Page, spec: &LocatorSpec) -> Result<bool> {
+    let Some(node) = resolve(page, spec).await? else {
+        return Ok(false);
+    };
+    Ok(node.properties().await?["visible"] == true)
+}
+
 pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<Node>> {
     static NEXT: AtomicU64 = AtomicU64::new(1);
     let mut node = Node {

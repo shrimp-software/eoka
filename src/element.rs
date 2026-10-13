@@ -164,13 +164,10 @@ impl Element {
             .await
             .map(|_| ())
     }
-    /// Check if the element is visible (has a computable box model)
+    /// Check for a rendered, nonzero box with visible CSS visibility.
+    /// Offscreen, transparent and disabled elements can still be visible.
     pub async fn is_visible(&self) -> Result<bool> {
-        match self.page.session.get_box_model(self.node_id).await {
-            Ok(_) => Ok(true),
-            Err(Error::Cdp { message, .. }) if message.contains("box model") => Ok(false),
-            Err(e) => Err(e),
-        }
+        crate::action::is_visible(&self.page, &self.action_target()).await
     }
 
     /// Get the element's bounding box

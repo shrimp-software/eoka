@@ -299,6 +299,12 @@ impl Page {
                 let code = match &source {
                     Error::Timeout(_) => "action_timeout",
                     Error::InputState(_) => "input_state",
+                    Error::Cdp { message, .. } if message.starts_with("unsupported_input:") => {
+                        "unsupported_input"
+                    }
+                    Error::Cdp { message, .. } if message.starts_with("invalid_input_value:") => {
+                        "invalid_input_value"
+                    }
                     Error::ElementNotFound(_) | Error::ElementNotVisible { .. } => {
                         "target_unavailable"
                     }
