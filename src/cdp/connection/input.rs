@@ -13,17 +13,6 @@ impl Session {
         self.send_void("Input.dispatchMouseEvent", &event).await
     }
 
-    /// Insert text at current cursor position
-    pub(crate) async fn insert_text(&self, text: &str) -> Result<()> {
-        self.send_void(
-            "Input.insertText",
-            &InputInsertText {
-                text: text.to_string(),
-            },
-        )
-        .await
-    }
-
     /// Dispatch a key event with full modifier support
     pub(crate) async fn dispatch_key_event_full(
         &self,

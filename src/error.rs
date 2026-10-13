@@ -11,6 +11,17 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum Error {
+    /// A failed high-level action, including whether its effect is uncertain.
+    #[error("Action {code}: {source}")]
+    Action {
+        /// Stable machine-readable action error code.
+        code: String,
+        /// Dispatch and verification evidence retained on failure.
+        receipt: Box<crate::ActionReceipt>,
+        #[source]
+        /// Underlying cause of the failure.
+        source: Box<Error>,
+    },
     /// Failed to launch Chrome
     #[error("Failed to launch Chrome: {0}")]
     Launch(String),
@@ -113,6 +124,15 @@ impl Clone for Error {
     fn clone(&self) -> Self {
         use serde::de::Error as _;
         match self {
+            Self::Action {
+                code,
+                receipt,
+                source,
+            } => Self::Action {
+                code: code.clone(),
+                receipt: receipt.clone(),
+                source: source.clone(),
+            },
             Self::Launch(s) => Self::Launch(s.clone()),
             Self::Transport { context, source } => Self::Transport {
                 context: context.clone(),

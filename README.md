@@ -15,22 +15,24 @@ the browser via CDP.
 
 ```toml
 [dependencies]
-eoka = "0.5"
+eoka = "0.6"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
 ## Quick Start
 
 ```rust
-use eoka::{Browser, Result};
+use eoka::{ActionOptions, Browser, Expectation, LocatorSpec, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let browser = Browser::launch().await?;
-    let page = browser.new_page("https://example.com").await?;
-
-    page.human_click("#button").await?;
-    page.human_type("#input", "hello").await?;
+    let page = browser.new_page("data:text/html,<input id=name><button onclick=\"document.body.dataset.done=1\">Save</button>").await?;
+    page.fill("#name", "hello").await?;
+    let receipt = page.locator("button").click(ActionOptions::expecting(
+        Expectation::Visible { target: LocatorSpec::css("body[data-done]") },
+    )).await?;
+    assert_eq!(receipt.outcome, eoka::ActionOutcome::VerifiedComplete);
 
     let png = page.screenshot().await?;
     std::fs::write("screenshot.png", png)?;
@@ -43,25 +45,36 @@ async fn main() -> Result<()> {
 ## Login Flow Example
 
 ```rust
-use eoka::{Browser, Result};
+use eoka::{ActionOptions, Browser, Expectation, LocatorSpec, Result};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let browser = Browser::launch().await?;
     let page = browser.new_page("https://example.com/login").await?;
 
-    page.try_click_by_text("Accept Cookies").await?;
-    page.human_click_by_text("Sign In").await?;
+    page.locator_text("Sign In").human_click(ActionOptions::expecting(
+        Expectation::Visible { target: LocatorSpec::css("#email") },
+    )).await?;
     page.wait_for_visible("#email", 10_000).await?;
     page.human_fill("#email", "user@example.com").await?;
     page.human_fill("#password", "secret123").await?;
-    page.human_click_by_text("Log In").await?;
-    page.wait_for_text("Welcome back", 15_000).await?;
+    page.locator_text("Log In").human_click(ActionOptions::expecting(
+        Expectation::Text { target: LocatorSpec::css("#welcome"), value: "Welcome back".into(), contains: true },
+    )).await?;
 
     browser.close().await?;
     Ok(())
 }
 ```
+
+## Dependable actions in 0.6
+
+Actions use strict locators, visibility/enabled checks, stable hit-tested pointer
+positions and one deadline. Click, typing, key and drag actions require an
+explicit expected result. Successful actions and `Error::Action` failures carry
+receipts distinguishing not dispatched, unknown outcome and verified completion.
+No action is replayed after dispatch. [Migration and complete contract](MIGRATION-0.6.md).
+Durable operation IDs and download recovery are provided by eoka-tools.
 
 ## API
 
@@ -95,8 +108,13 @@ page.text_exists("Error").await;                // bool
 
 ### Clicking
 
+Configure a fresh expectation for the operation before using convenience methods:
+
 ```rust
-page.click("#button").await?;                   // instant
+let page = page.with_action_options(ActionOptions::expecting(
+    Expectation::Text { target: LocatorSpec::css("#status"), value: "Done".into(), contains: false },
+));
+page.click("#button").await?;                   // actionability + verification
 page.human_click("#button").await?;             // with mouse movement
 page.click_by_text("Submit").await?;
 page.human_click_by_text("Submit").await?;
@@ -171,7 +189,7 @@ strings or composed text, use `type_text`.
 
 ```rust
 page.press_key("Enter").await?;
-page.press_key("Ctrl+A").await?;
+page.dispatch_key("Ctrl+A").await?; // raw primitive for manual input sequences
 page.key_down("Shift").await?; // held across calls, with browser-native CDP input
 page.key_down("ArrowRight").await?;
 page.key_up("ArrowRight").await?;
@@ -415,9 +433,14 @@ or use `new_blank_page()` + `ignore_cert_errors(true)` + `goto()`.
 
 ### Retry
 
+Use a locator with one deadline for actions. `with_retry` never retries an
+`Error::Action`, including an uncertain timeout. It remains available for
+caller-chosen read-only operations.
+
 ```rust
-page.with_retry(3, 500, || async {
-    page.human_click("#flaky").await
+let receipt = page.locator("#save").click(ActionOptions {
+    timeout_ms: 5_000,
+    ..ActionOptions::expecting(Expectation::Visible { target: LocatorSpec::css("#confirmation") })
 }).await?;
 ```
 

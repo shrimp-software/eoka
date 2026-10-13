@@ -354,6 +354,25 @@ impl Transport {
         C: Serialize,
         R: DeserializeOwned,
     {
+        tokio::time::timeout(
+            self.cmd_timeout,
+            self.send_inner(session_id, method, params, dispatch),
+        )
+        .await
+        .map_err(|_| Error::Timeout(format!("CDP command {method} exceeded its deadline")))?
+    }
+
+    async fn send_inner<C, R>(
+        &self,
+        session_id: Option<&str>,
+        method: &str,
+        params: &C,
+        dispatch: Option<&CommandDispatch>,
+    ) -> Result<R>
+    where
+        C: Serialize,
+        R: DeserializeOwned,
+    {
         if let Some(dispatch) = dispatch {
             dispatch.claim()?;
         }

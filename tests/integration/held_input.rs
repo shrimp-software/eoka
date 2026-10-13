@@ -90,18 +90,21 @@ async fn test_held_input_drag_coordinates_hover_and_human_pointer_through_page_s
         .expect("Failed to hold right mouse button");
 
     let clone = page.clone();
-    clone.hover("#target").await.expect("Failed to hover");
+    assert!(clone.hover("#target").await.is_err());
     clone
-        .human_hover("#target")
+        .mouse_move(x, y)
         .await
-        .expect("Failed to human-hover");
+        .expect("Failed to move held pointer");
     clone
-        .find("#target")
+        .human()
+        .move_to(x, y)
         .await
-        .expect("Missing target")
-        .human_click()
+        .expect("Failed to move held pointer");
+    clone
+        .human()
+        .move_and_click(x, y)
         .await
-        .expect("Failed to human-click");
+        .expect("Failed to click held pointer");
 
     let events: Vec<String> = page
         .evaluate("window.pointerEvents")
@@ -156,9 +159,9 @@ async fn test_held_input_duplicate_attachment_shares_target_state() {
         .await
         .expect("Failed to hold left mouse button");
     second
-        .hover("#target")
+        .mouse_move(x, y)
         .await
-        .expect("Second Page failed to hover");
+        .expect("Second Page failed to move held pointer");
     let pointer_events: Vec<String> = first
         .evaluate("window.pointerEvents")
         .await

@@ -17,7 +17,7 @@
 //! ## Quick Start
 //!
 //! ```rust,no_run
-//! use eoka::Browser;
+//! use eoka::{ActionOptions, Browser, Expectation, LocatorSpec};
 //!
 //! #[tokio::main]
 //! async fn main() -> eoka::Result<()> {
@@ -25,11 +25,14 @@
 //!     let browser = Browser::launch().await?;
 //!
 //!     // Create page and navigate
-//!     let page = browser.new_page("https://example.com").await?;
+//!     let page = browser.new_page("data:text/html,<input id=name><button onclick=\"document.body.dataset.done=1\">Save</button>").await?;
 //!
 //!     // Human-like interactions
-//!     page.human_click("#button").await?;
-//!     page.human_type("#input", "hello world").await?;
+//!     page.fill("#name", "hello world").await?;
+//!     let receipt = page.locator("button").click(ActionOptions::expecting(
+//!         Expectation::Visible { target: LocatorSpec::css("body[data-done]") },
+//!     )).await?;
+//!     assert_eq!(receipt.outcome, eoka::ActionOutcome::VerifiedComplete);
 //!
 //!     // Screenshot
 //!     let png = page.screenshot().await?;
@@ -62,11 +65,16 @@
 
 #![deny(missing_docs)]
 
+pub mod action;
 pub mod bounded_fetch;
 pub mod browser;
 pub mod cdp;
 pub mod download;
 pub mod element;
+pub use action::{
+    Action, ActionOptions, ActionOutcome, ActionReceipt, DispatchObserver, DispatchState,
+    Expectation, Locator, LocatorQuery, LocatorSpec,
+};
 pub mod error;
 pub mod fetch;
 mod keyboard;

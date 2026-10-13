@@ -74,9 +74,17 @@ async fn main() -> Result<()> {
 
     let mut clicked = false;
 
+    let expected: eoka::Expectation =
+        serde_json::from_str(&std::env::var("EOKA_CART_CONFIRMATION").map_err(|_| {
+            eoka::Error::cdp_msg(
+                "Set EOKA_CART_CONFIRMATION to the JSON expectation for a new cart confirmation",
+            )
+        })?)?;
+    let action_page = page.with_action_options(eoka::ActionOptions::expecting(expected));
+
     // First try specific selectors
     for selector in &add_to_cart_selectors {
-        if let Ok(elem) = page.find(selector).await {
+        if let Ok(elem) = action_page.find(selector).await {
             println!("Found button with selector: {}", selector);
 
             // Check if visible
@@ -102,7 +110,7 @@ async fn main() -> Result<()> {
     // Fallback: try clicking by text
     if !clicked {
         println!("Trying to find button by text...");
-        if let Ok(elem) = page.find_by_text("Add to Cart").await {
+        if let Ok(elem) = action_page.find_by_text("Add to Cart").await {
             if elem.is_visible().await.unwrap_or(false) {
                 println!("Found visible 'Add to Cart' text element");
                 elem.scroll_into_view().await?;

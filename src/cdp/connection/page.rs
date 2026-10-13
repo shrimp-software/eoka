@@ -118,49 +118,6 @@ impl Session {
         .await
     }
 
-    /// Reload the page
-    pub(crate) async fn reload(&self, ignore_cache: bool) -> Result<()> {
-        let _scope = self.target.headers.lock().await?;
-        self.send_void(
-            "Page.reload",
-            &PageReload {
-                ignore_cache: Some(ignore_cache),
-                script_to_evaluate_on_load: None,
-            },
-        )
-        .await
-    }
-
-    /// Navigate to a history entry by offset (-1 = back, +1 = forward)
-    async fn navigate_history(&self, offset: i32) -> Result<()> {
-        let _scope = self.target.headers.lock().await?;
-        let history: PageGetNavigationHistoryResult = self
-            .send("Page.getNavigationHistory", &PageGetNavigationHistory {})
-            .await?;
-        let target = history.current_index + offset;
-        if target < 0 {
-            return Ok(());
-        }
-        if let Some(entry) = history.entries.get(target as usize) {
-            self.send_void(
-                "Page.navigateToHistoryEntry",
-                &PageNavigateToHistoryEntry { entry_id: entry.id },
-            )
-            .await?;
-        }
-        Ok(())
-    }
-
-    /// Go back in history
-    pub(crate) async fn go_back(&self) -> Result<()> {
-        self.navigate_history(-1).await
-    }
-
-    /// Go forward in history
-    pub(crate) async fn go_forward(&self) -> Result<()> {
-        self.navigate_history(1).await
-    }
-
     /// Add a script to evaluate on every new document
     pub(crate) async fn add_script_to_evaluate_on_new_document(
         &self,

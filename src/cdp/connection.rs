@@ -19,6 +19,7 @@ type TargetRegistry = Arc<Mutex<HashMap<String, Arc<TargetState>>>>;
 
 #[derive(Default)]
 struct TargetState {
+    actions: Arc<crate::action::ActionState>,
     held_input: Arc<tokio::sync::Mutex<HeldInputState>>,
     headers: Arc<super::headers::HeaderState>,
     monitor: tokio::sync::Mutex<Option<Arc<super::network_idle::NetworkMonitor>>>,
@@ -192,6 +193,24 @@ pub struct Session {
 }
 
 impl Session {
+    pub(crate) async fn send_tracked(
+        &self,
+        method: &str,
+        params: &serde_json::Value,
+        dispatch: &super::transport::CommandDispatch,
+    ) -> Result<serde_json::Value> {
+        self.target.headers.wait().await?;
+        self.transport
+            .send_to_session_with_dispatch(&self.session_id, method, params, dispatch)
+            .await
+    }
+    pub(crate) async fn navigation_guard(&self) -> Result<tokio::sync::OwnedMutexGuard<()>> {
+        self.target.headers.lock().await
+    }
+
+    pub(crate) fn action_state(&self) -> Arc<crate::action::ActionState> {
+        self.target.actions.clone()
+    }
     /// Get the session ID
     pub fn session_id(&self) -> &str {
         &self.session_id
