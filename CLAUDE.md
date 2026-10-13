@@ -81,6 +81,11 @@ src/
 
 ## Action contract (0.6)
 
+`Page::explore(Action, ActionOptions)` is the opt-in agent exploration entry point
+in 0.6.1. It preserves actionability, one deadline, durable dispatch hooks and
+cleanup. Without intrinsic or explicit completion evidence, `Ok(receipt)` has
+`OutcomeUnknown`; inspect the receipt. `Page::act` remains strict.
+
 See [MIGRATION-0.6.md](MIGRATION-0.6.md). `Page::act(Action, ActionOptions)` and
 `Page::locator`/`locator_text` provide receipts, strict execution-time resolution,
 actionability checks, one deadline, per-target serialization and bounded held-input

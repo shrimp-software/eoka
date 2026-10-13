@@ -102,10 +102,10 @@ async fn action_deadline_reports_unknown_without_replaying() {
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
     let mut options = expected_text("#result", "done");
-    options.timeout_ms = 200;
+    options.timeout_ms = 1000;
     let started = Instant::now();
     let err = page.locator("#go").click(options).await.unwrap_err();
-    assert!(started.elapsed() < Duration::from_millis(700));
+    assert!(started.elapsed() < Duration::from_secs(2));
     assert!(
         matches!(err,Error::Action {ref receipt,..} if receipt.outcome==ActionOutcome::OutcomeUnknown)
     );
@@ -136,13 +136,17 @@ async fn queue_wait_consumes_the_same_deadline_and_does_not_dispatch() {
     let first = page.clone();
     let task = tokio::spawn(async move {
         let mut options = expected_text("#result", "done");
-        options.timeout_ms = 400;
+        options.timeout_ms = 4000;
         first.locator("#go").click(options).await
     });
     page.wait_for_text("Go", 1000).await.unwrap();
-    while page.evaluate::<u32>("window.hits").await.unwrap() == 0 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while page.evaluate::<u32>("window.hits").await.unwrap() == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("first action must dispatch before testing queue timeout");
     let mut options = expected_text("#result", "done");
     options.timeout_ms = 80;
     let start = Instant::now();

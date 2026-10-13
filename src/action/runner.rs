@@ -53,6 +53,22 @@ impl Page {
     /// Resolve, prepare and execute an action once, then verify its result.
     /// The returned error retains a receipt when completion is uncertain.
     pub async fn act(&self, action: Action, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run_action(action, options, false).await
+    }
+
+    /// Execute one exploratory action with the same actionability and deadline checks.
+    /// Without intrinsic or caller-supplied completion evidence, successful dispatch
+    /// returns `Ok` with `ActionOutcome::OutcomeUnknown`, never verified completion.
+    pub async fn explore(&self, action: Action, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run_action(action, options, true).await
+    }
+
+    async fn run_action(
+        &self,
+        action: Action,
+        options: ActionOptions,
+        exploratory: bool,
+    ) -> Result<ActionReceipt> {
         let started = tokio::time::Instant::now();
         let dispatch = Arc::new(Dispatch::new(options.observer.clone()));
         let mut receipt = ActionReceipt {
@@ -82,7 +98,7 @@ impl Page {
                     "invalid_timeout: action timeout must be between 1 and 86400000ms",
                 ));
             }
-            if action.requires_expectation() && options.expect.is_none() {
+            if action.requires_expectation() && options.expect.is_none() && !exploratory {
                 return Err(Error::cdp_msg(
                     "expectation_required: action requires an expected result",
                 ));
@@ -250,7 +266,11 @@ impl Page {
                 .cleanup()
                 .await?;
             cleanup.input.take();
-            receipt.outcome = ActionOutcome::VerifiedComplete;
+            receipt.outcome = if receipt.verification.is_some() {
+                ActionOutcome::VerifiedComplete
+            } else {
+                ActionOutcome::OutcomeUnknown
+            };
             Ok(())
         };
         let result = tokio::time::timeout(

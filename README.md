@@ -76,6 +76,14 @@ receipts distinguishing not dispatched, unknown outcome and verified completion.
 No action is replayed after dispatch. [Migration and complete contract](MIGRATION-0.6.md).
 Durable operation IDs and download recovery are provided by eoka-tools.
 
+For an agent exploring an unfamiliar page, `page.explore(action, options)` uses
+the same actionability checks, deadline and input cleanup while allowing actions
+without a predicted result. A dispatched click returns `Ok(receipt)` with
+`outcome_unknown` unless an explicit expectation proves completion. Intrinsic
+checks, such as verifying a filled value, still run. Always inspect the receipt;
+`Ok` alone does not establish that the website completed the task. `Page::act`
+and existing convenience methods retain their strict verification contract.
+
 ## API
 
 ### Browser
