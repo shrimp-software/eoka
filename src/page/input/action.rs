@@ -168,7 +168,7 @@ impl ActionInput {
     }
 
     pub async fn cleanup(&mut self) -> Result<()> {
-        for id in self.state.keys.keys().cloned().collect::<Vec<_>>() {
+        while let Some(id) = self.state.keys.keys().next().cloned() {
             let (key, modifiers) = self.state.key_up_event(&id).map_err(input_state_error)?;
             dispatch_coordinated_key_event(
                 &self.session,
@@ -179,7 +179,7 @@ impl ActionInput {
             .await?;
             self.state.finish_key_up(&id);
         }
-        for (button, (x, y)) in self.state.mouse_buttons.clone() {
+        while let Some((&button, &(x, y))) = self.state.mouse_buttons.iter().next() {
             let buttons = self
                 .state
                 .mouse_up_mask(button)

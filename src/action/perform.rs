@@ -1,7 +1,7 @@
 use super::{
     dispatch::Dispatch,
     locator::{resolve, Node},
-    Action, LocatorSpec,
+    Action,
 };
 use crate::{page::ActionInput, Error, Page, Result};
 use serde_json::{json, Value};
@@ -178,8 +178,7 @@ pub(super) async fn perform(
     dispatch: &Dispatch,
 ) -> Result<Verification> {
     let required = || node.ok_or_else(|| Error::cdp_msg("Action target missing"));
-    let property =
-        |_target: &LocatorSpec, field, expected| Verification::Properties { field, expected };
+    let property = |field, expected| Verification::Properties { field, expected };
     let _navigation_guard = if matches!(
         action,
         Action::Navigate { .. }
@@ -205,11 +204,7 @@ pub(super) async fn perform(
             input.drag(dispatch, x, y, *dx, *dy).await?;
             Ok(Verification::Explicit)
         }
-        Action::SelectText { target, text }
-        | Action::SelectOption {
-            target,
-            value: text,
-        } => {
+        Action::SelectText { text, .. } | Action::SelectOption { value: text, .. } => {
             let node = required()?;
             let values = node.call("function(t,byValue){const options=Array.from(this.options || []).filter(o=>!o.disabled&&!o.closest('optgroup[disabled]'));const values=byValue?options.filter(o=>o.value===t):[];return (values.length?values:options.filter(o=>o.text.trim()===t)).map(o=>o.value)}", vec![json!(text),json!(matches!(action,Action::SelectOption { .. }))]).await?;
             let values = values.as_array().filter(|v| v.len() == 1).ok_or_else(|| {
@@ -220,7 +215,7 @@ pub(super) async fn perform(
                 return Ok(Verification::Noop);
             }
             mutation(node,dispatch,"function(v){this.value=v;this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}))}",vec![values[0].clone()],false).await?;
-            Ok(property(target, "selected", expected))
+            Ok(property("selected", expected))
         }
         Action::Click { human, double, .. } => {
             let node = required()?;
@@ -245,11 +240,7 @@ pub(super) async fn perform(
             }
             Ok(Verification::Explicit)
         }
-        Action::Fill {
-            target,
-            value,
-            human,
-        } => {
+        Action::Fill { value, human, .. } => {
             let node = required()?;
             let props = node.properties().await?;
             let expected = if props["type"] == "range" {
@@ -271,7 +262,7 @@ pub(super) async fn perform(
                 require_focused_editable(node).await?;
                 input.text(dispatch, value, *human).await?;
             }
-            Ok(property(target, "value", expected))
+            Ok(property("value", expected))
         }
         Action::Type { text, human, .. } => {
             mutation(
@@ -286,7 +277,7 @@ pub(super) async fn perform(
             input.text(dispatch, text, *human).await?;
             Ok(Verification::Explicit)
         }
-        Action::Select { target, values } => {
+        Action::Select { values, .. } => {
             let node = required()?;
             let valid = node.call("function(v){return this instanceof HTMLSelectElement && (this.multiple || v.length<=1) && v.every(x=>Array.from(this.options).some(o=>o.value===x&&!o.disabled&&!o.closest('optgroup[disabled]')))}",vec![json!(values)]).await?;
             if valid != true {
@@ -302,9 +293,9 @@ pub(super) async fn perform(
                 return Ok(Verification::Noop);
             }
             mutation(node,dispatch,"function(v){for(const o of this.options)o.selected=v.includes(o.value);this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}))}",vec![json!(values)],false).await?;
-            Ok(property(target, "selected", json!(expected)))
+            Ok(property("selected", json!(expected)))
         }
-        Action::Upload { target, files } => {
+        Action::Upload { files, .. } => {
             let node = required()?;
             let valid = node.call("function(n){return this instanceof HTMLInputElement && this.type==='file' && (this.multiple || n<=1)}",vec![json!(files.len())]).await?;
             if valid != true {
@@ -335,7 +326,12 @@ pub(super) async fn perform(
                     Ok((paths_out, json!(evidence)))
                 })
                 .await
-                .map_err(|_| Error::cdp_msg("Upload inspection failed"))??;
+                .map_err(|error| {
+                    Error::transport_io(
+                        "Upload inspection task failed",
+                        std::io::Error::other(error),
+                    )
+                })??;
             dispatch
                 .send(
                     &node.session,
@@ -344,7 +340,7 @@ pub(super) async fn perform(
                     false,
                 )
                 .await?;
-            Ok(property(target, "files", expected))
+            Ok(property("files", expected))
         }
         Action::PressKey { key } => {
             input.key(dispatch, key).await?;
@@ -371,7 +367,7 @@ pub(super) async fn perform(
             input.key(dispatch, "Enter").await?;
             Ok(Verification::Explicit)
         }
-        Action::Focus { target } => {
+        Action::Focus { .. } => {
             mutation(
                 required()?,
                 dispatch,
@@ -380,9 +376,9 @@ pub(super) async fn perform(
                 false,
             )
             .await?;
-            Ok(property(target, "focused", json!(true)))
+            Ok(property("focused", json!(true)))
         }
-        Action::Hover { target, human } => {
+        Action::Hover { human, .. } => {
             let (x, y) = point(page, required()?, false).await?;
             if *human {
                 input.human_move(dispatch, x, y).await?;
@@ -395,11 +391,11 @@ pub(super) async fn perform(
                     false,
                 )
                 .await?;
-            Ok(property(target, "hovered", json!(true)))
+            Ok(property("hovered", json!(true)))
         }
-        Action::ScrollIntoView { target } => {
+        Action::ScrollIntoView { .. } => {
             mutation(required()?,dispatch,"function(){this.scrollIntoView({block:'center',inline:'center',behavior:'instant'})}",vec![],false).await?;
-            Ok(property(target, "inViewport", json!(true)))
+            Ok(property("inViewport", json!(true)))
         }
         Action::NavigateWithHeaders { url, headers } => {
             let guard = page.session().temporary_headers().await?;
@@ -436,49 +432,15 @@ pub(super) async fn perform(
             }
             navigate(page, dispatch, params).await
         }
-        Action::Reload => {
+        Action::Reload | Action::History { delta: 0 } => {
             dispatch
                 .send(page.session(), "Page.reload", json!({}), false)
                 .await?;
             Ok(Verification::Navigation { loader: None })
         }
-        Action::History { delta: 0 } => {
-            dispatch
-                .send(page.session(), "Page.reload", json!({}), false)
-                .await?;
-            Ok(Verification::Navigation { loader: None })
-        }
-        Action::Back | Action::Forward | Action::History { .. } => {
-            let history: Value = page
-                .session()
-                .send("Page.getNavigationHistory", &json!({}))
-                .await?;
-            let offset = match action {
-                Action::Back => -1,
-                Action::Forward => 1,
-                Action::History { delta } => i64::from(*delta),
-                _ => unreachable!(),
-            };
-            let index = history["currentIndex"]
-                .as_i64()
-                .ok_or_else(|| Error::cdp_msg("Invalid history index"))?
-                + offset;
-            let entry = usize::try_from(index)
-                .ok()
-                .and_then(|i| history["entries"].get(i));
-            let Some(entry) = entry else {
-                return Ok(Verification::Noop);
-            };
-            dispatch
-                .send(
-                    page.session(),
-                    "Page.navigateToHistoryEntry",
-                    json!({"entryId":entry["id"]}),
-                    false,
-                )
-                .await?;
-            Ok(Verification::Navigation { loader: None })
-        }
+        Action::Back => navigate_history(page, dispatch, -1).await,
+        Action::Forward => navigate_history(page, dispatch, 1).await,
+        Action::History { delta } => navigate_history(page, dispatch, i64::from(*delta)).await,
     }
 }
 
@@ -499,4 +461,31 @@ async fn navigate(page: &Page, dispatch: &Dispatch, params: Value) -> Result<Ver
     Ok(Verification::Navigation {
         loader: result["loaderId"].as_str().map(str::to_owned),
     })
+}
+
+async fn navigate_history(page: &Page, dispatch: &Dispatch, offset: i64) -> Result<Verification> {
+    let history: Value = page
+        .session()
+        .send("Page.getNavigationHistory", &json!({}))
+        .await?;
+    let index = history["currentIndex"]
+        .as_i64()
+        .ok_or_else(|| Error::cdp_msg("Invalid history index"))?
+        .checked_add(offset)
+        .ok_or_else(|| Error::cdp_msg("History index overflow"))?;
+    let entry = usize::try_from(index)
+        .ok()
+        .and_then(|i| history["entries"].get(i));
+    let Some(entry) = entry else {
+        return Ok(Verification::Noop);
+    };
+    dispatch
+        .send(
+            page.session(),
+            "Page.navigateToHistoryEntry",
+            json!({"entryId":entry["id"]}),
+            false,
+        )
+        .await?;
+    Ok(Verification::Navigation { loader: None })
 }

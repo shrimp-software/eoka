@@ -170,9 +170,9 @@ impl Node {
 impl Drop for Node {
     fn drop(&mut self) {
         let session = self.session.clone();
-        let group = self.group.clone();
+        let group = std::mem::take(&mut self.group);
         let attached = self.attached;
-        let observer = self.hover_observer.clone();
+        let observer = self.hover_observer.take();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
                 let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
@@ -214,16 +214,16 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
         }
         context = Some(node.session.create_isolated_world(frame_id).await?);
     }
-    if matches!(
-        spec.query,
-        LocatorQuery::BackendNode { .. } | LocatorQuery::Node { .. }
-    ) {
-        let mut params = json!({"objectGroup":node.group});
-        match spec.query {
-            LocatorQuery::BackendNode { id } => params["backendNodeId"] = json!(id),
-            LocatorQuery::Node { id } => params["nodeId"] = json!(id),
-            _ => unreachable!(),
-        }
+    let pinned = match spec.query {
+        LocatorQuery::BackendNode { id } => Some(json!({"backendNodeId": id})),
+        LocatorQuery::Node { id } => Some(json!({"nodeId": id})),
+        LocatorQuery::Css { .. }
+        | LocatorQuery::Text { .. }
+        | LocatorQuery::Placeholder { .. }
+        | LocatorQuery::Role { .. } => None,
+    };
+    if let Some(mut params) = pinned {
+        params["objectGroup"] = json!(node.group);
         let result: Value = node.session.send("DOM.resolveNode", &params).await?;
         node.object = result["object"]["objectId"]
             .as_str()

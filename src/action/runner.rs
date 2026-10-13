@@ -174,10 +174,12 @@ impl Page {
                     if matches!(options.expect, Some(Expectation::DownloadStarted)) => {}
                 Verification::Navigation { loader } => {
                     loop {
-                        let event = events
-                            .recv()
-                            .await
-                            .map_err(|_| Error::transport("Navigation event stream lost"))?;
+                        let event = events.recv().await.map_err(|error| {
+                            Error::transport_io(
+                                "Navigation event stream lost",
+                                std::io::Error::other(error),
+                            )
+                        })?;
                         if let CdpMessage::Event {
                             method,
                             params,
@@ -213,11 +215,12 @@ impl Page {
             }
             if let Some(Expectation::DownloadStarted) = &options.expect {
                 loop {
-                    match events
-                        .recv()
-                        .await
-                        .map_err(|_| Error::transport("Download event stream lost"))?
-                    {
+                    match events.recv().await.map_err(|error| {
+                        Error::transport_io(
+                            "Download event stream lost",
+                            std::io::Error::other(error),
+                        )
+                    })? {
                         CdpMessage::Event { method, params, .. }
                             if method == "Browser.downloadWillBegin"
                                 && params["frameId"]
