@@ -38,6 +38,9 @@ All notable changes to this project will be documented in this file.
   that cannot be applied to an existing process. Legacy reuse remains borrowed.
 - Managed patch copies use isolated runtime artifacts and retain Chrome's
   dependency files without modifying the source executable.
+- macOS managed bundles own their framework and resource files, reject escaping
+  symlinks, and preserve signing entitlements, flags and runtime metadata.
+  Ad-hoc signing and strict signature verification must both succeed.
 - Caller-owned profile permissions are no longer changed by launch.
 - Screen and outer-window dimensions now use native emulation metrics rather
   than fixed JavaScript overrides, keeping viewport changes and resets coherent.
