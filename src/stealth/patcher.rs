@@ -393,7 +393,16 @@ impl ChromePatcher {
             .ok();
 
         match (orig_modified, patched_modified) {
-            (Some(orig), Some(patched)) if patched > orig => self.verify_patched_sample(),
+            (Some(orig), Some(patched)) if patched > orig => {
+                if !self.verify_patched_sample() {
+                    return false;
+                }
+                #[cfg(target_os = "macos")]
+                if self.verify_signature().is_err() {
+                    return false;
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -811,6 +820,16 @@ impl ChromePatcher {
                 ),
             ));
         }
+        self.verify_signature()?;
+        tracing::info!("Successfully re-signed and verified patched binary");
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    fn verify_signature(&self) -> Result<()> {
+        use std::process::Command;
+
+        let sign_path = self.patched_bundle.as_ref().unwrap_or(&self.patched_path);
         let verification = Command::new("/usr/bin/codesign")
             .args(["--verify", "--deep", "--strict"])
             .arg(sign_path)
@@ -825,8 +844,6 @@ impl ChromePatcher {
                 ),
             ));
         }
-        tracing::info!("Successfully re-signed and verified patched binary");
-
         Ok(())
     }
 }
@@ -1106,8 +1123,16 @@ mod macos_bundle_tests {
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
         let original = b"not a Mach-O binary webdriver";
         fs::write(&executable, original).unwrap();
+        File::options()
+            .write(true)
+            .open(&executable)
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .unwrap();
         let patcher = ChromePatcher::new_in_runtime(&executable, runtime.path()).unwrap();
         assert!(patcher.patch().is_err());
+        assert!(!patcher.is_patched());
+        assert!(patcher.get_patched_path().is_err());
         assert_eq!(fs::read(&executable).unwrap(), original);
     }
 }
