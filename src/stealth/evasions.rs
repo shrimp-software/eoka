@@ -166,7 +166,6 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
             serde_json::to_string(&fp.voices).unwrap_or_else(|_| "[]".to_string()),
         ),
         ("__EOKA_MEDIA_DEVICES__", fp.media_devices_json()),
-        ("__EOKA_UI_CHROME__", fp.ui_chrome_height().to_string()),
         (
             "__EOKA_FONTS__",
             serde_json::to_string(&fp.fonts).unwrap_or_else(|_| "[]".to_string()),

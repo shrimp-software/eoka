@@ -68,39 +68,34 @@ fn test_resolve_respects_pinned_ua() {
 }
 
 // Coherence matrix: whatever the claimed platform, every platform-derived
-// surface must agree — architecture, OS chrome height, voices, devices,
-// fonts, keyboard.
+// surface must agree — architecture, voices, devices, fonts, keyboard.
 #[test]
 fn test_platform_surfaces_are_coherent() {
     let cases = [
         (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36",
             "x86",
-            40,
             "Microsoft David",
             &["Segoe UI"][..],
         ),
         (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36",
             "arm",
-            25,
             "Alex",
             &["Helvetica"][..],
         ),
         (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36",
             "x86",
-            30,
             "",
             &["DejaVu", "Liberation", "Noto"][..],
         ),
     ];
     for seed in 0..64 {
         fastrand::seed(seed);
-        for (ua, architecture, chrome_height, expected_voice, expected_font_prefixes) in cases {
+        for (ua, architecture, expected_voice, expected_font_prefixes) in cases {
             let fp = Fingerprint::resolve(Some(ua), None);
             assert_eq!(fp.ch_architecture(), architecture);
-            assert_eq!(fp.ui_chrome_height(), chrome_height);
 
             if expected_voice.is_empty() {
                 assert!(fp.voices.is_empty(), "Linux claims must have no voices");

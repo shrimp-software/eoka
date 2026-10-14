@@ -80,6 +80,7 @@ pub mod fetch;
 mod keyboard;
 pub mod network;
 pub mod page;
+mod recording;
 pub mod session;
 pub mod stealth;
 
@@ -108,6 +109,8 @@ pub use page::{
     FrameResponseCaptureReport,
 };
 pub use page::{CapturedRequest, FrameInfo, MouseButton, Page, PageState, ResponseBody, TextMatch};
+pub use page::{ScreenshotClip, ScreenshotFormat, ScreenshotOptions};
+pub use recording::{NativeRecording, NativeRecordingOptions, RecordingChunk, RecordingError};
 pub use session::{BrowserSession, BrowserState, SessionCookie};
 pub use stealth::{Fingerprint, HumanSpeed};
 
@@ -128,14 +131,22 @@ pub struct StealthConfig {
     pub user_agent: Option<String>,
     /// Headless mode
     pub headless: bool,
-    /// Path to Chrome/Chromium binary
+    /// Absolute path to Chrome/Chromium. Invalid explicit paths never fall back.
     pub chrome_path: Option<String>,
+    /// Absolute parent directory for a unique private browser runtime.
+    /// The parent is preserved; only Eoka's owned child is removed.
+    pub runtime_dir: Option<String>,
+    /// Enable Chrome's sandbox. Defaults to false for existing callers.
+    /// Unsupported sandbox environments fail without an unsandboxed retry.
+    pub sandbox: bool,
     /// Patch Chrome binary to bypass detection
     pub patch_binary: bool,
-    /// Viewport width
+    /// Viewport width in CSS pixels.
     pub viewport_width: u32,
-    /// Viewport height
+    /// Viewport height in CSS pixels.
     pub viewport_height: u32,
+    /// Physical pixels per CSS pixel. Must be finite and positive.
+    pub device_scale_factor: f64,
     /// Debug mode - log actions and save screenshots on error
     pub debug: bool,
     /// Directory for debug screenshots (defaults to current directory)
@@ -145,9 +156,9 @@ pub struct StealthConfig {
     /// Durable Chrome user-data directory. When set, Eoka preserves the
     /// profile and its full fingerprint identity across browser launches.
     ///
-    /// If a Chrome instance is already running on this directory, Eoka
-    /// attaches to it instead of spawning a second process (which Chrome's
-    /// own singleton lock would silently hand off to and exit).
+    /// A running instance may be borrowed only with the legacy default launch
+    /// policy. Explicit executable/runtime paths or sandboxing reject reuse,
+    /// since those launch requirements cannot be applied to another process.
     pub user_data_dir: Option<String>,
     /// Named profile within `user_data_dir` (Chrome's `--profile-directory`,
     /// e.g. "Profile 1"). Only meaningful when `user_data_dir` is set;
@@ -216,9 +227,12 @@ impl Default for StealthConfig {
             user_agent: None,
             headless: true,
             chrome_path: None,
+            runtime_dir: None,
+            sandbox: false,
             patch_binary: true,
             viewport_width: 1920,
             viewport_height: 1080,
+            device_scale_factor: 1.0,
             debug: false,
             debug_dir: None,
             proxy: None,
