@@ -2,6 +2,63 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - Unreleased
+
+### Added
+
+- Explicit executable validation, private per-browser `runtime_dir` placement,
+  and `sandbox` launch control without global environment mutation or fallback.
+  Sandbox control defaults to false for existing core callers.
+- Owned runtime cleanup shared with process ownership across startup failure,
+  cancellation, close, disconnect and drop. Close surfaces cleanup errors; drop
+  logs best-effort failures and preserves caller profiles and runtime roots.
+- CSS viewport and device-scale configuration, `Page::set_viewport` and
+  `Page::reset_viewport`, using native CDP emulation for layout and capture.
+  Live attachment preserves existing metrics until an explicit change.
+- Typed PNG/JPEG/WebP `ScreenshotOptions`, CSS document crops and full-page capture
+  through `Page::screenshot_with_options`, preserving viewport DPR as the single
+  render scale and serializing capture with viewport changes.
+- Target-bound native Chrome MP4 recording with `NativeRecordingOptions`, explicit
+  capability/precondition/state errors, bounded streaming reads and cleanup. No
+  alternate recorder, FFmpeg runtime requirement, H.264 guarantee or audio promise.
+  Recording cleanup on connection teardown preserves other connections' recorders
+  and survives teardown-waiter cancellation; explicit target close cancels its recorder.
+
+### Known release limitation
+
+- Chrome 155.0.8059.39 can emit duplicate terminal MP4 decoding timestamps when
+  its tail-frame interval truncates below one track tick. Reproduced with direct
+  CDP independently of Eoka; original native bytes are preserved, not normalized.
+  Native recording remains experimental and the paired npm publication gate is
+  blocked pending a real upstream resolution and fresh platform qualification.
+
+### Changed
+
+- Active-profile reuse rejects explicit executable/runtime/sandbox requirements
+  that cannot be applied to an existing process. Legacy reuse remains borrowed.
+- Managed patch copies use isolated runtime artifacts and retain Chrome's
+  dependency files without modifying the source executable.
+- Caller-owned profile permissions are no longer changed by launch.
+- Screen and outer-window dimensions now use native emulation metrics rather
+  than fixed JavaScript overrides, keeping viewport changes and resets coherent.
+- Screenshot quality/clip/full-page errors now fail locally as
+  `Error::InvalidScreenshotOptions`; `screenshot_jpeg` rejects quality above 100
+  rather than silently clamping it.
+- CDP WebSocket frames now share the existing 64 MiB message limit instead of
+  rejecting single-frame responses above 16 MiB. Large screenshots can reach the
+  caller's own byte limit or file-output path without prematurely losing transport.
+- Native recording transitions await owned task handles directly, eliminating a
+  redundant response channel. Read cancellation guards borrow their owner;
+  cleanup retains failed stream handles in place and skips completed recorders.
+  Cancellation ownership, cleanup bounds and retry semantics are unchanged.
+- CDP command envelopes borrow normalized parameters; incoming frames and event
+  payloads avoid redundant copies. Fetch routing reserves delivery capacity
+  before constructing queued pauses, and response notifications release map locks
+  before waking consumers.
+- Browser teardown removes a redundant forwarding channel. Startup cleanup
+  avoids re-cleaning stopped children and releases startup stderr history after
+  connection; rejected recorder admission avoids constructing unused state.
+
 ## [0.5.15] - 2026-10-10
 
 ### Added
