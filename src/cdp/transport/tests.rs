@@ -107,13 +107,17 @@ async fn test_peer_with_header_policy(strip: bool) -> (Transport, WebSocketStrea
 }
 
 async fn assert_peer_terminated(peer: &mut WebSocketStream<TcpStream>) {
-    let message = tokio::time::timeout(Duration::from_secs(2), peer.next())
-        .await
-        .expect("peer must observe socket termination while Transport is retained");
-    assert!(
-        matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))),
-        "expected peer termination, got {message:?}"
-    );
+    // Shutdown preserves bytes already accepted by the OS. Drain buffered
+    // frames, then require termination within one deadline without logging data.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(message)) = peer.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("peer must observe socket termination while Transport is retained");
 }
 
 #[tokio::test]
@@ -788,7 +792,7 @@ async fn closing_transport_is_visible_before_writer_and_reader_finish() {
     closing.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn closing_transport_times_out_writer_and_cleans_owned_runtime() {
     let (mut transport, _peer) = pending_test_peer().await;
     transport.cmd_timeout = Duration::from_secs(1);
@@ -799,6 +803,8 @@ async fn closing_transport_times_out_writer_and_cleans_owned_runtime() {
         .prepare_command(None, "Fixture.pendingAtClose", &json!({}), None)
         .unwrap();
     let writer = transport.writer.lock().await;
+    // Socket setup needs real time; only the contended close uses virtual time.
+    tokio::time::pause();
 
     tokio::time::timeout(
         transport.cmd_timeout + Duration::from_millis(10),

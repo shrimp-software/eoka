@@ -34,6 +34,9 @@ All notable changes to this project will be documented in this file.
   producer without waiting for process exit.
   Fixture cleanup cancels probes and releases descendants on readiness failure
   or task cancellation, before removing their runtime directory.
+- Make transport regressions portable across native macOS and Windows: keep
+  socket setup outside virtual-time phases, bound both peers' socket buffers,
+  and drain queued frames before requiring physical connection termination.
 
 ## [0.7.0] - Unreleased
 

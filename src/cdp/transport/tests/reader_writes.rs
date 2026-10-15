@@ -53,7 +53,7 @@ async fn auth_writer_contention_cannot_strand_native_completion() {
     )).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn silent_websocket_upgrade_obeys_connection_deadline() {
     use tokio::io::AsyncReadExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -63,6 +63,8 @@ async fn silent_websocket_upgrade_obeys_connection_deadline() {
     // TCP connects and the HTTP upgrade reaches the peer, which never replies.
     let mut first_byte = [0];
     socket.read_exact(&mut first_byte).await.unwrap();
+    // Advance time only after the real socket has delivered the upgrade request.
+    tokio::time::pause();
     let result = tokio::time::timeout(Duration::from_secs(2), &mut connection).await;
     connection.abort();
     assert!(
@@ -73,7 +75,12 @@ async fn silent_websocket_upgrade_obeys_connection_deadline() {
 
 #[tokio::test]
 async fn automatic_reply_socket_backpressure_cannot_strand_native_completion() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let listener = tokio::net::TcpSocket::new_v4().unwrap();
+    // Bound the advertised receive window before the handshake. A small sender
+    // buffer alone does not bound buffering on every platform.
+    listener.set_recv_buffer_size(64 * 1024).unwrap();
+    listener.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let listener = listener.listen(1).unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
@@ -113,14 +120,16 @@ async fn automatic_reply_socket_backpressure_cannot_strand_native_completion() {
     .unwrap();
     let result = tokio::time::timeout(Duration::from_secs(3), response.wait()).await;
     let closed = transport.is_closed();
-    // Resume reads only after the deadline. A partially flushed WebSocket
-    // message must terminate with EOF/error, not hang while Transport is alive.
-    assert_peer_terminated(&mut peer).await;
-    transport.close().await.unwrap();
+    // Check the write deadline before resuming reads, which would relieve
+    // backpressure. This must be a terminal transport error, not our outer timeout.
     assert!(
         matches!(result, Ok(Err(Error::Transport { .. }))),
         "{result:?}"
     );
     assert!(closed);
     assert!(dispatch.may_have_been_sent());
+    // Some platforms finish sending an already queued frame during shutdown.
+    // Drain it and require EOF/error while Transport is still retained.
+    assert_peer_terminated(&mut peer).await;
+    transport.close().await.unwrap();
 }
