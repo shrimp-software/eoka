@@ -14,13 +14,16 @@ async fn explicit_and_live_debug_ports_ignore_stale_profile_discovery() {
             std::process::id(),
             fastrand::u64(..)
         ));
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&profile)
+                .unwrap();
         }
-        builder.create(&profile).unwrap();
+        #[cfg(not(unix))]
+        std::fs::create_dir(&profile).unwrap();
         std::fs::write(
             profile.join("DevToolsActivePort"),
             "9\n/devtools/browser/stale\n",

@@ -78,6 +78,9 @@ All notable changes to this project will be documented in this file.
   redirect macOS bundle cleanup into the original application.
 - Validate relocated and cached macOS bundle symlink endpoints before patching or
   signing, rejecting links that resolve back into the source or outside the copy.
+- Keep Unix-only launch/discovery code within its platform boundaries for Windows
+  warnings-as-errors builds. Runtime cleanup regressions compare directory identity
+  across aliased temporary paths rather than platform-specific path spelling.
 
 ## [0.5.15] - 2026-10-10
 

@@ -126,13 +126,13 @@ impl BrowserProfile {
             None => (runtime.path().join("profile"), true),
         };
         if owned {
-            let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             {
                 use std::os::unix::fs::DirBuilderExt;
-                builder.mode(0o700);
+                std::fs::DirBuilder::new().mode(0o700).create(&path)?;
             }
-            builder.create(&path)?;
+            #[cfg(not(unix))]
+            std::fs::create_dir(&path)?;
         } else {
             std::fs::create_dir_all(&path)?;
         }
@@ -404,14 +404,11 @@ fn installed_chrome_user_agent(
     Fingerprint::native_chrome_user_agent(full_version)
 }
 
-#[cfg(test)]
-use super::{accept_language_for, ua_override_for};
-#[cfg(test)]
-use crate::stealth::build_evasion_script_for;
-
 #[cfg(all(test, unix))]
 mod try_attach_existing_tests {
     use super::*;
+    use crate::browser::{accept_language_for, ua_override_for};
+    use crate::stealth::build_evasion_script_for;
     use std::os::unix::fs::symlink;
 
     fn temp_profile_dir(name: &str) -> PathBuf {

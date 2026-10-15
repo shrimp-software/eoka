@@ -54,7 +54,10 @@ async fn failed_launch(root: &Path, sandbox: bool, caller_profile: bool) {
     let evidence = std::fs::read_to_string(evidence).unwrap();
     let lines: Vec<_> = evidence.lines().collect();
     let child = Path::new(lines[0]);
-    assert_eq!(child.parent(), Some(runtime.as_path()));
+    assert_eq!(
+        std::fs::canonicalize(child.parent().unwrap()).unwrap(),
+        std::fs::canonicalize(&runtime).unwrap()
+    );
     assert_eq!(lines[0], lines[1]);
     assert_eq!(lines[0], lines[2]);
     assert!(!child.exists(), "failed launch leaked runtime");
@@ -84,6 +87,14 @@ async fn failed_launch_preserves_caller_data_and_matches_sandbox_policy() {
             failed_launch(&root.0, sandbox, caller_profile).await;
         }
     }
+}
+
+#[tokio::test]
+async fn failed_launch_preserves_aliased_runtime_parent() {
+    let root = Directory::new();
+    let alias = root.0.join("alias");
+    std::os::unix::fs::symlink(&root.0, &alias).unwrap();
+    failed_launch(&alias, false, true).await;
 }
 
 #[tokio::test]
