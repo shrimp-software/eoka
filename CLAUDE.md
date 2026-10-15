@@ -30,7 +30,7 @@ cargo test --lib -- --nocapture      # show test output
 
 cargo fmt                            # format
 cargo fmt --all --check              # verify formatting (CI)
-cargo clippy --all-features -- -D warnings   # lint (CI-equivalent)
+cargo clippy --all-features --all-targets -- -D warnings   # lint (CI-equivalent)
 cargo lint                           # alias for the above
 ```
 
@@ -39,7 +39,7 @@ Chrome and Xvfb):
 
 ```bash
 cargo fmt --all --check
-cargo clippy --all-features --locked -- -D warnings
+cargo clippy --all-features --all-targets --locked -- -D warnings
 cargo test --all-features --locked
 cargo build --examples --locked
 cargo +1.85.0 check --lib --all-features --locked

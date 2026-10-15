@@ -9,7 +9,7 @@ browser examples. Unit and regression tests do not require a browser.
 
 ```bash
 cargo fmt --all --check
-cargo clippy --all-features -- -D warnings
+cargo clippy --all-features --all-targets -- -D warnings
 cargo test --lib
 ```
 

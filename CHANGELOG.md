@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [0.7.1] - Unreleased
 
+### Changed
+
+- Cache Cargo downloads and compiled dependencies in CI using a SHA-pinned
+  action with job, compiler and dependency/configuration-specific cache keys.
+- Combine formatting and Clippy into one check, expand Clippy and `cargo lint`
+  to all targets, and remove the redundant Linux build step. Platform, MSRV and
+  real-browser test coverage is unchanged.
+
 ### Fixed
 
 - Recover CDP messages containing lone surrogate or truncated Unicode escapes
