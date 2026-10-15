@@ -26,6 +26,10 @@ pub(super) struct FetchInterceptor {
 }
 
 impl FetchInterceptor {
+    pub(super) fn shutdown(&self) {
+        close_routes(&self.requests, &self.responses);
+    }
+
     pub(super) fn on_event(
         &self,
         method: &str,
@@ -123,6 +127,13 @@ pub(super) type RequestRoutes = Arc<std::sync::Mutex<HashMap<String, RequestRout
 pub(super) struct RequestRoute {
     pub(super) events: mpsc::Sender<RequestPause>,
     pub(super) dropped: Arc<AtomicU64>,
+}
+
+/// Drop route senders without discarding pauses already queued for consumers.
+/// The transport marks itself closed before taking these installation locks.
+pub(super) fn close_routes(requests: &RequestRoutes, responses: &ResponseRoutes) {
+    requests.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    responses.lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// An owned request-stage pause. The consumer must continue or fulfill it once.

@@ -9,7 +9,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -182,13 +182,13 @@ pub fn auto_connect(start: u16, end: u16) -> Option<(u16, String)> {
 /// for keep-alive regardless. Reading until EOF would therefore always block
 /// for the full read timeout and then discard an already-complete response,
 /// so this reads exactly `Content-Length` bytes past the header instead.
+/// Response progress does not renew the deadline: a slow-drip peer must not
+/// keep discovery (or the blocking launch worker) alive indefinitely.
 fn http_get(host: &str, port: u16, path: &str) -> Result<String> {
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect(&addr)
         .map_err(|e| Error::transport_io(format!("Failed to connect to {}", addr), e))?;
-    stream
-        .set_read_timeout(Some(HTTP_TIMEOUT))
-        .map_err(|e| Error::transport_io("set_read_timeout", e))?;
+    let deadline = Instant::now() + HTTP_TIMEOUT;
     stream
         .set_write_timeout(Some(HTTP_TIMEOUT))
         .map_err(|e| Error::transport_io("set_write_timeout", e))?;
@@ -207,7 +207,7 @@ fn http_get(host: &str, port: u16, path: &str) -> Result<String> {
         if let Some(pos) = find_double_crlf(&buf) {
             break pos;
         }
-        if read_more(&mut stream, &mut buf, &mut chunk)? == 0 {
+        if read_more(&mut stream, &mut buf, &mut chunk, deadline)? == 0 {
             return Err(Error::transport(
                 "Chrome closed the connection before headers",
             ));
@@ -235,7 +235,7 @@ fn http_get(host: &str, port: u16, path: &str) -> Result<String> {
     if let Some(content_length) = content_length {
         let body_end = body_start + content_length;
         while buf.len() < body_end {
-            if read_more(&mut stream, &mut buf, &mut chunk)? == 0 {
+            if read_more(&mut stream, &mut buf, &mut chunk, deadline)? == 0 {
                 return Err(Error::transport(
                     "Chrome closed the connection before sending the full response body",
                 ));
@@ -245,17 +245,38 @@ fn http_get(host: &str, port: u16, path: &str) -> Result<String> {
     } else {
         // No Content-Length (unexpected for this endpoint) — fall back to
         // reading until the peer actually closes.
-        while read_more(&mut stream, &mut buf, &mut chunk)? > 0 {}
+        while read_more(&mut stream, &mut buf, &mut chunk, deadline)? > 0 {}
         Ok(String::from_utf8_lossy(&buf[body_start..]).into_owned())
     }
 }
 
 /// Read one chunk from `stream` into `buf`, returning the number of bytes
 /// read (`0` on EOF).
-fn read_more(stream: &mut TcpStream, buf: &mut Vec<u8>, chunk: &mut [u8]) -> Result<usize> {
-    let n = stream
-        .read(chunk)
-        .map_err(|e| Error::transport_io("HTTP read", e))?;
+fn read_more(
+    stream: &mut TcpStream,
+    buf: &mut Vec<u8>,
+    chunk: &mut [u8],
+    deadline: Instant,
+) -> Result<usize> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(Error::Timeout(
+            "HTTP discovery response exceeded its deadline".into(),
+        ));
+    }
+    stream
+        .set_read_timeout(Some(remaining))
+        .map_err(|e| Error::transport_io("set_read_timeout", e))?;
+    let n = stream.read(chunk).map_err(|error| {
+        if matches!(
+            error.kind(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+        ) {
+            Error::Timeout("HTTP discovery response exceeded its deadline".into())
+        } else {
+            Error::transport_io("HTTP read", error)
+        }
+    })?;
     buf.extend_from_slice(&chunk[..n]);
     Ok(n)
 }
@@ -369,6 +390,59 @@ mod http_get_regression_tests {
             pages[0].web_socket_debugger_url,
             format!("ws://127.0.0.1:{}/devtools/page/regression-guid", port)
         );
+    }
+
+    fn assert_slow_response_has_one_deadline(prefix: &'static [u8]) {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut first_byte = [0];
+            stream.read_exact(&mut first_byte).unwrap();
+            stream.write_all(prefix).unwrap();
+            while !stopped.load(Ordering::Acquire) {
+                if stream.write_all(b" ").is_err() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let (sent, received) = mpsc::channel();
+        let client = std::thread::spawn(move || {
+            let _ = sent.send(http_get("127.0.0.1", port, "/json/version"));
+        });
+        let result = received.recv_timeout(HTTP_TIMEOUT + Duration::from_secs(1));
+        stop.store(true, Ordering::Release);
+        server.join().unwrap();
+        client.join().unwrap();
+        assert!(
+            matches!(result, Ok(Err(Error::Timeout(_)))),
+            "continuous progress must not reset the HTTP discovery deadline: {result:?}"
+        );
+    }
+
+    #[test]
+    fn discovery_bounds_slow_drip_headers() {
+        assert_slow_response_has_one_deadline(b"HTTP/1.1 200 OK\r\nX-Padding: ");
+    }
+
+    #[test]
+    fn discovery_bounds_slow_drip_content_length_body() {
+        assert_slow_response_has_one_deadline(b"HTTP/1.1 200 OK\r\nContent-Length: 999999\r\n\r\n");
+    }
+
+    #[test]
+    fn discovery_bounds_slow_drip_eof_body() {
+        assert_slow_response_has_one_deadline(b"HTTP/1.1 200 OK\r\n\r\n");
     }
 }
 

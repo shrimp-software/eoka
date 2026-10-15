@@ -45,6 +45,40 @@ type WsSource = SplitStream<WsStream>;
 /// (proxy-auth replies, pong frames).
 type SharedSink = Arc<Mutex<WsSink>>;
 
+/// Shuts down the shared TCP connection without acquiring the WebSocket writer.
+/// Each guard must shut down independently of other retained socket owners.
+struct SocketShutdownGuard(Arc<std::net::TcpStream>);
+
+impl Drop for SocketShutdownGuard {
+    fn drop(&mut self) {
+        // Shutdown affects every duplicated descriptor, including the socket
+        // retained by SplitSink. Repeated shutdown after EOF is harmless.
+        let _ = self.0.shutdown(std::net::Shutdown::Both);
+    }
+}
+
+fn duplicate_socket(stream: &WsStream) -> Result<Arc<std::net::TcpStream>> {
+    let MaybeTlsStream::Plain(socket) = stream.get_ref() else {
+        return Err(Error::transport(
+            "CDP transport requires a plain ws:// socket",
+        ));
+    };
+    #[cfg(unix)]
+    let socket = {
+        use std::os::fd::AsFd;
+        socket.as_fd().try_clone_to_owned()
+    };
+    #[cfg(windows)]
+    let socket = {
+        use std::os::windows::io::AsSocket;
+        socket.as_socket().try_clone_to_owned()
+    };
+    let socket = socket
+        .map(std::net::TcpStream::from)
+        .map_err(|error| Error::transport(format!("Failed to duplicate CDP socket: {error}")))?;
+    Ok(Arc::new(socket))
+}
+
 /// Pending requests map — accessed from both the async reader task and
 /// `send_impl`; the lock is held very briefly so a std Mutex is fine.
 type PendingMap = std::sync::Mutex<HashMap<u64, PendingRequest>>;
@@ -66,6 +100,8 @@ struct CdpCommand<'a> {
 struct ReaderCompletionState {
     closed: Arc<AtomicBool>,
     routes: Arc<CompletionRoutes>,
+    write_timeout: Duration,
+    shutdown: SocketShutdownGuard,
 }
 
 /// Recover a poisoned pending-request map. Its critical sections only mutate
@@ -209,13 +245,15 @@ pub struct Transport {
     closed: Arc<AtomicBool>,
     /// WebSocket write half (shared with the reader task for auth/pong).
     writer: SharedSink,
+    /// Duplicated socket for lock-independent shutdown, even under backpressure.
+    shutdown_socket: Arc<std::net::TcpStream>,
     /// Next message ID
     next_id: AtomicU64,
     /// Pending requests waiting for responses
     pending: Arc<PendingMap>,
     completion_routes: Arc<CompletionRoutes>,
-    /// Broadcasts parsed events to all subscribers.
-    event_tx: broadcast::Sender<CdpMessage>,
+    /// Weak reference: only the reader keeps the event stream open.
+    event_tx: broadcast::WeakSender<CdpMessage>,
     response_routes: ResponseRoutes,
     request_routes: RequestRoutes,
     idle_routes: IdleRoutes,
@@ -278,7 +316,7 @@ impl Transport {
     }
 
     /// Connect the WebSocket and return the stream.
-    async fn ws_connect(ws_url: &str) -> Result<WsStream> {
+    async fn ws_connect(ws_url: &str, timeout: Duration) -> Result<WsStream> {
         if !ws_url.starts_with("ws://") {
             return Err(Error::transport(format!(
                 "Invalid WebSocket URL (expected ws://...): {}",
@@ -289,9 +327,13 @@ impl Transport {
         let config = WebSocketConfig::default()
             .max_message_size(Some(max_message_bytes))
             .max_frame_size(Some(max_message_bytes));
-        let (stream, _resp) = connect_async_with_config(ws_url, Some(config), false)
-            .await
-            .map_err(|e| Error::transport(format!("WebSocket connect failed: {}", e)))?;
+        let (stream, _resp) = tokio::time::timeout(
+            timeout,
+            connect_async_with_config(ws_url, Some(config), false),
+        )
+        .await
+        .map_err(|_| Error::Timeout("WebSocket connection exceeded its deadline".into()))?
+        .map_err(|e| Error::transport(format!("WebSocket connect failed: {}", e)))?;
         tracing::debug!("WebSocket connected to {}", ws_url);
         Ok(stream)
     }
@@ -304,7 +346,10 @@ impl Transport {
         cdp_timeout_secs: u64,
         filter_cdp: bool,
         strip_x_client_data: bool,
-    ) -> Self {
+    ) -> Result<Self> {
+        let mut child = child.map(ChildCleanupGuard::new);
+        let shutdown_socket = duplicate_socket(&stream)?;
+        let child = child.as_mut().map(ChildCleanupGuard::take).transpose()?;
         let cmd_timeout = std::time::Duration::from_secs(cdp_timeout_secs);
         tracing::debug!("CDP timeout set to {}s", cdp_timeout_secs);
 
@@ -316,10 +361,10 @@ impl Transport {
         let reader_completions = Arc::clone(&completion_routes);
         let closed = Arc::new(AtomicBool::new(false));
         let reader_closed = Arc::clone(&closed);
-        let (event_tx, event_rx) = broadcast::channel(EVENT_CHANNEL_CAP);
+        let (reader_events, event_rx) = broadcast::channel(EVENT_CHANNEL_CAP);
+        let event_tx = reader_events.downgrade();
 
         let pending_clone = Arc::clone(&pending);
-        let event_tx_clone = event_tx.clone();
         let reader_writer = Arc::clone(&writer);
         let response_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let reader_responses = Arc::clone(&response_routes);
@@ -328,15 +373,20 @@ impl Transport {
         let idle_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let reader_idle = Arc::clone(&idle_routes);
         let request_base_auth = proxy_auth.is_some();
+        // Construct the guard before spawning: abort-before-first-poll must
+        // still shut down the socket while Transport retains the writer.
+        let completion_state = ReaderCompletionState {
+            closed: reader_closed,
+            routes: reader_completions,
+            write_timeout: cmd_timeout,
+            shutdown: SocketShutdownGuard(Arc::clone(&shutdown_socket)),
+        };
         let reader_handle = tokio::spawn(async move {
             Self::reader_loop(
                 source,
                 pending_clone,
-                ReaderCompletionState {
-                    closed: reader_closed,
-                    routes: reader_completions,
-                },
-                event_tx_clone,
+                completion_state,
+                reader_events,
                 reader_writer,
                 reader_idle,
                 FetchInterceptor {
@@ -349,12 +399,13 @@ impl Transport {
             .await;
         });
 
-        Self {
+        Ok(Self {
             child: child.map(std::sync::Mutex::new),
             runtime: std::sync::Mutex::new(None),
             browser_endpoint: None,
             closed,
             writer,
+            shutdown_socket,
             next_id: AtomicU64::new(1),
             pending,
             completion_routes,
@@ -368,7 +419,7 @@ impl Transport {
             cmd_timeout,
             reader_handle: Some(reader_handle),
             filter_cdp,
-        }
+        })
     }
 
     /// Create a new transport with proxy auth, X-Client-Data stripping and
@@ -400,7 +451,7 @@ impl Transport {
         runtime: Option<RuntimeDirectory>,
     ) -> Result<Self> {
         let mut child = ChildCleanupGuard::new(child);
-        let stream = Self::ws_connect(ws_url).await?;
+        let stream = Self::ws_connect(ws_url, Duration::from_secs(cdp_timeout_secs)).await?;
         let mut transport = Self::build(
             Some(child.take()?),
             stream,
@@ -408,7 +459,7 @@ impl Transport {
             cdp_timeout_secs,
             true,
             strip_x_client_data,
-        );
+        )?;
         transport.browser_endpoint = Some(ws_url.to_owned());
         *transport
             .runtime
@@ -419,6 +470,7 @@ impl Transport {
 
     /// Connect to an existing Chrome instance at the given WebSocket URL.
     /// Does not manage a Chrome process — caller owns the browser lifecycle.
+    /// `cdp_timeout_secs` bounds connection establishment and each CDP command.
     pub async fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
         Self::connect_with_options(ws_url, cdp_timeout_secs, true, false).await
     }
@@ -426,13 +478,14 @@ impl Transport {
     /// Connect to an existing Chrome with full options control. Use
     /// `filter_cdp = false` to allow `Runtime.enable` and friends — needed
     /// when driving a user-owned browser where stealth filtering is unwanted.
+    /// `cdp_timeout_secs` bounds connection establishment and each CDP command.
     pub async fn connect_with_options(
         ws_url: &str,
         cdp_timeout_secs: u64,
         filter_cdp: bool,
         strip_x_client_data: bool,
     ) -> Result<Self> {
-        let stream = Self::ws_connect(ws_url).await?;
+        let stream = Self::ws_connect(ws_url, Duration::from_secs(cdp_timeout_secs)).await?;
         let mut transport = Self::build(
             None,
             stream,
@@ -440,7 +493,7 @@ impl Transport {
             cdp_timeout_secs,
             filter_cdp,
             strip_x_client_data,
-        );
+        )?;
         transport.browser_endpoint = Some(ws_url.to_owned());
         Ok(transport)
     }
@@ -662,8 +715,15 @@ impl Transport {
 
     /// Subscribe to CDP events. Each subscriber gets its own receiver; events
     /// published after subscribing are delivered to all live receivers.
+    /// A subscription made after closure is already closed.
     pub fn subscribe(&self) -> broadcast::Receiver<CdpMessage> {
-        self.event_tx.subscribe()
+        if !self.is_closed() {
+            if let Some(sender) = self.event_tx.upgrade() {
+                return sender.subscribe();
+            }
+        }
+        let (_, receiver) = broadcast::channel(1);
+        receiver
     }
 
     /// Configure manual request patterns while retaining native header/auth interception.
@@ -695,6 +755,10 @@ impl Transport {
             .request_routes
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // Check under the same lock used by shutdown to prevent late ownership.
+        if self.is_closed() {
+            return Err(Error::transport("CDP transport is closed"));
+        }
         if routes.contains_key(session) {
             return Err(Error::cdp_msg(
                 "Request interception already owned for this session",
@@ -718,10 +782,13 @@ impl Transport {
         events: mpsc::Sender<Value>,
         dropped: Arc<AtomicU64>,
     ) {
-        self.response_routes
+        let mut routes = self
+            .response_routes
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(session.to_owned(), ResponseRoute { events, dropped });
+            .unwrap_or_else(|e| e.into_inner());
+        if !self.is_closed() {
+            routes.insert(session.to_owned(), ResponseRoute { events, dropped });
+        }
     }
 
     pub(crate) fn remove_response_route(&self, session: &str) {
@@ -748,8 +815,11 @@ impl Transport {
     }
 
     /// Try to receive an event without blocking (single-consumer back-compat).
+    /// Returns `None` if another consumer currently owns the persistent receiver.
     pub async fn try_recv_event(&self) -> Option<CdpMessage> {
-        let mut rx = self.event_rx.lock().await;
+        let Ok(mut rx) = self.event_rx.try_lock() else {
+            return None;
+        };
         loop {
             match rx.try_recv() {
                 Ok(msg) => return Some(msg),
@@ -786,11 +856,16 @@ impl Transport {
     /// Close the transport and terminate any owned Chrome process.
     ///
     /// Waiting for the writer and sending the best-effort WebSocket close frame
-    /// share the configured command timeout. Pending requests are failed and
-    /// owned cleanup is attempted even if that deadline expires. Borrowed Chrome
-    /// processes are not terminated.
+    /// share the configured command timeout. TCP shutdown follows that attempt,
+    /// independently of the writer lock, and also occurs if this future is
+    /// cancelled. Pending requests are failed and owned cleanup is attempted
+    /// even if the deadline expires. Borrowed Chrome processes are not terminated.
     pub async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::Release);
+        interception::close_routes(&self.request_routes, &self.response_routes);
+        // If this future is cancelled during the graceful attempt, shutdown
+        // must still happen without waiting for the writer or the reader task.
+        let shutdown = SocketShutdownGuard(Arc::clone(&self.shutdown_socket));
         // Bound both writer acquisition and the best-effort close-frame write
         // so a stalled sink cannot prevent pending failure or owned cleanup.
         match tokio::time::timeout(self.cmd_timeout, async {
@@ -806,6 +881,7 @@ impl Transport {
                 tracing::debug!("WebSocket close frame exceeded its deadline: {}", error);
             }
         }
+        drop(shutdown);
 
         if let Some(handle) = &self.reader_handle {
             handle.abort();
@@ -837,6 +913,8 @@ impl Transport {
 impl Drop for Transport {
     fn drop(&mut self) {
         self.closed.store(true, Ordering::Release);
+        interception::close_routes(&self.request_routes, &self.response_routes);
+        let _ = self.shutdown_socket.shutdown(std::net::Shutdown::Both);
         if let Some(handle) = self.reader_handle.take() {
             handle.abort();
         }
