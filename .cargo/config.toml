@@ -3,4 +3,4 @@
 # sequence (fmt + lint + test) — see CLAUDE.md.
 [alias]
 t = "test --lib"
-lint = "clippy --all-features -- -D warnings"
+lint = "clippy --all-features --all-targets -- -D warnings"

@@ -298,6 +298,17 @@ pub(crate) fn chrome_version_output(
     runtime: &Path,
     cancelled: &AtomicBool,
 ) -> Option<Vec<u8>> {
+    probe_version_output(path, runtime, cancelled, Duration::from_secs(30))
+}
+
+fn probe_version_output(
+    path: &Path,
+    runtime: &Path,
+    cancelled: &AtomicBool,
+    timeout: Duration,
+) -> Option<Vec<u8>> {
+    use std::io::ErrorKind;
+    #[cfg(not(windows))]
     use std::io::Read;
     if cancelled.load(Ordering::Acquire) {
         return None;
@@ -313,28 +324,310 @@ pub(crate) fn chrome_version_output(
         .spawn()
         .ok()?;
     let mut guard = ChildCleanupGuard::new(child);
-    let stdout = guard.child.as_mut()?.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let result = stdout.take(4096).read_to_end(&mut bytes).map(|_| bytes);
-        let _ = tx.send(result);
-    });
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut stdout = guard.child.as_mut()?.stdout.take()?;
+    // A descendant may inherit stdout after the probe child exits. Never hand
+    // this pipe to a detached blocking reader: cancellation must close our end.
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let fd = stdout.as_raw_fd();
+        // SAFETY: stdout owns this descriptor, and no other reader uses it.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        if flags == -1 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == -1
+        {
+            return None;
+        }
+    }
+    let mut bytes = [0; 4096];
+    let mut used = 0;
+    let deadline = Instant::now() + timeout;
     loop {
         if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
             return None;
         }
-        match rx.recv_timeout(Duration::from_millis(20)) {
-            Ok(result) => return result.ok(),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+        #[cfg(windows)]
+        let output = read_available_version_stdout(&mut stdout, &mut bytes[used..]);
+        #[cfg(not(windows))]
+        let output = stdout.read(&mut bytes[used..]);
+        match output {
+            Ok(0) => return Some(bytes[..used].to_vec()),
+            Ok(n) => {
+                used += n;
+                if used == bytes.len() {
+                    return Some(bytes.to_vec());
+                }
+            }
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => {}
+            Err(_) => return None,
         }
     }
+}
+
+#[cfg(windows)]
+fn read_available_version_stdout(
+    stdout: &mut std::process::ChildStdout,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    use std::{ffi::c_void, io::Read, os::windows::io::AsRawHandle};
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn PeekNamedPipe(
+            pipe: *mut c_void,
+            buffer: *mut c_void,
+            buffer_size: u32,
+            bytes_read: *mut u32,
+            bytes_available: *mut u32,
+            bytes_left: *mut u32,
+        ) -> i32;
+    }
+    let mut available = 0;
+    // SAFETY: stdout owns a pipe handle; only the valid available-byte output
+    // pointer is used. No read occurs until bytes are available to this sole reader.
+    let ok = unsafe {
+        PeekNamedPipe(
+            stdout.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut available,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let error = std::io::Error::last_os_error();
+        return if error.raw_os_error() == Some(109) {
+            // ERROR_BROKEN_PIPE: EOF.
+            Ok(0)
+        } else {
+            Err(error)
+        };
+    }
+    if available == 0 {
+        return Err(std::io::ErrorKind::WouldBlock.into());
+    }
+    let count = buffer.len().min(available as usize);
+    stdout.read(&mut buffer[..count])
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    struct ProbeFixture {
+        runtime: crate::cdp::transport::RuntimeDirectory,
+        cancelled: std::sync::Arc<AtomicBool>,
+        finished: Option<std::sync::mpsc::Receiver<()>>,
+        cleaned_up: std::sync::Arc<AtomicBool>,
+    }
+
+    #[cfg(unix)]
+    impl ProbeFixture {
+        fn new(body: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let fixture = Self {
+                runtime: crate::cdp::transport::RuntimeDirectory::create(None).unwrap(),
+                cancelled: std::sync::Arc::new(AtomicBool::new(false)),
+                finished: None,
+                cleaned_up: std::sync::Arc::new(AtomicBool::new(false)),
+            };
+            let script = fixture.runtime.path().join("version-fixture");
+            std::fs::write(&script, body).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            fixture
+        }
+
+        fn start(&mut self, timeout: Duration) -> tokio::task::JoinHandle<Option<Vec<u8>>> {
+            let script = self.runtime.path().join("version-fixture");
+            let directory = self.runtime.path().to_owned();
+            let cancelled = self.cancelled.clone();
+            let (finished, receiver) = std::sync::mpsc::channel();
+            self.finished = Some(receiver);
+            tokio::task::spawn_blocking(move || {
+                let output = probe_version_output(&script, &directory, &cancelled, timeout);
+                let _ = finished.send(());
+                output
+            })
+        }
+
+        fn release(&self) {
+            self.cancelled.store(true, Ordering::Release);
+            if self.runtime.path().is_dir() {
+                let _ = std::fs::write(self.runtime.path().join("release"), []);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for ProbeFixture {
+        fn drop(&mut self) {
+            // This guard owns the directory, so it remains available while both
+            // the blocking probe and its stdout-inheriting descendant stop.
+            self.release();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let stopped = self.finished.take().is_none_or(|finished| {
+                !matches!(
+                    finished.recv_timeout(deadline.saturating_duration_since(Instant::now())),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                )
+            });
+            let started = self.runtime.path().join("descendant-started");
+            let exited = self.runtime.path().join("descendant-exited");
+            while started.exists() && !exited.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            self.cleaned_up.store(
+                stopped && (!started.exists() || exited.exists()),
+                Ordering::Release,
+            );
+            // If startup raced this bounded cleanup, removing the directory
+            // also releases every shell wait loop; no orphan waits forever.
+        }
+    }
+
+    #[cfg(unix)]
+    const INHERITED_STDOUT_FIXTURE: &str = r#"#!/bin/sh
+(
+    trap '' PIPE
+    trap 'printf exited > "$TMPDIR/descendant-exited" 2>/dev/null' EXIT
+    [ -d "$TMPDIR" ] || exit
+    printf started > "$TMPDIR/descendant-started"
+    while [ -d "$TMPDIR" ] && [ ! -e "$TMPDIR/release" ]; do sleep 0.02; done
+    [ -d "$TMPDIR" ] || exit
+    printf x 2>/dev/null
+    printf '%s' "$?" > "$TMPDIR/write-status"
+) &
+while [ -d "$TMPDIR" ] && [ -e "$TMPDIR/hold-ready" ] && [ ! -e "$TMPDIR/release" ]; do
+    sleep 0.02
+done
+if [ -d "$TMPDIR" ] && [ ! -e "$TMPDIR/release" ]; then
+    printf ready > "$TMPDIR/ready"
+fi
+wait
+"#;
+
+    #[cfg(unix)]
+    async fn fixture_file(path: &Path) -> String {
+        loop {
+            if let Ok(contents) = std::fs::read_to_string(path) {
+                if !contents.is_empty() {
+                    return contents;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[cfg(unix)]
+    async fn assert_probe_closes_inherited_stdout(cancel: bool) {
+        let mut fixture = ProbeFixture::new(INHERITED_STDOUT_FIXTURE);
+        let probe = fixture.start(Duration::from_secs(if cancel { 30 } else { 1 }));
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            fixture_file(&fixture.runtime.path().join("ready")),
+        )
+        .await
+        .expect("fixture must start its stdout-inheriting descendant");
+        if cancel {
+            fixture.cancelled.store(true, Ordering::Release);
+        }
+        let result = tokio::time::timeout(Duration::from_secs(3), probe).await;
+        // Release even a regressed probe before asserting its result.
+        fixture.release();
+        let status = tokio::time::timeout(
+            Duration::from_secs(3),
+            fixture_file(&fixture.runtime.path().join("write-status")),
+        )
+        .await
+        .expect("descendant must report its pipe write and exit");
+        assert!(result
+            .expect("cancelled or expired probe must finish")
+            .unwrap()
+            .is_none());
+        assert_ne!(
+            status, "0",
+            "probe left a reader blocked on inherited stdout"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_version_probe_closes_stdout_inherited_by_descendant() {
+        assert_probe_closes_inherited_stdout(true).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn expired_version_probe_closes_stdout_inherited_by_descendant() {
+        assert_probe_closes_inherited_stdout(false).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_fixture_cleans_up_when_readiness_fails() {
+        for abort in [false, true] {
+            let mut fixture = ProbeFixture::new(INHERITED_STDOUT_FIXTURE);
+            let directory = fixture.runtime.path().to_owned();
+            std::fs::write(directory.join("hold-ready"), []).unwrap();
+            let probe = fixture.start(Duration::from_secs(30));
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                fixture_file(&directory.join("descendant-started")),
+            )
+            .await
+            .expect("descendant must start before readiness is interrupted");
+            let cleaned_up = fixture.cleaned_up.clone();
+            let cancelled = fixture.cancelled.clone();
+            let (waiting, ready) = tokio::sync::oneshot::channel();
+            let startup = tokio::spawn(async move {
+                let guard = fixture;
+                let _ = waiting.send(());
+                tokio::time::timeout(
+                    Duration::from_millis(50),
+                    fixture_file(&guard.runtime.path().join("ready")),
+                )
+                .await
+                .expect("deliberately held fixture readiness");
+            });
+            ready.await.unwrap();
+            if abort {
+                startup.abort();
+            }
+            let failure = startup.await.unwrap_err();
+            assert_eq!(failure.is_cancelled(), abort);
+            assert_eq!(failure.is_panic(), !abort);
+            assert!(cancelled.load(Ordering::Acquire));
+            assert!(
+                cleaned_up.load(Ordering::Acquire),
+                "cleanup must finish both the probe and its descendant"
+            );
+            assert!(!directory.exists(), "fixture runtime must be removed");
+            let _ = tokio::time::timeout(Duration::from_secs(3), probe)
+                .await
+                .expect("readiness failure must not leave a blocked probe")
+                .unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn version_probe_caps_continuous_output_without_waiting_for_exit() {
+        let mut fixture = ProbeFixture::new(
+            "#!/bin/sh\nwhile [ -d \"$TMPDIR\" ]; do printf '0123456789abcdef'; done\n",
+        );
+        let probe = fixture.start(Duration::from_secs(30));
+        let result = tokio::time::timeout(Duration::from_secs(3), probe).await;
+        fixture.release();
+        assert_eq!(
+            result
+                .expect("output cap must finish the probe before the child exits")
+                .unwrap(),
+            Some(b"0123456789abcdef".repeat(256))
+        );
+    }
+
     #[test]
     fn chrome_stderr_is_drained_after_the_devtools_url() {
         let input = b"startup\nDevTools listening on ws://127.0.0.1:9333/devtools/browser/test\nGPU log after startup\n";

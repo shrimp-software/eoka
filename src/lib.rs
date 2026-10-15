@@ -174,7 +174,8 @@ pub struct StealthConfig {
     pub proxy_username: Option<String>,
     /// Proxy password for authenticated proxies
     pub proxy_password: Option<String>,
-    /// CDP command timeout in seconds (default: 30, increase for slow proxies)
+    /// CDP command, automatic-reply write, and WebSocket connection timeout in
+    /// seconds (default: 30, increase for slow proxies).
     pub cdp_timeout: u64,
     /// IANA timezone (default: random from common US/EU timezones).
     /// Set to a specific value like "America/New_York" to control the timezone.

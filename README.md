@@ -684,7 +684,7 @@ StealthConfig::debug()     // headless: false, debug: true
 
 ```bash
 cargo fmt --all --check
-cargo clippy --all-features --locked -- -D warnings
+cargo clippy --all-features --all-targets --locked -- -D warnings
 cargo test --all-features --locked
 cargo build --examples --locked
 cargo +1.85.0 check --lib --all-features --locked

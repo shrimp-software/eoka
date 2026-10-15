@@ -18,6 +18,8 @@ impl Transport {
         let ReaderCompletionState {
             closed,
             routes: completion_routes,
+            write_timeout,
+            shutdown,
         } = completion_state;
         let exit_reason;
         // Separate command ID space for auth/interception auto-responses (won't
@@ -30,8 +32,9 @@ impl Transport {
                 Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => message,
                 Some(Ok(Message::Ping(payload))) => {
                     // Split streams don't auto-pong; reply via the shared sink.
-                    let mut w = writer.lock().await;
-                    if let Err(error) = w.send(Message::Pong(payload)).await {
+                    if let Err(error) =
+                        write_automatic(&writer, Message::Pong(payload), write_timeout).await
+                    {
                         exit_reason = format!("WebSocket pong write failed: {}", error);
                         tracing::debug!("{}", exit_reason);
                         break;
@@ -57,14 +60,33 @@ impl Transport {
             };
             let text = match message.to_text() {
                 Ok(text) => text,
-                Err(_) => continue,
+                Err(_) => {
+                    exit_reason = "Invalid UTF-8 in CDP message".to_string();
+                    tracing::warn!(
+                        bytes = message.len(),
+                        "Invalid UTF-8 in CDP message; payload omitted"
+                    );
+                    break;
+                }
             };
 
-            let mut msg: Value = match serde_json::from_str(text) {
+            let mut msg = match parse_message(text) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("Failed to parse CDP message: {} - {}", e, text);
-                    continue;
+                    tracing::warn!(
+                        line = e.line(),
+                        column = e.column(),
+                        bytes = text.len(),
+                        "Failed to parse CDP message; payload omitted"
+                    );
+                    // An unreadable frame may own a paused request or a native
+                    // completion. Dropping it would silently lose that progress.
+                    exit_reason = format!(
+                        "Invalid CDP JSON at line {}, column {}",
+                        e.line(),
+                        e.column()
+                    );
+                    break;
                 }
             };
 
@@ -134,11 +156,9 @@ impl Transport {
                             session_id: session_id.as_deref(),
                         })
                         .expect("CDP automatic reply contains only serializable JSON values");
-                        if let Err(error) = writer
-                            .lock()
-                            .await
-                            .send(Message::Text(response.into()))
-                            .await
+                        if let Err(error) =
+                            write_automatic(&writer, Message::Text(response.into()), write_timeout)
+                                .await
                         {
                             exit_reason = format!("Automatic {method} write failed: {error}");
                             break;
@@ -156,6 +176,10 @@ impl Transport {
             }
         }
         closed.store(true, Ordering::Release);
+        // Do not acquire the writer or flush frames on terminal failure: either
+        // can be indefinitely blocked while the retained sink owns the socket.
+        drop(shutdown);
+        interception.shutdown();
 
         // Drain all pending requests so callers fail immediately instead of
         // hanging until the per-command timeout fires.
@@ -170,5 +194,154 @@ impl Transport {
             );
         }
         tracing::debug!("CDP reader loop ended ({})", exit_reason);
+    }
+}
+
+/// Automatic replies run on the reader itself. Bound both writer admission and
+/// socket flushing so backpressure cannot stop delivery of unrelated replies or
+/// teardown events forever.
+async fn write_automatic(writer: &SharedSink, message: Message, timeout: Duration) -> Result<()> {
+    tokio::time::timeout(timeout, async { writer.lock().await.send(message).await })
+        .await
+        .map_err(|_| Error::Timeout("Automatic CDP write exceeded its deadline".into()))?
+        .map_err(|error| Error::transport(format!("WebSocket write failed: {error}")))
+}
+
+/// Chrome can serialize binary postData as ill-formed UTF-16 escapes. Repair
+/// only after strict parsing fails; ordinary CDP traffic pays no extra scan.
+fn parse_message(text: &str) -> serde_json::Result<Value> {
+    match serde_json::from_str(text) {
+        Ok(message) => Ok(message),
+        Err(error) => match sanitize_unicode_escapes(text) {
+            Some(repaired) => serde_json::from_str(&repaired),
+            None => Err(error),
+        },
+    }
+}
+
+/// Replace invalid Unicode escapes inside JSON strings, without changing JSON
+/// structure. No allocation unless an escape needs repair. The result is still
+/// parsed strictly: never guess routing metadata from an unparseable message.
+fn sanitize_unicode_escapes(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let mut repaired: Option<String> = None;
+    let mut copied = 0;
+    let mut i = 0;
+    let mut in_string = false;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            in_string = !in_string;
+            i += 1;
+            continue;
+        }
+        if !in_string || bytes[i] != b'\\' {
+            i += 1;
+            continue;
+        }
+        if bytes.get(i + 1) != Some(&b'u') {
+            // Skip escaped quotes and backslashes together. In particular,
+            // a literal \\u is not a Unicode escape.
+            i += 2;
+            continue;
+        }
+
+        let start = i;
+        let (unit, digits) = unicode_unit(&bytes[i + 2..]);
+        i += 2 + digits;
+        if digits == 4 {
+            if (0xd800..=0xdbff).contains(&unit) {
+                if bytes.get(i..i + 2) == Some(b"\\u") {
+                    let (low, digits) = unicode_unit(&bytes[i + 2..]);
+                    if digits == 4 && (0xdc00..=0xdfff).contains(&low) {
+                        i += 6;
+                        continue;
+                    }
+                }
+            } else if !(0xdc00..=0xdfff).contains(&unit) {
+                continue;
+            }
+        }
+
+        let output = repaired.get_or_insert_with(|| String::with_capacity(text.len()));
+        output.push_str(&text[copied..start]);
+        output.push('\u{fffd}');
+        copied = i;
+    }
+    if let Some(output) = &mut repaired {
+        output.push_str(&text[copied..]);
+    }
+    repaired
+}
+
+/// Read at most four hex digits, leaving a truncating quote/backslash untouched.
+fn unicode_unit(bytes: &[u8]) -> (u16, usize) {
+    let mut unit = 0;
+    let mut digits = 0;
+    for &byte in bytes.iter().take(4) {
+        let nibble = match byte {
+            b'0'..=b'9' => byte - b'0',
+            b'a'..=b'f' => byte - b'a' + 10,
+            b'A'..=b'F' => byte - b'A' + 10,
+            _ => break,
+        };
+        unit = (unit << 4) | u16::from(nibble);
+        digits += 1;
+    }
+    (unit, digits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_unicode_and_literal_escapes_need_no_repair() {
+        for text in [
+            r#"{"text":"λ 🦀 \u0000 \uFFFF \uD83E\uDD80"}"#,
+            r#"{"text":"\\uD800 \\\\u00 \"quoted\""}"#,
+        ] {
+            assert!(sanitize_unicode_escapes(text).is_none());
+            assert_eq!(
+                parse_message(text).unwrap(),
+                serde_json::from_str::<Value>(text).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_unicode_preserves_string_and_object_boundaries() {
+        for (escaped, expected) in [
+            (r"\uD800", "\u{fffd}"),
+            (r"\uDC00", "\u{fffd}"),
+            (r"\uD800\u0041", "\u{fffd}A"),
+            (r"\uD800\uD83E\uDD80", "\u{fffd}🦀"),
+            (r"\uDC00\uD800", "\u{fffd}\u{fffd}"),
+            (r"\u", "\u{fffd}"),
+            (r"\u0", "\u{fffd}"),
+            (r"\u00", "\u{fffd}"),
+            (r"\u00F", "\u{fffd}"),
+            (r"\u00\u0041", "\u{fffd}A"),
+            (r"\u00λ", "\u{fffd}λ"),
+            (r#"\"\\uD800\uDC00"#, "\"\\uD800\u{fffd}"),
+        ] {
+            let text = format!(r#"{{"body":"λ {escaped}","sessionId":"original"}}"#);
+            assert_eq!(
+                parse_message(&text).unwrap(),
+                json!({"body": format!("λ {expected}"), "sessionId": "original"}),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn unicode_repair_does_not_accept_broken_json_structure() {
+        for text in [
+            r#"{"body":"\uD800""sessionId":"other"}"#,
+            r#"{"body":"\u00"#,
+            r#"{"body":"\q"}"#,
+            r#"{"body":\u00}"#,
+        ] {
+            assert!(parse_message(text).is_err(), "{text}");
+        }
     }
 }

@@ -1,18 +1,23 @@
 use super::*;
 
+mod malformed_frames;
+mod reader_writes;
+mod stream_shutdown;
+
 async fn pending_test_peer() -> (Transport, WebSocketStream<TcpStream>) {
     test_peer_with_header_policy(false).await
 }
 
-#[tokio::test]
-async fn proxy_credentials_only_answer_explicit_proxy_challenges() {
+async fn test_peer_with_proxy_credentials() -> (Transport, WebSocketStream<TcpStream>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.unwrap();
         tokio_tungstenite::accept_async(socket).await.unwrap()
     });
-    let stream = Transport::ws_connect(&url).await.unwrap();
+    let stream = Transport::ws_connect(&url, Duration::from_secs(30))
+        .await
+        .unwrap();
     let transport = Transport::build(
         None,
         stream,
@@ -20,8 +25,14 @@ async fn proxy_credentials_only_answer_explicit_proxy_challenges() {
         2,
         false,
         false,
-    );
-    let mut peer = server.await.unwrap();
+    )
+    .unwrap();
+    (transport, server.await.unwrap())
+}
+
+#[tokio::test]
+async fn proxy_credentials_only_answer_explicit_proxy_challenges() {
+    let (transport, mut peer) = test_peer_with_proxy_credentials().await;
     for source in [Some("Server"), None, Some("Unknown"), Some("Proxy")] {
         let mut challenge =
             json!({"origin":"http://fixture.invalid", "scheme":"basic", "realm":"fixture"});
@@ -86,11 +97,27 @@ async fn test_peer_with_header_policy(strip: bool) -> (Transport, WebSocketStrea
         let (socket, _) = listener.accept().await.unwrap();
         tokio_tungstenite::accept_async(socket).await.unwrap()
     });
-    let stream = Transport::ws_connect(&url).await.unwrap();
+    let stream = Transport::ws_connect(&url, Duration::from_secs(30))
+        .await
+        .unwrap();
     (
-        Transport::build(None, stream, None, 30, false, strip),
+        Transport::build(None, stream, None, 30, false, strip).unwrap(),
         server.await.unwrap(),
     )
+}
+
+async fn assert_peer_terminated(peer: &mut WebSocketStream<TcpStream>) {
+    // Shutdown preserves bytes already accepted by the OS. Drain buffered
+    // frames, then require termination within one deadline without logging data.
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(message)) = peer.next().await {
+            if matches!(message, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("peer must observe socket termination while Transport is retained");
 }
 
 #[tokio::test]
@@ -161,6 +188,296 @@ async fn owned_request_pauses_resolve_once_and_fallback_preserves_header_policy(
     assert!(tokio::time::timeout(Duration::from_millis(10), peer.next())
         .await
         .is_err());
+}
+
+mod unicode_post_data {
+    use super::*;
+
+    const CASES: &[(&str, &str)] = &[
+        (r"\uD800", "\u{fffd}"),
+        (r"\uDC00", "\u{fffd}"),
+        (r"\u", "\u{fffd}"),
+        (r"\u0", "\u{fffd}"),
+        (r"\u00", "\u{fffd}"),
+        (r"\u123", "\u{fffd}"),
+        (r"\uD83D\uDE80", "🚀"),
+        (r"\\uD800 \\u00", r"\uD800 \u00"),
+        (
+            r#"雪 \"requestId\":\"decoy\" \\uD800 \uD83D\uDE80 \uD800"#,
+            "雪 \"requestId\":\"decoy\" \\uD800 🚀 \u{fffd}",
+        ),
+    ];
+
+    async fn pause(
+        peer: &mut WebSocketStream<TcpStream>,
+        session: &str,
+        id: &str,
+        post_data: &str,
+        response: bool,
+    ) {
+        let session = json!(session);
+        let id = json!(id);
+        let response = if response {
+            r#","responseStatusCode":200"#
+        } else {
+            ""
+        };
+        peer.send(Message::Text(
+            format!(
+                r#"{{"method":"Fetch.requestPaused","sessionId":{session},"params":{{"request":{{"method":"POST","headers":{{"X-Client-Data":"remove","Other":"keep"}},"postData":"{post_data}"}},"requestId":{id}{response}}}}}"#
+            )
+            .into(),
+        ))
+        .await
+        .unwrap();
+    }
+
+    async fn command(peer: &mut WebSocketStream<TcpStream>) -> Value {
+        let message = tokio::time::timeout(Duration::from_secs(2), peer.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(message.to_text().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn repaired_unowned_pauses_preserve_session_and_header_policy() {
+        for strip in [false, true] {
+            let (transport, mut peer) = test_peer_with_header_policy(strip).await;
+            for (index, (raw, _)) in CASES.iter().enumerate() {
+                let id = format!("binary-{index}-\"quoted\"");
+                pause(&mut peer, "unowned-binary", &id, raw, false).await;
+                let reply = command(&mut peer).await;
+                assert_eq!(reply["method"], "Fetch.continueRequest");
+                assert_eq!(reply["sessionId"], "unowned-binary");
+                let mut expected = json!({"requestId":id});
+                if strip {
+                    expected["headers"] = json!([{"name":"Other","value":"keep"}]);
+                }
+                assert_eq!(reply["params"], expected);
+            }
+            transport.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn repaired_request_pauses_remain_owned_and_deliver_repaired_post_data() {
+        let (transport, mut peer) = test_peer_with_header_policy(true).await;
+        let (sender, mut receiver) = mpsc::channel(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        transport
+            .install_request_route("owned-binary", sender, dropped.clone())
+            .unwrap();
+        for (index, (raw, expected)) in CASES.iter().enumerate() {
+            let id = format!("owned-{index}");
+            pause(&mut peer, "owned-binary", &id, raw, false).await;
+            let delivered = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(delivered.session_id, "owned-binary");
+            assert_eq!(delivered.params["requestId"], id);
+            assert_eq!(delivered.params["request"]["postData"], *expected);
+            assert_eq!(
+                delivered.params["request"]["headers"],
+                json!({"X-Client-Data":"remove","Other":"keep"})
+            );
+            assert!(tokio::time::timeout(Duration::from_millis(10), peer.next())
+                .await
+                .is_err());
+            let reply = async {
+                let continuation = command(&mut peer).await;
+                assert_eq!(continuation["method"], "Fetch.continueRequest");
+                assert_eq!(continuation["sessionId"], "owned-binary");
+                assert_eq!(
+                    continuation["params"],
+                    json!({"requestId":id,"headers":[{"name":"Other","value":"keep"}]})
+                );
+                peer.send(Message::Text(
+                    json!({"id":continuation["id"],"result":{}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            };
+            let (result, ()) = tokio::join!(delivered.continue_request(&transport), reply);
+            result.unwrap();
+        }
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repaired_response_pauses_keep_response_route_ownership() {
+        let (transport, mut peer) = test_peer_with_header_policy(true).await;
+        let (response_sender, mut responses) = mpsc::channel(1);
+        let (request_sender, mut requests) = mpsc::channel(1);
+        let dropped = Arc::new(AtomicU64::new(0));
+        transport.install_response_route("response-binary", response_sender, dropped.clone());
+        transport
+            .install_request_route("response-binary", request_sender, dropped.clone())
+            .unwrap();
+        pause(
+            &mut peer,
+            "response-binary",
+            "owned-response",
+            r"\uDC00",
+            true,
+        )
+        .await;
+        let delivered = tokio::time::timeout(Duration::from_secs(2), responses.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(delivered["requestId"], "owned-response");
+        assert_eq!(delivered["request"]["postData"], "\u{fffd}");
+        assert_eq!(delivered["responseStatusCode"], 200);
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(tokio::time::timeout(Duration::from_millis(10), peer.next())
+            .await
+            .is_err());
+        transport.remove_response_route("response-binary");
+        pause(
+            &mut peer,
+            "response-binary",
+            "unowned-response",
+            r"\u00",
+            true,
+        )
+        .await;
+        let continuation = command(&mut peer).await;
+        assert_eq!(continuation["method"], "Fetch.continueRequest");
+        assert_eq!(continuation["sessionId"], "response-binary");
+        assert_eq!(
+            continuation["params"],
+            json!({"requestId":"unowned-response"})
+        );
+        assert!(matches!(
+            requests.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+        assert_eq!(dropped.load(Ordering::Relaxed), 0);
+        transport.close().await.unwrap();
+    }
+}
+
+mod repaired_adjacent_messages {
+    use super::*;
+
+    fn frame(binary: bool, text: String) -> Message {
+        if binary {
+            Message::Binary(text.into_bytes().into())
+        } else {
+            Message::Text(text.into())
+        }
+    }
+
+    async fn command(peer: &mut WebSocketStream<TcpStream>) -> Value {
+        let message = tokio::time::timeout(Duration::from_secs(2), peer.next())
+            .await
+            .expect("transport must promptly answer repaired messages")
+            .unwrap()
+            .unwrap();
+        serde_json::from_str(message.to_text().unwrap()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn repaired_success_and_error_replies_complete_text_and_binary_commands() {
+        let (transport, mut peer) = pending_test_peer().await;
+        for binary in [false, true] {
+            for surrogate in [r"\uD800", r"\uDC00"] {
+                for error in [false, true] {
+                    let reply = async {
+                        let sent = command(&mut peer).await;
+                        assert_eq!(sent["method"], "Fixture.repaired");
+                        assert_eq!(sent["sessionId"], "reply-session");
+                        let id = &sent["id"];
+                        let text = if error {
+                            format!(
+                                r#"{{"id":{id},"error":{{"code":-32000,"message":"failed {surrogate}"}}}}"#
+                            )
+                        } else {
+                            format!(
+                                r#"{{"id":{id},"result":{{"value":"{surrogate}","literal":"\\uD800","valid":"\uD83D\uDE80","count":7}}}}"#
+                            )
+                        };
+                        peer.send(frame(binary, text)).await.unwrap();
+                    };
+                    let params = json!({});
+                    let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+                        tokio::join!(
+                            transport.send_to_session::<_, Value>(
+                                "reply-session",
+                                "Fixture.repaired",
+                                &params
+                            ),
+                            reply
+                        )
+                    })
+                    .await
+                    .expect("repaired replies must complete before the command deadline");
+                    if error {
+                        match result.unwrap_err() {
+                            Error::Cdp { code, message, .. } => {
+                                assert_eq!(code, Some(-32000));
+                                assert_eq!(message, "failed \u{fffd}");
+                            }
+                            other => panic!("expected the repaired CDP error, got {other:?}"),
+                        }
+                    } else {
+                        assert_eq!(
+                            result.unwrap(),
+                            json!({"value":"\u{fffd}","literal":r"\uD800","valid":"🚀","count":7})
+                        );
+                    }
+                }
+            }
+        }
+        transport.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn repaired_auth_metadata_preserves_proxy_credentials_and_challenge_routing() {
+        let (transport, mut peer) = test_peer_with_proxy_credentials().await;
+        for binary in [false, true] {
+            for (index, source) in [Some("Proxy"), Some("Server"), None, Some("Unknown")]
+                .into_iter()
+                .enumerate()
+            {
+                let session = format!("challenged-session-{binary}-{index}-\"quoted\"");
+                let request = format!("challenged-request-{binary}-{index}-\"quoted\"");
+                let mut challenge =
+                    json!({"origin":"http://fixture.invalid","scheme":"basic","realm":"fixture"});
+                if let Some(source) = source {
+                    challenge["source"] = json!(source);
+                }
+                let text = format!(
+                    r#"{{"method":"Fetch.authRequired","sessionId":{},"params":{{"requestId":{},"authChallenge":{challenge},"request":{{"url":"http://fixture.invalid/\uDC00","postData":"\uD800 \"requestId\":\"decoy\", \"sessionId\":\"decoy\", \"source\":\"Proxy\""}}}}}}"#,
+                    json!(session),
+                    json!(request)
+                );
+                peer.send(frame(binary, text)).await.unwrap();
+                let reply = command(&mut peer).await;
+                assert_eq!(reply["method"], "Fetch.continueWithAuth");
+                assert_eq!(reply["sessionId"], session);
+                let expected = if source == Some("Proxy") {
+                    json!({"response":"ProvideCredentials","username":"fixture-user","password":"fixture-password"})
+                } else {
+                    json!({"response":"CancelAuth"})
+                };
+                assert_eq!(
+                    reply["params"],
+                    json!({"requestId":request,"authChallengeResponse":expected})
+                );
+            }
+        }
+        transport.close().await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -475,7 +792,7 @@ async fn closing_transport_is_visible_before_writer_and_reader_finish() {
     closing.await.unwrap();
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn closing_transport_times_out_writer_and_cleans_owned_runtime() {
     let (mut transport, _peer) = pending_test_peer().await;
     transport.cmd_timeout = Duration::from_secs(1);
@@ -486,6 +803,8 @@ async fn closing_transport_times_out_writer_and_cleans_owned_runtime() {
         .prepare_command(None, "Fixture.pendingAtClose", &json!({}), None)
         .unwrap();
     let writer = transport.writer.lock().await;
+    // Socket setup needs real time; only the contended close uses virtual time.
+    tokio::time::pause();
 
     tokio::time::timeout(
         transport.cmd_timeout + Duration::from_millis(10),
@@ -510,9 +829,6 @@ async fn closing_transport_times_out_writer_and_cleans_owned_runtime() {
 async fn binary_frames_preserve_event_payloads_and_command_replies() {
     let (transport, mut peer) = pending_test_peer().await;
     let mut events = transport.subscribe();
-    peer.send(Message::Binary(vec![0xff, 0xfe].into()))
-        .await
-        .unwrap();
     let params = json!({"nested":{"text":"quoted \"Unicode: λ\"","values":[null,true,42]}});
     peer.send(Message::Binary(
         serde_json::to_vec(&json!({

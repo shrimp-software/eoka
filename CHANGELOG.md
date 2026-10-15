@@ -2,6 +2,50 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] - Unreleased
+
+### Changed
+
+- Cache Cargo downloads and compiled dependencies in CI using a SHA-pinned
+  action with job, compiler and dependency/configuration-specific cache keys.
+- Combine formatting and Clippy into one check, expand Clippy and `cargo lint`
+  to all targets, and remove the redundant Linux build step. Platform, MSRV and
+  real-browser test coverage is unchanged.
+
+### Fixed
+
+- Recover CDP messages containing lone surrogate or truncated Unicode escapes
+  in binary POST metadata, JavaScript results, command errors and auth events.
+  Fetch interception retains normal session routing and header policy without
+  modifying wire bodies; network-idle tracking retains request lifecycle events.
+  Well-formed messages retain the strict-parser fast path.
+- Fail pending commands, native completion owners and network-idle waits on
+  unrecoverable JSON or invalid UTF-8 frames instead of silently dropping them.
+  Protocol-failure diagnostics omit payloads and do not make dispatched commands
+  safe to replay.
+  Terminal reader failure shuts down TCP even when a transport or writer guard
+  remains alive; cancelled close and transport drop also shut down independently
+  of the writer lock.
+- Bound automatic Fetch/auth replies and WebSocket pongs by the CDP timeout,
+  including writer-lock admission and socket flushing. A stalled reader now
+  fails pending commands rather than stranding native completion owners.
+- Apply the configured CDP timeout to WebSocket connection and upgrade setup.
+  Discovery HTTP response reads share one five-second deadline, so slow-drip
+  headers and bodies cannot keep launch/discovery workers blocked indefinitely.
+- Close event and Fetch-route streams on transport shutdown while preserving
+  buffered events. Late subscriptions are closed, late pause ownership is
+  rejected, and `try_recv_event` no longer waits behind a blocked receiver.
+- Cancel Chrome version probes without leaving a detached reader blocked on
+  stdout inherited by descendants. Pipe polling preserves the 4096-byte output
+  cap and closes the reader on cancellation or expiry. Process regressions cover
+  inherited-pipe closure on both exits and capped output from a never-ending
+  producer without waiting for process exit.
+  Fixture cleanup cancels probes and releases descendants on readiness failure
+  or task cancellation, before removing their runtime directory.
+- Make transport regressions portable across native macOS and Windows: keep
+  socket setup outside virtual-time phases, establish actual write backpressure
+  within time/byte bounds, and drain queued frames before requiring termination.
+
 ## [0.7.0] - Unreleased
 
 ### Added
