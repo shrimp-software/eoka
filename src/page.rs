@@ -12,6 +12,8 @@ mod network;
 mod response_capture;
 mod wait;
 
+pub use diagnostics::{ScreenshotClip, ScreenshotFormat, ScreenshotOptions};
+
 pub use response_capture::{
     CaptureBodyError, CapturedFrameResponse, FrameResponseCapture, FrameResponseCaptureOptions,
     FrameResponseCaptureReport,
@@ -93,6 +95,7 @@ fn is_element_cdp_error(e: &Error) -> bool {
         | Error::Navigation(_)
         | Error::Timeout(_)
         | Error::InputState(_)
+        | Error::InvalidScreenshotOptions(_)
         | Error::ValueMismatch { .. }
         | Error::Serialization(_)
         | Error::Decode(_)
@@ -199,6 +202,43 @@ impl Page {
             }
             other => other,
         }
+    }
+
+    /// Override this page's desktop viewport in CSS pixels and its device scale factor.
+    ///
+    /// Dimensions must be positive and no greater than `i32::MAX`; the scale must
+    /// be positive and finite. Invalid values fail before sending a CDP command.
+    /// A 640 × 360 viewport at scale 2 produces a 1280 × 720 PNG screenshot.
+    /// The override survives navigation and is shared by Eoka handles to this
+    /// tab connected through the same browser endpoint in this process.
+    /// Independent CDP clients and other processes are outside this coordinator;
+    /// explicitly set the desired viewport after attachment before capturing
+    /// a tab whose metrics were emulated by another client.
+    /// Fractional native display scales can quantize layout dimensions to
+    /// physical pixels; Chrome may also report DPR with renderer float precision.
+    /// Captures retain Chrome's native rasterization at fractional boundaries,
+    /// including quantization or partial coverage in the outermost pixels.
+    /// A timeout or lost connection does not roll back a dispatched command.
+    pub async fn set_viewport(
+        &self,
+        width: u32,
+        height: u32,
+        device_scale_factor: f64,
+    ) -> Result<()> {
+        self.session
+            .set_viewport(width, height, device_scale_factor)
+            .await
+    }
+
+    /// Clear the page's viewport override, restoring Chrome's native window
+    /// content dimensions and device scale rather than the launch-configured
+    /// override. CSS layout and screenshot pixel dimensions follow those native
+    /// metrics; this does not resize the browser window.
+    /// Waits for native surface/layout completion without activating the tab.
+    /// A native capture can refresh Chrome's JavaScript-reported outer dimensions
+    /// for a hidden tab independently of its unchanged browser-window bounds.
+    pub async fn reset_viewport(&self) -> Result<()> {
+        self.session.reset_viewport().await
     }
 
     /// Get the underlying CDP session

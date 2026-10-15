@@ -153,6 +153,10 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 - `page.url()` / `page.title()` / `page.content()` / `page.text()`
 - `page.target_id()` - Get tab identifier (for multi-tab)
 - `page.screenshot()` / `page.screenshot_jpeg(quality)`
+- `page.screenshot_with_options(&ScreenshotOptions)` - Typed PNG/JPEG/WebP, document-relative CSS crop or full page; PNG rejects quality, JPEG/WebP accept 0–100. Crop and full page conflict; viewport DPR is the single render scale.
+- `page.start_recording(NativeRecordingOptions)` - Native Chrome MP4 handle; stop, read chunks up to 64 KiB through EOF, close; explicit cancel and bounded best-effort Drop cleanup. Active/ready page and one recorder per target; unsupported fails without fallback.
+- `page.set_viewport(width, height, device_scale_factor)` - CSS viewport dimensions and finite positive DPR; `640, 360, 2.0` captures 1280×720 physical pixels. Non-live sessions apply configured viewport/DPR at setup; live attachment preserves existing metrics.
+- `page.reset_viewport()` - Clear emulation and restore native window content dimensions/DPR, not the launch override. Overrides and resets affect all handles to the same tab and persist across navigation.
 - `page.debug_state()` - Returns `PageState` with element counts
 - `page.debug_screenshot(prefix)` - Timestamped screenshot
 
@@ -257,6 +261,7 @@ Try-click methods return `Ok(false)` for both missing AND invisible elements.
 Error::ElementNotFound(selector)      // Not in DOM
 Error::ElementNotVisible { selector } // In DOM but not rendered
 Error::Timeout(message)
+Error::InvalidScreenshotOptions(message) // Invalid format/quality/crop combination
 Error::RetryExhausted { attempts, last_error }
 Error::Cdp { method, code, message }  // Raw CDP error
 ```
@@ -339,6 +344,8 @@ pub use page::{
     ResponseBody,     // Text or Binary response
     TextMatch,        // Exact, Contains, StartsWith, EndsWith
 };
+pub use page::{ScreenshotClip, ScreenshotFormat, ScreenshotOptions};
+pub use recording::{NativeRecording, NativeRecordingOptions, RecordingChunk, RecordingError};
 pub use session::{BrowserSession, SessionCookie};
 pub use stealth::{Fingerprint, HumanSpeed};
 pub struct StealthConfig { ... }

@@ -20,6 +20,8 @@ mod runtime;
 pub use runtime::*;
 mod emulation;
 pub use emulation::*;
+mod recording;
+pub(crate) use recording::*;
 
 /// Empty params for CDP commands that take no arguments
 #[derive(Debug, Clone, Default, Serialize)]

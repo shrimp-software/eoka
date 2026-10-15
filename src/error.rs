@@ -71,6 +71,10 @@ pub enum Error {
     #[error("Input state error: {0}")]
     InputState(String),
 
+    /// Screenshot encoding or extent options were invalid.
+    #[error("Invalid screenshot options: {0}")]
+    InvalidScreenshotOptions(String),
+
     /// A form control did not contain the requested value after filling.
     #[error("Value mismatch for '{selector}': expected '{expected}', got '{actual}'")]
     ValueMismatch {
@@ -156,6 +160,7 @@ impl Clone for Error {
             },
             Self::Timeout(s) => Self::Timeout(s.clone()),
             Self::InputState(s) => Self::InputState(s.clone()),
+            Self::InvalidScreenshotOptions(s) => Self::InvalidScreenshotOptions(s.clone()),
             Self::ValueMismatch {
                 selector,
                 expected,

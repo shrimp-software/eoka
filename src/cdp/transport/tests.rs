@@ -363,3 +363,200 @@ async fn command_dispatch_stays_ambiguous_after_lost_reply_error_and_timeout() {
         .is_err());
     assert!(lock_pending(&transport.pending).is_empty());
 }
+
+#[tokio::test]
+async fn completion_receipt_preserves_late_reply_after_caller_deadline() {
+    let (transport, mut peer) = pending_test_peer().await;
+    let session: Arc<str> = "capture-session".into();
+    let dispatch = CommandDispatch::new();
+    let (written, response) = transport
+        .send_to_session_for_completion(&session, "Page.captureScreenshot", &json!({}), &dispatch)
+        .await
+        .unwrap();
+    written.unwrap();
+    assert!(dispatch.may_have_been_sent());
+    let command = peer.next().await.unwrap().unwrap();
+    let command: Value = serde_json::from_str(command.to_text().unwrap()).unwrap();
+    let id = command["id"].as_u64().unwrap();
+    let mut owner = tokio::spawn(response.wait());
+    assert!(tokio::time::timeout(Duration::from_millis(10), &mut owner)
+        .await
+        .is_err());
+    assert!(lock_pending(&transport.pending).contains_key(&id));
+    assert_eq!(
+        lock_completions(&transport.completion_routes).get(session.as_ref()),
+        Some(&id)
+    );
+    peer.send(Message::Text(
+        json!({"id":id,"result":{"data":"native-completion"}})
+            .to_string()
+            .into(),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(
+        owner.await.unwrap().unwrap(),
+        json!({"data":"native-completion"})
+    );
+    assert!(lock_pending(&transport.pending).is_empty());
+    assert!(lock_completions(&transport.completion_routes).is_empty());
+    transport.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn completion_receipt_is_released_by_target_session_detachment() {
+    let (transport, mut peer) = pending_test_peer().await;
+    let session: Arc<str> = "detached-capture-session".into();
+    let dispatch = CommandDispatch::new();
+    let (written, response) = transport
+        .send_to_session_for_completion(&session, "Page.captureScreenshot", &json!({}), &dispatch)
+        .await
+        .unwrap();
+    written.unwrap();
+    peer.next().await.unwrap().unwrap();
+    peer.send(Message::Text(
+        json!({
+            "method":"Target.detachedFromTarget",
+            "params":{"sessionId":session.as_ref(),"targetId":"closed-tab"}
+        })
+        .to_string()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), response.wait())
+        .await
+        .unwrap();
+    assert!(matches!(result, Err(Error::Transport { .. })));
+    assert!(lock_pending(&transport.pending).is_empty());
+    assert!(lock_completions(&transport.completion_routes).is_empty());
+    transport.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn pending_completion_owner_does_not_retain_browser_transport() {
+    let (transport, mut peer) = pending_test_peer().await;
+    let transport = Arc::new(transport);
+    let weak = Arc::downgrade(&transport);
+    let session: Arc<str> = "owned-completion-session".into();
+    let dispatch = CommandDispatch::new();
+    let (written, response) = transport
+        .send_to_session_for_completion(&session, "Page.captureScreenshot", &json!({}), &dispatch)
+        .await
+        .unwrap();
+    written.unwrap();
+    peer.next().await.unwrap().unwrap();
+    let owner = tokio::spawn(response.wait());
+    drop(transport);
+    assert!(weak.upgrade().is_none());
+    let result = tokio::time::timeout(Duration::from_secs(2), owner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(Error::Transport { .. })));
+}
+
+#[tokio::test]
+async fn closing_transport_is_visible_before_writer_and_reader_finish() {
+    let (transport, _peer) = pending_test_peer().await;
+    let writer = transport.writer.lock().await;
+    let mut closing = Box::pin(transport.close());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut closing)
+            .await
+            .is_err()
+    );
+    assert!(transport.is_closed());
+    assert!(transport
+        .send::<_, Value>("Fixture.afterClose", &json!({}))
+        .await
+        .is_err());
+    drop(writer);
+    closing.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn closing_transport_times_out_writer_and_cleans_owned_runtime() {
+    let (mut transport, _peer) = pending_test_peer().await;
+    transport.cmd_timeout = Duration::from_secs(1);
+    let runtime = RuntimeDirectory::create(None).unwrap();
+    let runtime_path = runtime.path().to_owned();
+    *transport.runtime.get_mut().unwrap() = Some(runtime);
+    let (_, response) = transport
+        .prepare_command(None, "Fixture.pendingAtClose", &json!({}), None)
+        .unwrap();
+    let writer = transport.writer.lock().await;
+
+    tokio::time::timeout(
+        transport.cmd_timeout + Duration::from_millis(10),
+        transport.close(),
+    )
+    .await
+    .expect("close must not wait indefinitely for the writer")
+    .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_millis(10), response.wait())
+        .await
+        .expect("close must fail pending commands")
+        .unwrap_err();
+    assert!(error.to_string().contains("CDP transport closed"));
+    assert!(lock_pending(&transport.pending).is_empty());
+    assert!(transport.is_closed());
+    assert!(!runtime_path.exists(), "close must clean the owned runtime");
+    drop(writer);
+}
+
+#[tokio::test]
+async fn binary_frames_preserve_event_payloads_and_command_replies() {
+    let (transport, mut peer) = pending_test_peer().await;
+    let mut events = transport.subscribe();
+    peer.send(Message::Binary(vec![0xff, 0xfe].into()))
+        .await
+        .unwrap();
+    let params = json!({"nested":{"text":"quoted \"Unicode: λ\"","values":[null,true,42]}});
+    peer.send(Message::Binary(
+        serde_json::to_vec(&json!({
+            "method":"Fixture.binary",
+            "sessionId":"binary-session",
+            "params":params,
+        }))
+        .unwrap()
+        .into(),
+    ))
+    .await
+    .unwrap();
+    let event = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    match event {
+        CdpMessage::Event {
+            method,
+            params: received,
+            session_id,
+        } => {
+            assert_eq!(method, "Fixture.binary");
+            assert_eq!(received, params);
+            assert_eq!(session_id.as_deref(), Some("binary-session"));
+        }
+        _ => panic!("expected binary event"),
+    }
+    let reply = async {
+        let command = peer.next().await.unwrap().unwrap();
+        let command: Value = serde_json::from_str(command.to_text().unwrap()).unwrap();
+        peer.send(Message::Binary(
+            serde_json::to_vec(&json!({"id":command["id"],"result":params}))
+                .unwrap()
+                .into(),
+        ))
+        .await
+        .unwrap();
+    };
+    let command_params = json!({});
+    let (result, ()) = tokio::join!(
+        transport.send::<_, Value>("Fixture.binary", &command_params),
+        reply
+    );
+    assert_eq!(result.unwrap(), params);
+    transport.close().await.unwrap();
+}

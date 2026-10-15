@@ -10,13 +10,16 @@ impl Directory {
             std::process::id(),
             fastrand::u64(..)
         ));
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {
             use std::os::unix::fs::DirBuilderExt;
-            builder.mode(0o700);
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
         }
-        builder.create(&path).unwrap();
+        #[cfg(not(unix))]
+        std::fs::create_dir(&path).unwrap();
         Self(path)
     }
 }

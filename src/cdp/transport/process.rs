@@ -5,6 +5,7 @@ use std::{
     io::{BufRead, BufReader},
     path::Path,
     process::{Child, Stdio},
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
 
@@ -57,7 +58,7 @@ impl Drop for ChildCleanupGuard {
 
 /// Launch Chrome and get the WebSocket debugging URL
 pub fn launch_chrome(path: &std::path::Path, args: &[String]) -> Result<(Child, String)> {
-    launch_chrome_impl(path, args, None, false)
+    launch_chrome_impl(path, args, None, false, None, None)
 }
 
 pub(crate) fn launch_chrome_with_profile_dir(
@@ -65,8 +66,17 @@ pub(crate) fn launch_chrome_with_profile_dir(
     args: &[String],
     profile_dir: &Path,
     live_session: bool,
+    runtime: &Path,
+    cancelled: &AtomicBool,
 ) -> Result<(Child, String)> {
-    launch_chrome_impl(path, args, Some(profile_dir), live_session)
+    launch_chrome_impl(
+        path,
+        args,
+        Some(profile_dir),
+        live_session,
+        Some(runtime),
+        Some(cancelled),
+    )
 }
 
 fn debugging_port_argument(args: &[String], live_session: bool) -> Result<Option<String>> {
@@ -91,11 +101,18 @@ fn launch_chrome_impl(
     args: &[String],
     profile_dir: Option<&Path>,
     live_session: bool,
+    runtime: Option<&Path>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<(Child, String)> {
     use std::process::Command;
 
     let mut cmd = Command::new(path);
     cmd.args(args);
+    if let Some(runtime) = runtime {
+        cmd.env("TMPDIR", runtime)
+            .env("TMP", runtime)
+            .env("TEMP", runtime);
+    }
     let debugging_argument = debugging_port_argument(args, live_session)?;
     if let Some(argument) = &debugging_argument {
         cmd.arg(argument);
@@ -118,10 +135,17 @@ fn launch_chrome_impl(
         .stdout(Stdio::null())
         .stderr(Stdio::piped()); // We need stderr to get the DevTools URL
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| Error::Launch(format!("Failed to launch Chrome: {}", e)))?;
-
+    if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
+        return Err(Error::Launch("Browser launch was cancelled".into()));
+    }
+    let mut guard = ChildCleanupGuard::new(
+        cmd.spawn()
+            .map_err(|e| Error::Launch(format!("Failed to launch Chrome: {}", e)))?,
+    );
+    let child = guard
+        .child
+        .as_mut()
+        .expect("new child guard owns its process");
     let stderr = child
         .stderr
         .take()
@@ -130,11 +154,25 @@ fn launch_chrome_impl(
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || drain_chrome_stderr(BufReader::new(stderr), tx));
 
-    let ws_url = wait_for_chrome_devtools_url(&mut child, &rx, fallback_profile_dir)?;
+    let ws_url = match wait_for_chrome_devtools_url(child, &rx, fallback_profile_dir, cancelled) {
+        Ok(url) => url,
+        Err(error) => {
+            return match stop_child(child) {
+                Ok(()) => {
+                    guard.child = None;
+                    Err(error)
+                }
+                Err(cleanup) => Err(Error::Launch(format!(
+                    "{}; Chrome cleanup failed: {}",
+                    error, cleanup
+                ))),
+            };
+        }
+    };
 
     tracing::info!("Chrome DevTools URL: {}", ws_url);
 
-    Ok((child, ws_url))
+    Ok((guard.take()?, ws_url))
 }
 
 fn drain_chrome_stderr(
@@ -164,7 +202,7 @@ fn drain_chrome_stderr(
                 .take()
                 .unwrap()
                 .send(Ok(format!("ws://{}", endpoint.trim())));
-            stderr_tail.clear();
+            stderr_tail = Vec::new();
         } else {
             stderr_tail.push(line);
             if stderr_tail.len() > 20 {
@@ -189,19 +227,23 @@ fn wait_for_chrome_devtools_url(
     child: &mut Child,
     rx: &std::sync::mpsc::Receiver<std::result::Result<String, String>>,
     profile_dir: Option<&Path>,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(30);
 
     loop {
+        if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
+            return Err(Error::Launch("Browser launch was cancelled".into()));
+        }
         match rx.try_recv() {
             Ok(Ok(url)) => return Ok(url),
             Ok(Err(stderr)) => {
                 let status = child
                     .try_wait()
-                    .map(|status| status.map(|s| s.to_string()))
-                    .unwrap_or(None)
+                    .ok()
+                    .flatten()
+                    .map(|status| status.to_string())
                     .unwrap_or_else(|| "still running".to_string());
-                stop_child_after_failed_launch(child);
                 return Err(Error::Launch(format!(
                     "Failed waiting for Chrome DevTools URL: process {}; {}",
                     status, stderr
@@ -209,7 +251,6 @@ fn wait_for_chrome_devtools_url(
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                stop_child_after_failed_launch(child);
                 return Err(Error::Launch(
                     "Failed waiting for Chrome DevTools URL: stderr reader exited unexpectedly"
                         .into(),
@@ -236,7 +277,6 @@ fn wait_for_chrome_devtools_url(
                 .ok()
                 .and_then(|result| result.err())
                 .unwrap_or_else(|| "Chrome exited before printing DevTools URL".to_string());
-            stop_child_after_failed_launch(child);
             return Err(Error::Launch(format!(
                 "Failed waiting for Chrome DevTools URL: process {}; {}",
                 status, stderr
@@ -244,7 +284,6 @@ fn wait_for_chrome_devtools_url(
         }
 
         if Instant::now() >= deadline {
-            stop_child_after_failed_launch(child);
             return Err(Error::Launch(
                 "Failed waiting for Chrome DevTools URL after 30s".into(),
             ));
@@ -254,15 +293,45 @@ fn wait_for_chrome_devtools_url(
     }
 }
 
-fn stop_child_after_failed_launch(child: &mut Child) {
-    if let Err(cleanup_error) = stop_child(child) {
-        tracing::warn!(
-            "Failed to clean up Chrome after launch-channel error: {}",
-            cleanup_error
-        );
+pub(crate) fn chrome_version_output(
+    path: &Path,
+    runtime: &Path,
+    cancelled: &AtomicBool,
+) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if cancelled.load(Ordering::Acquire) {
+        return None;
+    }
+    let child = std::process::Command::new(path)
+        .env("TMPDIR", runtime)
+        .env("TMP", runtime)
+        .env("TEMP", runtime)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut guard = ChildCleanupGuard::new(child);
+    let stdout = guard.child.as_mut()?.stdout.take()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(4096).read_to_end(&mut bytes).map(|_| bytes);
+        let _ = tx.send(result);
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+            return None;
+        }
+        match rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(result) => return result.ok(),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;

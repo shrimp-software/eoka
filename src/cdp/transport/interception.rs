@@ -30,7 +30,7 @@ impl FetchInterceptor {
         &self,
         method: &str,
         session: Option<&str>,
-        params: &Value,
+        params: &mut Value,
     ) -> EventAction {
         match method {
             "Fetch.authRequired" => self.auth_challenge(params),
@@ -61,7 +61,7 @@ impl FetchInterceptor {
         }
     }
 
-    fn paused_request(&self, session: Option<&str>, params: &Value) -> EventAction {
+    fn paused_request(&self, session: Option<&str>, params: &mut Value) -> EventAction {
         if route_response_pause(&self.responses, session, params)
             || route_request_pause(&self.requests, session, params, self.strip)
         {
@@ -89,12 +89,7 @@ fn continuation_params(params: &Value, strip: bool) -> Option<Value> {
             .pointer("/request/headers")
             .and_then(strip_client_data_header)
         {
-            continuation["headers"] = Value::Array(
-                headers
-                    .into_iter()
-                    .map(|(name, value)| json!({"name":name,"value":value}))
-                    .collect(),
-            );
+            continuation["headers"] = Value::Array(headers);
         }
     }
     Some(continuation)
@@ -103,7 +98,7 @@ fn continuation_params(params: &Value, strip: bool) -> Option<Value> {
 /// Remove `X-Client-Data` from a CDP request-headers object (case-insensitive
 /// match, like HTTP header semantics). Returns `None` when the header is
 /// absent so callers can continue the request unmodified.
-fn strip_client_data_header(headers: &Value) -> Option<serde_json::Map<String, Value>> {
+fn strip_client_data_header(headers: &Value) -> Option<Vec<Value>> {
     let map = headers.as_object()?;
     let has_header = map.keys().any(|k| k.eq_ignore_ascii_case("x-client-data"));
     if !has_header {
@@ -112,7 +107,7 @@ fn strip_client_data_header(headers: &Value) -> Option<serde_json::Map<String, V
     Some(
         map.iter()
             .filter(|(k, _)| !k.eq_ignore_ascii_case("x-client-data"))
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(name, value)| json!({"name":name, "value":value}))
             .collect(),
     )
 }
@@ -196,7 +191,7 @@ pub(super) fn request_interception_command(
 fn route_request_pause(
     routes: &RequestRoutes,
     session: Option<&str>,
-    params: &Value,
+    params: &mut Value,
     strip: bool,
 ) -> bool {
     if params.get("responseStatusCode").is_some() || params.get("responseErrorReason").is_some() {
@@ -209,33 +204,51 @@ fn route_request_pause(
     let Some(route) = routes.get(session) else {
         return false;
     };
+    if params["requestId"].as_str().is_none() {
+        return false;
+    }
+    let permit = match route.events.try_reserve() {
+        Ok(permit) => permit,
+        Err(_) => {
+            route.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+    };
     let Some(continue_params) = continuation_params(params, strip) else {
         return false;
     };
-    let pause = RequestPause {
+    permit.send(RequestPause {
         session_id: session.into(),
-        params: params.clone(),
+        params: params.take(),
         continue_params,
-    };
-    if route.events.try_send(pause).is_ok() {
-        return true;
-    }
-    route.dropped.fetch_add(1, Ordering::Relaxed);
-    false
+    });
+    true
 }
 
-fn route_response_pause(routes: &ResponseRoutes, session: Option<&str>, params: &Value) -> bool {
+fn route_response_pause(
+    routes: &ResponseRoutes,
+    session: Option<&str>,
+    params: &mut Value,
+) -> bool {
     if params.get("responseStatusCode").is_none() && params.get("responseErrorReason").is_none() {
         return false;
     }
+    let Some(session) = session else {
+        return false;
+    };
     let routes = routes.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(route) = session.and_then(|s| routes.get(s)) {
-        if route.events.try_send(params.clone()).is_ok() {
-            return true;
+    let Some(route) = routes.get(session) else {
+        return false;
+    };
+    let permit = match route.events.try_reserve() {
+        Ok(permit) => permit,
+        Err(_) => {
+            route.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
         }
-        route.dropped.fetch_add(1, Ordering::Relaxed);
-    }
-    false
+    };
+    permit.send(params.take());
+    true
 }
 
 #[cfg(test)]
@@ -274,18 +287,38 @@ mod tests {
             },
         );
         let request = json!({"requestId":"req", "request":{"headers":{"X-Client-Data":"strip", "Other":"keep"}}});
-        assert!(!route_request_pause(&routes, Some("other"), &request, true));
-        assert!(!route_request_pause(&routes, None, &request, true));
+        assert!(!route_request_pause(
+            &routes,
+            Some("other"),
+            &mut request.clone(),
+            true
+        ));
+        assert!(!route_request_pause(
+            &routes,
+            None,
+            &mut request.clone(),
+            true
+        ));
         let mut response = request.clone();
         response["responseStatusCode"] = json!(200);
         assert!(!route_request_pause(
             &routes,
             Some("owned"),
-            &response,
+            &mut response,
             true
         ));
-        assert!(route_request_pause(&routes, Some("owned"), &request, true));
-        assert!(!route_request_pause(&routes, Some("owned"), &request, true));
+        assert!(route_request_pause(
+            &routes,
+            Some("owned"),
+            &mut request.clone(),
+            true
+        ));
+        assert!(!route_request_pause(
+            &routes,
+            Some("owned"),
+            &mut request.clone(),
+            true
+        ));
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         let pause = receiver.try_recv().unwrap();
         assert_eq!(pause.session_id, "owned");
@@ -293,7 +326,12 @@ mod tests {
             pause.continue_params,
             json!({"requestId":"req", "headers":[{"name":"Other","value":"keep"}]})
         );
-        assert!(route_request_pause(&routes, Some("owned"), &request, false));
+        assert!(route_request_pause(
+            &routes,
+            Some("owned"),
+            &mut request.clone(),
+            false
+        ));
         assert_eq!(
             receiver.try_recv().unwrap().continue_params,
             json!({"requestId":"req"})
@@ -302,12 +340,17 @@ mod tests {
         assert!(!route_request_pause(
             &routes,
             Some("owned"),
-            &request,
+            &mut request.clone(),
             false
         ));
         assert_eq!(dropped.load(Ordering::Relaxed), 2);
         routes.lock().unwrap().remove("owned");
-        assert!(!route_request_pause(&routes, Some("owned"), &request, true));
+        assert!(!route_request_pause(
+            &routes,
+            Some("owned"),
+            &mut request.clone(),
+            true
+        ));
     }
 
     #[test]
@@ -325,16 +368,32 @@ mod tests {
         assert!(!route_response_pause(
             &routes,
             Some("owned"),
-            &json!({"requestId":"1"})
+            &mut json!({"requestId":"1"})
         ));
-        assert!(!route_response_pause(&routes, Some("other"), &response));
-        assert!(!route_response_pause(&routes, None, &response));
-        assert!(route_response_pause(&routes, Some("owned"), &response));
-        assert!(!route_response_pause(&routes, Some("owned"), &response));
+        assert!(!route_response_pause(
+            &routes,
+            Some("other"),
+            &mut response.clone()
+        ));
+        assert!(!route_response_pause(&routes, None, &mut response.clone()));
+        assert!(route_response_pause(
+            &routes,
+            Some("owned"),
+            &mut response.clone()
+        ));
+        assert!(!route_response_pause(
+            &routes,
+            Some("owned"),
+            &mut response.clone()
+        ));
         assert_eq!(dropped.load(Ordering::Relaxed), 1);
         assert_eq!(receiver.try_recv().unwrap(), response);
         drop(receiver);
-        assert!(!route_response_pause(&routes, Some("owned"), &response));
+        assert!(!route_response_pause(
+            &routes,
+            Some("owned"),
+            &mut response.clone()
+        ));
         assert_eq!(dropped.load(Ordering::Relaxed), 2);
     }
 
@@ -347,9 +406,8 @@ mod tests {
         });
         let stripped = strip_client_data_header(&headers).expect("header present");
         assert_eq!(stripped.len(), 2);
-        assert!(stripped.get("User-Agent").is_some());
-        assert!(stripped.get("Accept").is_some());
-        assert!(strip_client_data_header(&Value::Object(stripped)).is_none());
+        assert!(stripped.contains(&json!({"name":"Accept", "value":"*/*"})));
+        assert!(stripped.contains(&json!({"name":"User-Agent", "value":"test"})));
     }
 
     #[test]
@@ -368,8 +426,8 @@ mod tests {
         });
         let stripped = strip_client_data_header(&headers).expect("header present");
         assert_eq!(
-            stripped.get("sec-ch-ua").and_then(|v| v.as_str()),
-            Some("\"Chromium\";v=\"140\"")
+            stripped,
+            vec![json!({"name":"sec-ch-ua", "value":"\"Chromium\";v=\"140\""})]
         );
     }
 }

@@ -66,6 +66,7 @@ pub(crate) fn read_devtools_active_port(user_data_dir: &std::path::Path) -> Opti
 /// Read a process's argv. Used to detect a headless/headed mismatch before
 /// attaching to a Chrome we didn't spawn ourselves. `None` if it can't be
 /// determined (unsupported platform, or the process/tool is unreadable).
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn read_process_argv(pid: u32) -> Option<Vec<String>> {
     #[cfg(target_os = "linux")]
     {
@@ -94,10 +95,11 @@ pub(crate) fn read_process_argv(pid: u32) -> Option<Vec<String>> {
                 .collect(),
         )
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        None
-    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub(crate) fn read_process_argv(_: u32) -> Option<Vec<String>> {
+    None
 }
 
 /// One entry from `GET /json` — a single browsing target (tab, iframe, worker).

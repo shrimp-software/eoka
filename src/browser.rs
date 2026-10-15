@@ -5,9 +5,9 @@
 mod geo;
 mod launch;
 
-use launch::{discover_browser_ws, prepare_browser_launch, remove_dir_if_exists};
+use launch::{discover_browser_ws, prepare_browser_launch, LaunchCancellation};
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::cdp::types::{EmulationSetUserAgentOverride, UserAgentBrandVersion, UserAgentMetadata};
@@ -77,8 +77,6 @@ pub struct Browser {
     connection: Connection,
     download_slot: Arc<tokio::sync::Semaphore>,
     config: Arc<StealthConfig>,
-    /// User data directory (cleaned up on close; None when connecting to existing instance)
-    user_data_dir: Option<PathBuf>,
     /// True when we attached to a Chrome we didn't spawn (see
     /// `try_attach_existing`). `close()` must never send `Browser.close` to
     /// a process we don't own, regardless of `config.live_session`.
@@ -138,28 +136,37 @@ impl Browser {
 
     /// Launch with custom config
     pub async fn launch_with_config(config: StealthConfig) -> Result<Self> {
-        let config = Arc::new(config);
+        let mut config = Arc::new(config);
         let launch_config = Arc::clone(&config);
+        let cancellation = LaunchCancellation::new();
+        let cancelled = Arc::clone(&cancellation.0);
         let mut prepared =
-            tokio::task::spawn_blocking(move || prepare_browser_launch(launch_config))
+            tokio::task::spawn_blocking(move || prepare_browser_launch(launch_config, cancelled))
                 .await
                 .map_err(|error| {
                     Error::Launch(format!("Browser launch worker failed: {}", error))
                 })??;
 
         let spawned = prepared.child.is_some();
+        if !spawned {
+            let config = Arc::make_mut(&mut config);
+            config.live_session = true;
+            config.filter_cdp = false;
+            config.strip_x_client_data = false;
+        }
         let transport = match prepared.child.take() {
             Some(child) => {
                 let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
                     (Some(username), Some(password)) => Some((username.clone(), password.clone())),
                     _ => None,
                 };
-                Transport::new_with_options(
+                Transport::new_with_runtime_options(
                     child,
                     &prepared.ws_url,
                     proxy_auth,
                     config.cdp_timeout,
                     config.strip_x_client_data,
+                    prepared.runtime.take(),
                 )
                 .await?
             }
@@ -182,18 +189,12 @@ impl Browser {
             .fingerprint
             .take()
             .ok_or_else(|| Error::Launch("Browser launch lost its fingerprint".into()))?;
-        // browser_owned_path() is already None for a user-supplied (and thus
-        // possibly attached-to) profile, so a reused Chrome's profile dir is
-        // never deleted on close/drop.
-        let user_data_dir = prepared.profile.browser_owned_path();
-
         let evasion_script = build_evasion_script_for(&config, &fingerprint);
 
         let mut browser = Self {
             connection,
             download_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             config,
-            user_data_dir,
             reused: !spawned,
             fingerprint: Some(fingerprint),
             evasion_script,
@@ -271,7 +272,6 @@ impl Browser {
             connection,
             download_slot: Arc::new(tokio::sync::Semaphore::new(1)),
             config,
-            user_data_dir: None,
             reused: true,
             fingerprint,
             evasion_script,
@@ -291,10 +291,9 @@ impl Browser {
         Self::connect_with_config(&ws_url, config).await
     }
 
-    /// Set up a session with evasion scripts and proxy auth.
+    /// Set up a session with evasion scripts, viewport emulation, and proxy auth.
     /// Common logic shared by new_page, new_blank_page, and attach_page.
-    /// In live-session mode, skips the evasion-script injection so we don't
-    /// pollute the user's tab with extra `addScriptToEvaluateOnNewDocument`.
+    /// Live sessions retain existing viewport metrics and skip evasion injection.
     async fn setup_session(&self, session: &crate::cdp::Session, fresh: bool) -> Result<()> {
         session.monitor_network(fresh).await?;
         session.page_enable().await?;
@@ -312,6 +311,13 @@ impl Browser {
         }
 
         if !self.config.live_session {
+            session
+                .set_viewport(
+                    self.config.viewport_width,
+                    self.config.viewport_height,
+                    self.config.device_scale_factor,
+                )
+                .await?;
             if let Some(ref fp) = self.fingerprint {
                 session.set_user_agent_full(ua_override_for(fp)).await?;
                 // Native ICU override: makes `Date.toString()`, `getHours()` and
@@ -408,35 +414,25 @@ impl Browser {
     /// Chrome has a bounded opportunity to flush state before forced termination.
     pub async fn close(self) -> Result<()> {
         if self.reused {
-            self.connection.transport().close().await?;
+            self.connection.disconnect().await
         } else {
-            self.connection.close().await?;
+            self.connection.close().await
         }
-
-        // Clean up user data directory (None when connecting).
-        if let Some(ref dir) = self.user_data_dir {
-            remove_dir_if_exists(dir)?;
-        }
-
-        Ok(())
     }
 
     /// Drop the WebSocket without sending `Browser.close`. Use this when
     /// connected to a user-owned browser to disconnect without killing it.
     pub async fn disconnect(self) -> Result<()> {
-        self.connection.transport().close().await
+        self.connection.disconnect().await
     }
 }
 
-/// Read Chrome's executable version and derive a coherent native UA. Failure
-/// is intentionally non-fatal: callers fall back to a current fingerprint.
 impl Drop for Browser {
     fn drop(&mut self) {
-        // Best-effort cleanup of the temp user-data-dir if close() wasn't called.
-        if let Some(ref dir) = self.user_data_dir {
-            if let Err(error) = remove_dir_if_exists(dir) {
+        if self.owns_process() {
+            if let Err(error) = self.connection.transport().cleanup_owned() {
                 tracing::warn!(
-                    "Failed to remove temporary browser profile while dropping browser: {}",
+                    "Failed to clean up owned browser while dropping handle: {}",
                     error
                 );
             }

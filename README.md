@@ -15,7 +15,7 @@ the browser via CDP.
 
 ```toml
 [dependencies]
-eoka = "0.6"
+eoka = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -102,6 +102,134 @@ browser.activate_tab(id).await?;
 browser.close_tab(id).await?;
 browser.close().await?;
 ```
+
+### Viewport and device scale
+
+```rust
+page.set_viewport(640, 360, 2.0).await?;
+let png = page.screenshot().await?;
+page.reset_viewport().await?;
+```
+
+Dimensions are CSS pixels; 640×360 at device scale factor 2 produces a
+1280×720 PNG. Width and height must be positive and fit a signed 32-bit CDP
+dimension. Scale must be positive and finite.
+
+Non-live sessions apply `StealthConfig.viewport_width`, `viewport_height` and
+`device_scale_factor` at setup. Live attachment preserves existing metrics until
+explicitly changed. Overrides persist across navigation. Reset clears emulation
+and restores native window content dimensions/device scale; it does not resize
+the window or restore the configured launch override.
+
+Fractional host display scaling can quantize effective CSS dimensions and DPR.
+Use measured DOM layout as the authority; Eoka does not mask those native values.
+Fractional capture boundaries follow Chrome's native rasterization, including
+edge rounding/artifacts. For pixel-aligned exports, align dimensions and DPR with
+the host pixel grid and verify the captured frame.
+Native capture/reset can refresh Chrome's hidden-tab `outerWidth`/`outerHeight`
+readings without changing actual browser window bounds; Eoka does not mask these
+native values.
+Viewport changes and captures are coordinated across Eoka handles connected
+through the same browser endpoint in this process. Independent CDP clients and
+other processes are outside that coordination; explicitly set the desired
+viewport before capturing a tab they have emulated.
+
+### Typed screenshots
+
+```rust
+use eoka::{ScreenshotClip, ScreenshotFormat, ScreenshotOptions};
+
+let webp = page.screenshot_with_options(&ScreenshotOptions {
+    format: ScreenshotFormat::Webp,
+    quality: Some(90),
+    clip: Some(ScreenshotClip { x: 20.0, y: 100.0, width: 320.0, height: 180.0 }),
+    full_page: false,
+}).await?;
+let full_png = page.screenshot_with_options(&ScreenshotOptions {
+    full_page: true,
+    ..Default::default()
+}).await?;
+```
+
+`screenshot()` remains the viewport PNG convenience and `screenshot_jpeg(80)`
+captures viewport JPEG. Typed options also support WebP. JPEG/WebP quality must
+be 0–100; PNG rejects quality. Crop coordinates are document-relative CSS pixels,
+including portions outside the visible viewport, with finite nonnegative positions
+and finite positive dimensions. Crop and full-page are mutually exclusive.
+Invalid options return `Error::InvalidScreenshotOptions` before contacting Chrome,
+including out-of-range quality supplied to `screenshot_jpeg`.
+
+Viewport DPR is the only render scale: a 320×180 crop at DPR 2 yields 640×360
+pixels. Full-page capture uses Chrome's CSS content bounds without resizing the
+viewport; capture preserves viewport metrics and scroll position. Large captures
+remain subject to Chrome's renderer/image-size and available-memory limits and
+the 64 MiB CDP message/frame budget, including base64 and JSON overhead. They
+can fail with a CDP or transport error. For deterministic exports, use a fixed
+viewport or crop rather than a full page whose layout dimensions may change.
+
+### Native recording
+
+```rust
+use eoka::NativeRecordingOptions;
+use std::io::Write;
+
+let recording = page.start_recording(NativeRecordingOptions {
+    max_width: Some(1280),
+    max_height: Some(720),
+    fps: Some(30.0),
+}).await?;
+// Drive the page while recording, then explicitly finalize.
+recording.stop().await?;
+let mut file = std::fs::OpenOptions::new()
+    .write(true).create_new(true).open("capture.mp4")?;
+loop {
+    let chunk = recording.read_chunk().await?;
+    file.write_all(&chunk.data)?;
+    if chunk.eof { break; }
+}
+recording.close().await?;
+file.flush()?;
+```
+
+The experimental native Chrome recorder requires a ready, active page and allows
+one recorder per target, shared across Eoka handles. Unsupported commands or native
+encoders fail explicitly; there is no alternate recorder or FFmpeg runtime
+requirement. Output is MP4 with a Chrome-selected codec, not guaranteed H.264.
+Audio is not promised. Maximum dimensions must be positive; FPS must be an integer
+from 1 through 120 and is a ceiling, not deterministic fixed-FPS playback.
+
+Chrome for Testing 155.0.8059.39 can emit zero MP4 sample durations and duplicate
+decoding timestamps. This also occurs through direct CDP without Eoka. The core
+preserves Chrome's original stream; it does not rewrite timestamps or transcode.
+A decodable file is not proof of strictly increasing timestamps. Native recording
+remains experimental: consumers must inspect packet timestamps and decoder
+diagnostics. The paired Node sidecar separately applies bounded MP4 timing
+corrections without transcoding before publication and qualifies the resulting
+timestamps and diagnostics. This is not an upstream Chrome fix or a guarantee
+about the core's raw stream.
+
+`stop()` enters the output stream; `read_chunk()` returns at most 64 KiB decoded
+bytes with explicit EOF, and `close()` releases the stream. `cancel()` discards an
+unfinished recording with bounded cleanup; Drop attempts best-effort cleanup when
+an async runtime is available. `wait_for_failure()` observes target/session/transport
+loss without waiting behind recording commands.
+`RecordingError` distinguishes unsupported/precondition/state failures and uncertain
+cleanup, which must not be treated as permission to restart. Cleanup acknowledgement
+is bounded; if it expires, owned cleanup remains scheduled and the target reservation
+is retained rather than reporting that resources were released. The core does not
+own output-file publication: callers must handle streaming/write failures and cleanup;
+the Node sidecar additionally stages and atomically publishes without overwriting,
+and its `Recording.stop()` returns only a completed artifact.
+
+Read chunks sequentially: overlapping `read_chunk()` calls fail with
+`RecordingError::InvalidState` without consuming another chunk or cancelling the
+accepted read. Cancelling a read before its chunk is delivered fails the recording
+and schedules cleanup, rather than allowing a silently truncated output stream.
+
+Connection teardown and borrowed-browser close clean up only recordings owned by
+that connection, not another connection's recorder on the same target. Explicit
+target close cancels the target's recording. Teardown cleanup survives cancellation
+of its waiting caller.
 
 ### Finding Elements
 
@@ -323,6 +451,7 @@ page.content().await?;              // full HTML
 page.text().await?;                 // visible text
 page.screenshot().await?;           // PNG bytes
 page.screenshot_jpeg(80).await?;    // JPEG at quality 80
+page.screenshot_with_options(&options).await?; // typed format/crop/full-page bytes
 page.debug_state().await?;          // PageState with element counts
 page.debug_screenshot("step1").await?; // timestamped screenshot
 ```
@@ -477,6 +606,60 @@ stealth browsers (see `StealthConfig`):
 - `geo_align: false` — opt-in. Aligns timezone and `navigator.languages` with
   the browser's apparent public IP via a one-shot lookup before the first real
   navigation. Ignored when `timezone` is set explicitly.
+
+### Managed launch and ownership
+
+`chrome_path` selects an absolute, readable executable. A missing, non-executable,
+or relative explicit path fails without discovering another browser. Linux
+patching resolves an installed wrapper to its associated ELF binary, never to an
+unrelated browser. Patching copies that binary and preserves its companion
+libraries/resources; the source installation is not modified.
+
+`runtime_dir` selects an absolute writable parent directory. Each owned launch
+creates a unique child there (0700 on Unix) containing its ephemeral profile,
+patch artifacts, and Chrome temporary files. `TMPDIR`, `TMP`, and `TEMP` are set
+only on child commands, never on the calling process. An explicit runtime root
+does not depend on the default temporary directory. The caller's root and any
+explicit `user_data_dir` are preserved, including existing profile permissions.
+
+On Unix, patch-cache directories must belong to the effective user and grant no
+group/other permissions (new directories use 0700). Their canonical ancestors
+must belong to that user or root; group/other-writable ancestors require sticky
+protection, as with `/tmp`. Unsafe existing directories or links are rejected
+without changing permissions. Choose a trusted `runtime_dir` or temporary root.
+macOS bundle links are checked after relocation and before cached reuse so they
+cannot reach outside the owned copy.
+
+```rust
+let browser = Browser::launch_with(|config| {
+    config.chrome_path = Some("/opt/chrome-for-testing/chrome".into());
+    config.runtime_dir = Some("/var/lib/my-app/browser-runtime".into());
+    config.sandbox = true;
+}).await?;
+assert!(browser.owns_process());
+println!("{}", browser.version().await?); // actual CDP browser product
+browser.close().await?;
+```
+
+`sandbox: false` retains existing callers' unsandboxed launch behavior.
+Set `sandbox: true` to enable Chrome's sandbox; an unsupported environment
+returns the launch error without retrying unsandboxed. Sandbox-control switches
+in `extra_args` are rejected: use the boolean rather than conflicting arguments.
+Existing-profile reuse cannot apply new launch policy, so an active profile
+rejects explicit executable/runtime paths or enabled sandboxing. Legacy default
+reuse remains borrowed and does not modify existing tabs.
+
+`Browser::close` terminates owned Chrome and reports runtime cleanup failures.
+`Browser::disconnect` does not send `Browser.close`, but still terminates an owned
+process; it preserves Chrome only for borrowed handles. Drop and startup
+cancellation perform best-effort owned cleanup, logging failures. Page handles
+do not prevent a dropped owned Browser from terminating its process. Borrowed
+browser processes and caller profiles are never deleted by this cleanup.
+
+The eoka-tools sidecar's caller-loss cleanup relies on stdin EOF/broken-pipe
+detection while the sidecar is still running. Direct SIGKILL of the sidecar or a
+process embedding this crate cannot execute destructors: it cannot guarantee
+Chrome or runtime cleanup. These are not portable parent-death OS guarantees.
 
 For reusable presets or advanced setup, build a `StealthConfig` directly:
 

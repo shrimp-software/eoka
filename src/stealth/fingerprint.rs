@@ -343,16 +343,6 @@ impl Fingerprint {
         }
     }
 
-    /// Assumed OS chrome (taskbar/menu bar) height subtracted from
-    /// `screen.height` when spoofing `screen.availHeight`.
-    pub fn ui_chrome_height(&self) -> u32 {
-        match self.platform {
-            Platform::MacOS => 25,
-            Platform::Windows => 40,
-            Platform::Linux => 30,
-        }
-    }
-
     /// JSON `KeyboardLayoutMap` entries for the claimed platform, or `null`
     /// where the Keyboard API doesn't exist in stock Chrome (Linux). All
     /// eoka identities use en-US locales, so the layout is US ANSI.

@@ -1,6 +1,6 @@
 [package]
 name = "eoka"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.85"
 license = "MIT"
@@ -44,6 +44,9 @@ fastrand = "2"
 
 # Base64 for screenshots
 base64 = "0.23"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [features]
 schema = ["dep:schemars"]

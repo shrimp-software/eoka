@@ -79,13 +79,50 @@ pub struct PageAddScriptToEvaluateOnNewDocumentResult {
     pub identifier: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageViewport {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    pub scale: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageVisualViewport {
+    pub page_x: f64,
+    pub page_y: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageContentSize {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageGetLayoutMetricsResult {
+    pub css_visual_viewport: PageVisualViewport,
+    pub css_content_size: PageContentSize,
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageCaptureScreenshot {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
+    pub format: Option<crate::ScreenshotFormat>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clip: Option<PageViewport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capture_beyond_viewport: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

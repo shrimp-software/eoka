@@ -1,58 +1,32 @@
 //! Chrome launch preparation, profile ownership and identity selection.
 
-use crate::cdp::transport::{launch_chrome_with_profile_dir, stop_child};
+use crate::cdp::transport::{
+    chrome_version_output, launch_chrome_with_profile_dir, stop_child, RuntimeDirectory,
+};
 use crate::stealth::{find_chrome, fingerprint::Fingerprint, ChromePatcher};
 use crate::{Error, Result, StealthConfig};
 use std::{
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::Child,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
 };
 
-static BROWSER_COUNTER: AtomicU64 = AtomicU64::new(0);
+pub(super) struct LaunchCancellation(pub(super) Arc<AtomicBool>);
 
-pub(super) fn remove_dir_if_exists(path: &Path) -> std::io::Result<()> {
-    const ATTEMPTS: usize = 10;
-
-    for attempt in 0..ATTEMPTS {
-        match std::fs::remove_dir_all(path) {
-            Ok(()) => return Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) if is_directory_not_empty(&error) && attempt + 1 < ATTEMPTS => {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-
-    Ok(())
-}
-
-fn is_directory_not_empty(error: &std::io::Error) -> bool {
-    matches!(error.raw_os_error(), Some(39) | Some(66) | Some(145))
-}
-
-/// Restrict a profile directory to its owner (0700). Profiles contain the
-/// cookie store; a default-umask /tmp directory would be world-readable.
-#[cfg(unix)]
-fn restrict_profile_perms(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o700);
-    if let Err(error) = std::fs::set_permissions(path, perms) {
-        tracing::warn!(
-            "Failed to restrict profile dir {}: {}",
-            path.display(),
-            error
-        );
+impl LaunchCancellation {
+    pub(super) fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
     }
 }
 
-#[cfg(not(unix))]
-fn restrict_profile_perms(_path: &Path) {}
+impl Drop for LaunchCancellation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
 
 pub(super) async fn discover_browser_ws(port: u16) -> Result<String> {
     tokio::task::spawn_blocking(move || {
@@ -80,7 +54,6 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
         // Make browser look natural
         "--no-first-run".into(),
         "--no-default-browser-check".into(),
-        "--no-sandbox".into(),
         "--disable-default-apps".into(),
         "--disable-component-extensions-with-background-pages".into(),
         "--disable-hang-monitor".into(),
@@ -110,6 +83,9 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
             config.viewport_width, config.viewport_height
         ),
     ];
+    if !config.sandbox {
+        args.push("--no-sandbox".into());
+    }
 
     // User agent
     args.push(format!("--user-agent={}", fingerprint.user_agent));
@@ -137,54 +113,30 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
     args
 }
 
-/// Own a browser profile until launch fully succeeds. This makes cancellation
-/// of `launch_with_config` clean up ephemeral profiles automatically.
-pub(super) struct BrowserProfileGuard {
+/// Profile location; ephemeral profiles are owned by the runtime directory.
+pub(super) struct BrowserProfile {
     path: PathBuf,
     owned: bool,
 }
 
-impl BrowserProfileGuard {
-    fn create(config: &StealthConfig) -> Result<Self> {
-        match config.user_data_dir.as_deref() {
-            Some(path) => {
-                let path = PathBuf::from(path);
-                std::fs::create_dir_all(&path)?;
-                restrict_profile_perms(&path);
-                Ok(Self { path, owned: false })
+impl BrowserProfile {
+    fn create(config: &StealthConfig, runtime: &RuntimeDirectory) -> Result<Self> {
+        let (path, owned) = match config.user_data_dir.as_deref() {
+            Some(path) => (PathBuf::from(path), false),
+            None => (runtime.path().join("profile"), true),
+        };
+        if owned {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new().mode(0o700).create(&path)?;
             }
-            None => {
-                let instance_id = BROWSER_COUNTER.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir().join(format!(
-                    "eoka-browser-{}-{}",
-                    std::process::id(),
-                    instance_id
-                ));
-                remove_dir_if_exists(&path)?;
-                std::fs::create_dir_all(&path)?;
-                restrict_profile_perms(&path);
-                Ok(Self { path, owned: true })
-            }
-        }
-    }
-
-    pub(super) fn browser_owned_path(&mut self) -> Option<PathBuf> {
-        if self.owned {
-            self.owned = false;
-            Some(self.path.clone())
+            #[cfg(not(unix))]
+            std::fs::create_dir(&path)?;
         } else {
-            None
+            std::fs::create_dir_all(&path)?;
         }
-    }
-}
-
-impl Drop for BrowserProfileGuard {
-    fn drop(&mut self) {
-        if self.owned {
-            if let Err(error) = remove_dir_if_exists(&self.path) {
-                tracing::warn!("Failed to remove unclaimed browser profile: {}", error);
-            }
-        }
+        Ok(Self { path, owned })
     }
 }
 
@@ -196,7 +148,7 @@ pub(super) struct PreparedBrowserLaunch {
     pub(super) child: Option<Child>,
     pub(super) ws_url: String,
     pub(super) fingerprint: Option<Fingerprint>,
-    pub(super) profile: BrowserProfileGuard,
+    pub(super) runtime: Option<RuntimeDirectory>,
 }
 
 impl Drop for PreparedBrowserLaunch {
@@ -280,12 +232,38 @@ fn try_attach_existing(profile_dir: &Path, want_headless: bool) -> Result<Option
     Ok(Some(ws_url))
 }
 
-pub(super) fn prepare_browser_launch(config: Arc<StealthConfig>) -> Result<PreparedBrowserLaunch> {
-    let profile = BrowserProfileGuard::create(&config)?;
+pub(super) fn prepare_browser_launch(
+    config: Arc<StealthConfig>,
+    cancelled: Arc<AtomicBool>,
+) -> Result<PreparedBrowserLaunch> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err(Error::Launch("Browser launch was cancelled".into()));
+    }
+    crate::cdp::types::EmulationSetDeviceMetricsOverride::new(
+        config.viewport_width,
+        config.viewport_height,
+        config.device_scale_factor,
+    )?;
+    validate_sandbox_args(&config)?;
+    let explicit_chrome = config
+        .chrome_path
+        .as_deref()
+        .map(|path| validate_executable(Path::new(path)))
+        .transpose()?;
+    let runtime = RuntimeDirectory::create(config.runtime_dir.as_deref())?;
+    let profile = BrowserProfile::create(&config, &runtime)?;
 
     // Only a durable, user-owned profile can already have a live Chrome on
     // it — ephemeral profiles are freshly created above and can't collide.
     if !profile.owned {
+        if (config.chrome_path.is_some() || config.runtime_dir.is_some() || config.sandbox)
+            && crate::cdp::discover::read_singleton_lock(&profile.path)
+                .is_some_and(crate::cdp::discover::pid_is_alive)
+        {
+            return Err(Error::Launch(
+                "A Chrome instance is already running on this profile; explicit executable, runtime or sandbox policy requires a new process".into(),
+            ));
+        }
         if let Some(ws_url) = try_attach_existing(&profile.path, config.headless)? {
             tracing::info!("Reusing running Chrome on profile {:?}", profile.path);
             let fingerprint = Fingerprint::resolve_for_profile(
@@ -297,26 +275,26 @@ pub(super) fn prepare_browser_launch(config: Arc<StealthConfig>) -> Result<Prepa
                 child: None,
                 ws_url,
                 fingerprint: Some(fingerprint),
-                profile,
+                runtime: None,
             });
         }
     }
 
-    let chrome_path = match &config.chrome_path {
-        Some(path) => PathBuf::from(path),
-        None => find_chrome()?,
+    let chrome_path = match explicit_chrome {
+        Some(path) => path,
+        None => validate_executable(&find_chrome()?)?,
     };
 
     // Patching a browser binary is not appropriate for a durable user-owned
     // profile. Let that profile provide continuity instead of fresh spoofing.
     let chrome_path = if config.patch_binary && profile.owned {
-        ChromePatcher::new(&chrome_path)?.get_patched_path()?
+        ChromePatcher::new_in_runtime(&chrome_path, runtime.path())?.get_patched_path()?
     } else {
         chrome_path
     };
 
     let detected_user_agent = if config.user_agent.is_none() {
-        installed_chrome_user_agent(&chrome_path)
+        installed_chrome_user_agent(&chrome_path, runtime.path(), &cancelled)
     } else {
         None
     };
@@ -333,37 +311,104 @@ pub(super) fn prepare_browser_launch(config: Arc<StealthConfig>) -> Result<Prepa
     args.push(format!("--user-data-dir={}", profile.path.display()));
 
     tracing::info!("Launching Chrome from {:?}", chrome_path);
-    let (child, ws_url) =
-        launch_chrome_with_profile_dir(&chrome_path, &args, &profile.path, config.live_session)?;
+    let (child, ws_url) = launch_chrome_with_profile_dir(
+        &chrome_path,
+        &args,
+        &profile.path,
+        config.live_session,
+        runtime.path(),
+        &cancelled,
+    )?;
     Ok(PreparedBrowserLaunch {
         child: Some(child),
         ws_url,
         fingerprint: Some(fingerprint),
-        profile,
+        runtime: Some(runtime),
     })
 }
 
-fn installed_chrome_user_agent(chrome_path: &std::path::Path) -> Option<String> {
-    let output = Command::new(chrome_path).arg("--version").output().ok()?;
-    let version = String::from_utf8_lossy(&output.stdout);
+fn validate_executable(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() {
+        return Err(Error::Launch("chrome_path must be absolute".into()));
+    }
+    let metadata = std::fs::metadata(path).map_err(|error| {
+        Error::Launch(format!(
+            "Invalid Chrome executable {}: {}",
+            path.display(),
+            error
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(Error::Launch(format!(
+            "Chrome executable is not a file: {}",
+            path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(Error::Launch(format!(
+                "Chrome executable is not executable: {}",
+                path.display()
+            )));
+        }
+    }
+    std::fs::File::open(path).map_err(|error| {
+        Error::Launch(format!(
+            "Cannot read Chrome executable {}: {}",
+            path.display(),
+            error
+        ))
+    })?;
+    Ok(std::fs::canonicalize(path)?)
+}
+
+fn validate_sandbox_args(config: &StealthConfig) -> Result<()> {
+    for arg in &config.extra_args {
+        let name = arg.split('=').next().unwrap_or(arg);
+        if matches!(
+            name,
+            "--no-sandbox"
+                | "--no-sandbox-and-elevated"
+                | "--disable-sandbox"
+                | "--disable-setuid-sandbox"
+                | "--disable-seccomp-filter-sandbox"
+                | "--disable-namespace-sandbox"
+                | "--disable-gpu-sandbox"
+        ) {
+            return Err(Error::Launch(format!(
+                "Sandbox arguments must use StealthConfig.sandbox, not extra_args: {}",
+                arg,
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn installed_chrome_user_agent(
+    chrome_path: &Path,
+    runtime: &Path,
+    cancelled: &AtomicBool,
+) -> Option<String> {
+    let output = chrome_version_output(chrome_path, runtime, cancelled)?;
+    let version = String::from_utf8_lossy(&output);
     let full_version = version.split_whitespace().find(|part| {
-        let pieces: Vec<_> = part.split('.').collect();
-        pieces.len() == 4
-            && pieces
-                .iter()
-                .all(|piece| !piece.is_empty() && piece.bytes().all(|byte| byte.is_ascii_digit()))
+        let mut pieces = part.split('.');
+        (0..4).all(|_| {
+            pieces.next().is_some_and(|piece| {
+                !piece.is_empty() && piece.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        }) && pieces.next().is_none()
     })?;
     Fingerprint::native_chrome_user_agent(full_version)
 }
 
-#[cfg(test)]
-use super::{accept_language_for, ua_override_for};
-#[cfg(test)]
-use crate::stealth::build_evasion_script_for;
-
 #[cfg(all(test, unix))]
 mod try_attach_existing_tests {
     use super::*;
+    use crate::browser::{accept_language_for, ua_override_for};
+    use crate::stealth::build_evasion_script_for;
     use std::os::unix::fs::symlink;
 
     fn temp_profile_dir(name: &str) -> PathBuf {
@@ -472,21 +517,26 @@ mod try_attach_existing_tests {
     fn profile_dirs_are_owner_only() {
         use std::os::unix::fs::PermissionsExt;
 
-        let owned = BrowserProfileGuard::create(&StealthConfig::default()).unwrap();
+        let runtime = RuntimeDirectory::create(None).unwrap();
+        let owned = BrowserProfile::create(&StealthConfig::default(), &runtime).unwrap();
         let mode = std::fs::metadata(&owned.path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o700, "spawned temp profile dir must be 0700");
         std::fs::remove_dir_all(&owned.path).unwrap();
 
         let custom = temp_profile_dir("user-supplied");
-        let guard = BrowserProfileGuard::create(&StealthConfig {
-            user_data_dir: Some(custom.to_string_lossy().into_owned()),
-            ..StealthConfig::default()
-        })
+        std::fs::set_permissions(&custom, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let guard = BrowserProfile::create(
+            &StealthConfig {
+                user_data_dir: Some(custom.to_string_lossy().into_owned()),
+                ..StealthConfig::default()
+            },
+            &runtime,
+        )
         .unwrap();
         let mode = std::fs::metadata(&guard.path).unwrap().permissions().mode() & 0o777;
         assert_eq!(
-            mode, 0o700,
-            "user-supplied profile dir must be tightened to 0700"
+            mode, 0o750,
+            "user-supplied profile permissions must be preserved"
         );
         std::fs::remove_dir_all(&custom).unwrap();
     }
