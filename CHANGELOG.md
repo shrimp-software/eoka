@@ -81,6 +81,8 @@ All notable changes to this project will be documented in this file.
 - Keep Unix-only launch/discovery code within its platform boundaries for Windows
   warnings-as-errors builds. Runtime cleanup regressions compare directory identity
   across aliased temporary paths rather than platform-specific path spelling.
+- Update locked `chacha20` to 0.10.2 instead of the yanked 0.10.1, including the
+  upstream RNG SSE2-backend compatibility fix while retaining Rust 1.85 support.
 
 ## [0.5.15] - 2026-10-10
 
