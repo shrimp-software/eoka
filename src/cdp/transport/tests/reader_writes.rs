@@ -103,14 +103,30 @@ async fn automatic_reply_socket_backpressure_cannot_strand_native_completion() {
         .unwrap();
     written.unwrap();
     peer.next().await.unwrap().unwrap();
-    // The peer stops reading after this event. The rewritten header payload is
-    // larger than the socket buffers, so the automatic continuation stalls in
-    // flush rather than in writer-lock admission.
+    // Socket buffer sizes are not hard per-write limits on every OS. Stop
+    // reading and fill until a write actually stalls, bounded in time and bytes.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let padding = Message::Binary(vec![0; 64 * 1024].into());
+        let mut writer = transport.writer.lock().await;
+        for _ in 0..1024 {
+            match tokio::time::timeout(Duration::from_millis(100), writer.send(padding.clone()))
+                .await
+            {
+                Ok(result) => result.unwrap(),
+                Err(_) => return,
+            }
+        }
+        panic!("fixture accepted 64 MiB without socket backpressure");
+    })
+    .await
+    .expect("fixture must establish socket backpressure");
+    // Release the writer mutex but leave the peer unread, so the automatic
+    // continuation must hit its flush deadline, not its lock-admission deadline.
     peer.send(Message::Text(
         json!({
             "method":"Fetch.requestPaused", "sessionId":"backpressure",
             "params":{"requestId":"blocked", "request":{"headers":{
-                "X-Client-Data":"remove", "Large":"x".repeat(1024 * 1024)
+                "X-Client-Data":"remove", "Kept":"value"
             }}}
         })
         .to_string()
