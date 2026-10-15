@@ -26,11 +26,12 @@ All notable changes to this project will be documented in this file.
 
 ### Known release limitation
 
-- Chrome 155.0.8059.39 can emit duplicate terminal MP4 decoding timestamps when
-  its tail-frame interval truncates below one track tick. Reproduced with direct
-  CDP independently of Eoka; original native bytes are preserved, not normalized.
-  Native recording remains experimental and the paired npm publication gate is
-  blocked pending a real upstream resolution and fresh platform qualification.
+- Chrome 155.0.8059.39 can emit zero MP4 sample durations and duplicate decoding
+  timestamps. Reproduced with direct CDP independently of Eoka; the core preserves
+  original native bytes rather than normalizing them. Native recording remains
+  experimental. The paired Node sidecar separately applies bounded timing
+  corrections without transcoding and qualifies finalized timestamps and decoder
+  diagnostics; it does not change the core raw-stream contract.
 
 ### Changed
 
@@ -62,6 +63,21 @@ All notable changes to this project will be documented in this file.
 - Browser teardown removes a redundant forwarding channel. Startup cleanup
   avoids re-cleaning stopped children and releases startup stderr history after
   connection; rejected recorder admission avoids constructing unused state.
+- Recording stream handles use two inline slots rather than a heap collection;
+  terminal cleanup shares one identity-checked reservation-release path.
+- Native Rust CI now covers macOS ARM64/x64 and Windows x64 alongside Linux,
+  including macOS bundle ownership and signature regressions.
+
+### Fixed
+
+- Bound the WebSocket writer lock and close-frame send by the CDP command timeout,
+  so a stalled writer cannot indefinitely prevent pending-command and owned-process
+  cleanup.
+- Reject unsafe Unix patch-cache directories and ancestor paths before mutation,
+  without changing existing directory permissions. Cache-parent links cannot
+  redirect macOS bundle cleanup into the original application.
+- Validate relocated and cached macOS bundle symlink endpoints before patching or
+  signing, rejecting links that resolve back into the source or outside the copy.
 
 ## [0.5.15] - 2026-10-10
 

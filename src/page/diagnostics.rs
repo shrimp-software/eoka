@@ -43,11 +43,13 @@ pub struct ScreenshotOptions {
 impl ScreenshotOptions {
     pub(crate) fn validate(&self) -> Result<()> {
         let invalid = |message: &str| crate::Error::InvalidScreenshotOptions(message.into());
-        if self.quality.is_some_and(|quality| quality > 100) {
-            return Err(invalid("quality must be between 0 and 100"));
-        }
-        if self.format == ScreenshotFormat::Png && self.quality.is_some() {
-            return Err(invalid("PNG does not accept quality"));
+        if let Some(quality) = self.quality {
+            if quality > 100 {
+                return Err(invalid("quality must be between 0 and 100"));
+            }
+            if self.format == ScreenshotFormat::Png {
+                return Err(invalid("PNG does not accept quality"));
+            }
         }
         if self.full_page && self.clip.is_some() {
             return Err(invalid("clip and full_page are mutually exclusive"));

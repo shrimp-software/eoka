@@ -35,22 +35,19 @@ fn state_for_target(
     let mut targets = registry
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    targets
-        .entry(target_id.to_owned())
-        .or_insert_with(|| {
-            Arc::new(TargetState {
-                actions: Arc::default(),
-                held_input: Arc::default(),
-                headers: Arc::default(),
-                monitor: tokio::sync::Mutex::new(None),
-                viewport: page::viewport_for_target(transport.browser_endpoint(), target_id),
-                recording: crate::recording::recording_for_target(
-                    transport.browser_endpoint(),
-                    target_id,
-                ),
-            })
-        })
-        .clone()
+    if let Some(state) = targets.get(target_id) {
+        return Arc::clone(state);
+    }
+    let state = Arc::new(TargetState {
+        actions: Arc::default(),
+        held_input: Arc::default(),
+        headers: Arc::default(),
+        monitor: tokio::sync::Mutex::new(None),
+        viewport: page::viewport_for_target(transport.browser_endpoint(), target_id),
+        recording: crate::recording::recording_for_target(transport.browser_endpoint(), target_id),
+    });
+    targets.insert(target_id.to_owned(), Arc::clone(&state));
+    state
 }
 
 /// A CDP connection to Chrome

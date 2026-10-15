@@ -104,6 +104,7 @@ dependencies = [
  "base64",
  "fastrand",
  "futures-util",
+ "libc",
  "memmap2",
  "schemars",
  "serde",

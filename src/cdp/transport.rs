@@ -420,10 +420,7 @@ impl Transport {
     /// Connect to an existing Chrome instance at the given WebSocket URL.
     /// Does not manage a Chrome process — caller owns the browser lifecycle.
     pub async fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
-        let stream = Self::ws_connect(ws_url).await?;
-        let mut transport = Self::build(None, stream, None, cdp_timeout_secs, true, false);
-        transport.browser_endpoint = Some(ws_url.to_owned());
-        Ok(transport)
+        Self::connect_with_options(ws_url, cdp_timeout_secs, true, false).await
     }
 
     /// Connect to an existing Chrome with full options control. Use
@@ -786,14 +783,27 @@ impl Transport {
         }
     }
 
-    /// Close the transport and kill Chrome
+    /// Close the transport and terminate any owned Chrome process.
+    ///
+    /// Waiting for the writer and sending the best-effort WebSocket close frame
+    /// share the configured command timeout. Pending requests are failed and
+    /// owned cleanup is attempted even if that deadline expires. Borrowed Chrome
+    /// processes are not terminated.
     pub async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::Release);
-        // Send a WebSocket close frame (best-effort).
+        // Bound both writer acquisition and the best-effort close-frame write
+        // so a stalled sink cannot prevent pending failure or owned cleanup.
+        match tokio::time::timeout(self.cmd_timeout, async {
+            self.writer.lock().await.send(Message::Close(None)).await
+        })
+        .await
         {
-            let mut writer = self.writer.lock().await;
-            if let Err(error) = writer.send(Message::Close(None)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
                 tracing::debug!("WebSocket close frame was not sent: {}", error);
+            }
+            Err(error) => {
+                tracing::debug!("WebSocket close frame exceeded its deadline: {}", error);
             }
         }
 

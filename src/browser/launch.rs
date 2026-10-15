@@ -248,7 +248,7 @@ pub(super) fn prepare_browser_launch(
     let explicit_chrome = config
         .chrome_path
         .as_deref()
-        .map(validate_executable)
+        .map(|path| validate_executable(Path::new(path)))
         .transpose()?;
     let runtime = RuntimeDirectory::create(config.runtime_dir.as_deref())?;
     let profile = BrowserProfile::create(&config, &runtime)?;
@@ -282,7 +282,7 @@ pub(super) fn prepare_browser_launch(
 
     let chrome_path = match explicit_chrome {
         Some(path) => path,
-        None => validate_executable(&find_chrome()?.to_string_lossy())?,
+        None => validate_executable(&find_chrome()?)?,
     };
 
     // Patching a browser binary is not appropriate for a durable user-owned
@@ -327,8 +327,7 @@ pub(super) fn prepare_browser_launch(
     })
 }
 
-fn validate_executable(path: &str) -> Result<PathBuf> {
-    let path = Path::new(path);
+fn validate_executable(path: &Path) -> Result<PathBuf> {
     if !path.is_absolute() {
         return Err(Error::Launch("chrome_path must be absolute".into()));
     }
@@ -395,11 +394,12 @@ fn installed_chrome_user_agent(
     let output = chrome_version_output(chrome_path, runtime, cancelled)?;
     let version = String::from_utf8_lossy(&output);
     let full_version = version.split_whitespace().find(|part| {
-        let pieces: Vec<_> = part.split('.').collect();
-        pieces.len() == 4
-            && pieces
-                .iter()
-                .all(|piece| !piece.is_empty() && piece.bytes().all(|byte| byte.is_ascii_digit()))
+        let mut pieces = part.split('.');
+        (0..4).all(|_| {
+            pieces.next().is_some_and(|piece| {
+                !piece.is_empty() && piece.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        }) && pieces.next().is_none()
     })?;
     Fingerprint::native_chrome_user_agent(full_version)
 }

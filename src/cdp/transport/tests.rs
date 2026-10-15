@@ -475,6 +475,37 @@ async fn closing_transport_is_visible_before_writer_and_reader_finish() {
     closing.await.unwrap();
 }
 
+#[tokio::test(start_paused = true)]
+async fn closing_transport_times_out_writer_and_cleans_owned_runtime() {
+    let (mut transport, _peer) = pending_test_peer().await;
+    transport.cmd_timeout = Duration::from_secs(1);
+    let runtime = RuntimeDirectory::create(None).unwrap();
+    let runtime_path = runtime.path().to_owned();
+    *transport.runtime.get_mut().unwrap() = Some(runtime);
+    let (_, response) = transport
+        .prepare_command(None, "Fixture.pendingAtClose", &json!({}), None)
+        .unwrap();
+    let writer = transport.writer.lock().await;
+
+    tokio::time::timeout(
+        transport.cmd_timeout + Duration::from_millis(10),
+        transport.close(),
+    )
+    .await
+    .expect("close must not wait indefinitely for the writer")
+    .unwrap();
+
+    let error = tokio::time::timeout(Duration::from_millis(10), response.wait())
+        .await
+        .expect("close must fail pending commands")
+        .unwrap_err();
+    assert!(error.to_string().contains("CDP transport closed"));
+    assert!(lock_pending(&transport.pending).is_empty());
+    assert!(transport.is_closed());
+    assert!(!runtime_path.exists(), "close must clean the owned runtime");
+    drop(writer);
+}
+
 #[tokio::test]
 async fn binary_frames_preserve_event_payloads_and_command_replies() {
     let (transport, mut peer) = pending_test_peer().await;

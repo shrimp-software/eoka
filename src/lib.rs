@@ -10,7 +10,7 @@
 //!
 //! - **Stealth by Default** - Binary patching, 15 JS evasions, human-like mouse/typing
 //! - **Puppeteer-like API** - `click()`, `type()`, `wait_for()`, `screenshot()`, etc.
-//! - **Minimal Dependencies** - 11 direct crates, no chromiumoxide/puppeteer-extra bloat
+//! - **Direct CDP Transport** - No separate WebDriver server or browser-driver dependency
 //! - **AI-Agent Ready** - PageState introspection, element indexing, text extraction
 //! - **Fast** - Lazy evasion scripts, mmap patching, stack-allocated paths
 //!

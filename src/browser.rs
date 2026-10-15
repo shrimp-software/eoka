@@ -414,12 +414,10 @@ impl Browser {
     /// Chrome has a bounded opportunity to flush state before forced termination.
     pub async fn close(self) -> Result<()> {
         if self.reused {
-            self.connection.disconnect().await?;
+            self.connection.disconnect().await
         } else {
-            self.connection.close().await?;
+            self.connection.close().await
         }
-
-        Ok(())
     }
 
     /// Drop the WebSocket without sending `Browser.close`. Use this when

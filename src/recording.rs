@@ -131,7 +131,8 @@ enum Phase {
 
 struct Lifecycle {
     phase: Phase,
-    streams: Vec<String>,
+    // Start handle, then a distinct stop handle; clear only after IO.close succeeds.
+    streams: [Option<String>; 2],
     start_dispatched: bool,
     stop_attempted: bool,
     stopped: bool,
@@ -142,7 +143,7 @@ impl Lifecycle {
     fn new() -> Self {
         Self {
             phase: Phase::Starting,
-            streams: Vec::new(),
+            streams: [None, None],
             start_dispatched: false,
             stop_attempted: false,
             stopped: false,
@@ -161,12 +162,6 @@ impl Lifecycle {
                 self.stop_attempted = true;
                 Ok(true)
             }
-        }
-    }
-
-    fn add_stream(&mut self, stream: String) {
-        if !self.streams.contains(&stream) {
-            self.streams.push(stream);
         }
     }
 }
@@ -278,6 +273,18 @@ impl RecordingState {
         });
     }
 
+    fn finish_locked(&self, lifecycle: &mut Lifecycle, slot: &RecordingSlot) {
+        lifecycle.phase = Phase::Closed;
+        self.finished.store(true, Ordering::Release);
+        let mut active = slot.lock().unwrap_or_else(|e| e.into_inner());
+        if active
+            .as_ref()
+            .is_some_and(|state| std::ptr::eq(state.as_ref(), self))
+        {
+            *active = None;
+        }
+    }
+
     async fn stop_locked(&self, lifecycle: &mut Lifecycle) -> Result<(), RecordingError> {
         if !lifecycle.begin_stop()? {
             return Ok(());
@@ -286,7 +293,9 @@ impl RecordingState {
             self.command("Page.stopScreenRecording", &Empty {}).await;
         match result {
             Ok(result) => {
-                lifecycle.add_stream(result.stream);
+                if lifecycle.streams[0].as_ref() != Some(&result.stream) {
+                    lifecycle.streams[1] = Some(result.stream);
+                }
                 lifecycle.stopped = true;
                 lifecycle.phase = Phase::Streaming;
                 Ok(())
@@ -320,24 +329,19 @@ impl RecordingState {
         }
         // Both start and stop declare a stream. Close every distinct handle even
         // when stop failed, without ever reissuing a potentially dispatched stop.
-        let mut index = 0;
-        while index < lifecycle.streams.len() {
-            let closed: Result<serde_json::Value, _> = self
-                .command(
-                    "IO.close",
-                    &IoClose {
-                        handle: &lifecycle.streams[index],
-                    },
-                )
-                .await;
+        for stream in &mut lifecycle.streams {
+            let Some(handle) = stream.as_deref() else {
+                continue;
+            };
+            let closed: Result<serde_json::Value, _> =
+                self.command("IO.close", &IoClose { handle }).await;
             if let Err(error) = closed {
                 failure = Some(RecordingError::CleanupUncertain(match failure {
                     Some(previous) => format!("{previous}; IO.close: {error}"),
                     None => format!("IO.close: {error}"),
                 }));
-                index += 1;
             } else {
-                lifecycle.streams.remove(index);
+                *stream = None;
             }
         }
         if let Some(error) = failure {
@@ -345,15 +349,7 @@ impl RecordingState {
             lifecycle.failure = Some(error.clone());
             return Err(error);
         }
-        lifecycle.phase = Phase::Closed;
-        self.finished.store(true, Ordering::Release);
-        let mut active = slot.lock().unwrap_or_else(|e| e.into_inner());
-        if active
-            .as_ref()
-            .is_some_and(|state| std::ptr::eq(state.as_ref(), self))
-        {
-            *active = None;
-        }
+        self.finish_locked(lifecycle, slot);
         Ok(())
     }
 }
@@ -470,7 +466,9 @@ impl NativeRecording {
                 }
                 let stream = lifecycle
                     .streams
-                    .last()
+                    .iter()
+                    .rev()
+                    .find_map(Option::as_deref)
                     .ok_or_else(|| RecordingError::InvalidState("native stream missing".into()))?;
                 let response: IoReadResult = state
                     .command(
@@ -711,9 +709,7 @@ impl Page {
                 }
             });
             if let Err(error) = preflight {
-                lifecycle.phase = Phase::Closed;
-                state.finished.store(true, Ordering::Release);
-                *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                state.finish_locked(&mut lifecycle, &slot);
                 return Err(error);
             }
             lifecycle.start_dispatched = true;
@@ -721,7 +717,7 @@ impl Page {
                 state.command("Page.startScreenRecording", &params).await;
             match started {
                 Ok(result) => {
-                    lifecycle.add_stream(result.stream);
+                    lifecycle.streams[0] = Some(result.stream);
                     lifecycle.phase = Phase::Running;
                     if let Err(error) = state.check_operable() {
                         let cleanup = state.cleanup_locked(&mut lifecycle, &slot).await;
@@ -741,13 +737,10 @@ impl Page {
                 }
                 Err(RecordingError::Core(error @ Error::Cdp { .. })) => {
                     // Chromium resets media_recorder_ on every failed Start result.
-                    lifecycle.phase = Phase::Closed;
-                    state.finished.store(true, Ordering::Release);
-                    *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    state.finish_locked(&mut lifecycle, &slot);
                     Err(classify_start(error))
                 }
                 Err(error) => {
-                    lifecycle.failure = Some(error.clone());
                     let cleanup = state.cleanup_locked(&mut lifecycle, &slot).await;
                     Err(match cleanup {
                         Ok(()) => error,

@@ -622,6 +622,7 @@ async fn typed_capture_formats_crop_and_full_page_preserve_document_metrics() {
             ..Default::default()
         };
         let viewport = page.screenshot_with_options(&base).await.unwrap();
+        assert_eq!(page.evaluate::<Value>(state).await.unwrap(), before);
         let pixels = screenshot_pixels(&page, &viewport, mime_type).await;
         assert_eq!(
             (pixels["width"].as_u64(), pixels["height"].as_u64()),
@@ -642,6 +643,7 @@ async fn typed_capture_formats_crop_and_full_page_preserve_document_metrics() {
             })
             .await
             .unwrap();
+        assert_eq!(page.evaluate::<Value>(state).await.unwrap(), before);
         let pixels = screenshot_pixels(&page, &crop, mime_type).await;
         assert_eq!(
             (pixels["width"].as_u64(), pixels["height"].as_u64()),
@@ -667,6 +669,7 @@ async fn typed_capture_formats_crop_and_full_page_preserve_document_metrics() {
         assert_eq!(page.evaluate::<Value>(state).await.unwrap(), before);
     }
     page.set_viewport(240, 160, 1.5).await.unwrap();
+    let before: Value = page.evaluate(state).await.unwrap();
     let crop = page
         .screenshot_with_options(&ScreenshotOptions {
             clip: Some(ScreenshotClip {
@@ -679,6 +682,7 @@ async fn typed_capture_formats_crop_and_full_page_preserve_document_metrics() {
         })
         .await
         .unwrap();
+    assert_eq!(page.evaluate::<Value>(state).await.unwrap(), before);
     let pixels = screenshot_pixels(&page, &crop, "image/png").await;
     assert_eq!(
         (pixels["width"].as_u64(), pixels["height"].as_u64()),

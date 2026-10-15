@@ -70,6 +70,10 @@ impl Transport {
 
             // Check if response or event
             if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
+                let Some(sender) = lock_pending(&pending).remove(&id) else {
+                    tracing::trace!("Response for unknown id: {}", id);
+                    continue;
+                };
                 let result = if let Some(error) = msg.get("error") {
                     Err(Error::cdp(
                         msg.get("method")
@@ -82,17 +86,18 @@ impl Transport {
                             .unwrap_or("unknown"),
                     ))
                 } else {
-                    Ok(msg.get_mut("result").map(Value::take).unwrap_or(json!({})))
+                    Ok(msg
+                        .get_mut("result")
+                        .map(Value::take)
+                        .unwrap_or_else(|| json!({})))
                 };
 
-                let sender = lock_pending(&pending).remove(&id);
-                if let Some(sender) = sender {
-                    drop(sender.send(result));
-                } else {
-                    tracing::trace!("Response for unknown id: {}", id);
-                }
+                drop(sender.send(result));
             } else if let Some(Value::String(method)) = msg.get_mut("method").map(Value::take) {
-                let mut params = msg.get_mut("params").map(Value::take).unwrap_or(json!({}));
+                let mut params = msg
+                    .get_mut("params")
+                    .map(Value::take)
+                    .unwrap_or_else(|| json!({}));
                 let session_id = match msg.get_mut("sessionId").map(Value::take) {
                     Some(Value::String(session)) => Some(session),
                     _ => None,

@@ -233,19 +233,22 @@ fn route_response_pause(
     if params.get("responseStatusCode").is_none() && params.get("responseErrorReason").is_none() {
         return false;
     }
+    let Some(session) = session else {
+        return false;
+    };
     let routes = routes.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(route) = session.and_then(|s| routes.get(s)) {
-        match route.events.try_reserve() {
-            Ok(permit) => {
-                permit.send(params.take());
-                return true;
-            }
-            Err(_) => {
-                route.dropped.fetch_add(1, Ordering::Relaxed);
-            }
+    let Some(route) = routes.get(session) else {
+        return false;
+    };
+    let permit = match route.events.try_reserve() {
+        Ok(permit) => permit,
+        Err(_) => {
+            route.dropped.fetch_add(1, Ordering::Relaxed);
+            return false;
         }
-    }
-    false
+    };
+    permit.send(params.take());
+    true
 }
 
 #[cfg(test)]

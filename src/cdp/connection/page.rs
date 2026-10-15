@@ -61,10 +61,8 @@ impl ViewportState {
             return Err(Error::transport("Viewport session is disconnected"));
         }
         if let Some(controller) = &self.controller {
-            if let Some(transport) = controller.transport.upgrade() {
-                if !transport.is_closed() {
-                    return Ok((transport, Arc::clone(&controller.session_id)));
-                }
+            if let Some(transport) = controller.transport.upgrade().filter(|t| !t.is_closed()) {
+                return Ok((transport, Arc::clone(&controller.session_id)));
             }
         }
         let session_id: Arc<str> = if self.controller.is_some() {
@@ -372,27 +370,28 @@ impl Session {
                     height: clip.height,
                     scale: 1.0,
                 })
-            } else if options.full_page || viewport.metrics.is_some() {
+            } else if options.full_page {
                 let layout: PageGetLayoutMetricsResult = transport
                     .send_to_session(&session_id, "Page.getLayoutMetrics", &Empty {})
                     .await?;
-                if options.full_page {
-                    Some(PageViewport {
-                        x: layout.css_content_size.x,
-                        y: layout.css_content_size.y,
-                        width: layout.css_content_size.width,
-                        height: layout.css_content_size.height,
-                        scale: 1.0,
-                    })
-                } else {
-                    viewport.metrics.as_ref().map(|metrics| PageViewport {
-                        x: layout.css_visual_viewport.page_x,
-                        y: layout.css_visual_viewport.page_y,
-                        width: f64::from(metrics.width),
-                        height: f64::from(metrics.height),
-                        scale: 1.0,
-                    })
-                }
+                Some(PageViewport {
+                    x: layout.css_content_size.x,
+                    y: layout.css_content_size.y,
+                    width: layout.css_content_size.width,
+                    height: layout.css_content_size.height,
+                    scale: 1.0,
+                })
+            } else if let Some(metrics) = &viewport.metrics {
+                let layout: PageGetLayoutMetricsResult = transport
+                    .send_to_session(&session_id, "Page.getLayoutMetrics", &Empty {})
+                    .await?;
+                Some(PageViewport {
+                    x: layout.css_visual_viewport.page_x,
+                    y: layout.css_visual_viewport.page_y,
+                    width: f64::from(metrics.width),
+                    height: f64::from(metrics.height),
+                    scale: 1.0,
+                })
             } else {
                 None
             };

@@ -198,13 +198,15 @@ requirement. Output is MP4 with a Chrome-selected codec, not guaranteed H.264.
 Audio is not promised. Maximum dimensions must be positive; FPS must be an integer
 from 1 through 120 and is a ceiling, not deterministic fixed-FPS playback.
 
-Chrome for Testing 155.0.8059.39 has a reproduced native-recorder defect: a
-sub-tick tail-frame interval can become a zero MP4 sample duration, producing
-duplicate terminal decoding timestamps. This also occurs through direct CDP
-without Eoka. Eoka preserves Chrome's original stream; it does not rewrite
-timestamps or transcode. A decodable file is not proof of strictly increasing
-timestamps. Release qualification must inspect original packet timestamps and
-decoder diagnostics; the paired npm prerelease remains blocked on this defect.
+Chrome for Testing 155.0.8059.39 can emit zero MP4 sample durations and duplicate
+decoding timestamps. This also occurs through direct CDP without Eoka. The core
+preserves Chrome's original stream; it does not rewrite timestamps or transcode.
+A decodable file is not proof of strictly increasing timestamps. Native recording
+remains experimental: consumers must inspect packet timestamps and decoder
+diagnostics. The paired Node sidecar separately applies bounded MP4 timing
+corrections without transcoding before publication and qualifies the resulting
+timestamps and diagnostics. This is not an upstream Chrome fix or a guarantee
+about the core's raw stream.
 
 `stop()` enters the output stream; `read_chunk()` returns at most 64 KiB decoded
 bytes with explicit EOF, and `close()` releases the stream. `cancel()` discards an
@@ -619,6 +621,14 @@ patch artifacts, and Chrome temporary files. `TMPDIR`, `TMP`, and `TEMP` are set
 only on child commands, never on the calling process. An explicit runtime root
 does not depend on the default temporary directory. The caller's root and any
 explicit `user_data_dir` are preserved, including existing profile permissions.
+
+On Unix, patch-cache directories must belong to the effective user and grant no
+group/other permissions (new directories use 0700). Their canonical ancestors
+must belong to that user or root; group/other-writable ancestors require sticky
+protection, as with `/tmp`. Unsafe existing directories or links are rejected
+without changing permissions. Choose a trusted `runtime_dir` or temporary root.
+macOS bundle links are checked after relocation and before cached reuse so they
+cannot reach outside the owned copy.
 
 ```rust
 let browser = Browser::launch_with(|config| {

@@ -240,8 +240,9 @@ fn wait_for_chrome_devtools_url(
             Ok(Err(stderr)) => {
                 let status = child
                     .try_wait()
-                    .map(|status| status.map(|s| s.to_string()))
-                    .unwrap_or(None)
+                    .ok()
+                    .flatten()
+                    .map(|status| status.to_string())
                     .unwrap_or_else(|| "still running".to_string());
                 return Err(Error::Launch(format!(
                     "Failed waiting for Chrome DevTools URL: process {}; {}",
