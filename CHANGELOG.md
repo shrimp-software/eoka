@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Remove stale `DevToolsActivePort` metadata before spawning Chrome with an
+  automatically assigned debug port, so caller-owned profiles can reopen after
+  close without connecting to the previous process's endpoint. Preserve profile
+  data, existing-browser attachment and explicit-port behavior.
 - Recover CDP messages containing lone surrogate or truncated Unicode escapes
   in binary POST metadata, JavaScript results, command errors and auth events.
   Fetch interception retains normal session routing and header policy without

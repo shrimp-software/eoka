@@ -31,6 +31,13 @@ async fn failed_launch(root: &Path, sandbox: bool, caller_profile: bool) {
     let profile = root.join("caller-profile");
     std::fs::create_dir_all(&profile).unwrap();
     std::fs::write(profile.join("keep"), "caller data").unwrap();
+    if caller_profile {
+        std::fs::write(
+            profile.join("DevToolsActivePort"),
+            "9\n/devtools/browser/stale\n",
+        )
+        .unwrap();
+    }
     let source = root.join("chrome-fixture");
     let evidence = root.join("launch.txt");
     let body = format!("#!/bin/sh\nif [ \"$1\" = --version ]; then printf 'Chrome 155.0.8059.39\\n'; exit 0; fi\nprintf '%s\\n' \"$TMPDIR\" \"$TMP\" \"$TEMP\" \"$@\" > '{}'\nprintf 'fixture launch failure\\n' >&2\nexit 23\n", evidence.display());
@@ -336,4 +343,53 @@ async fn concurrent_owned_launches_keep_independent_runtime_state() {
     );
     second.close().await.unwrap();
     assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+}
+
+#[tokio::test]
+#[ignore = "requires headed Chrome and DISPLAY; verifies persistent profile restarts"]
+async fn persistent_profile_restarts_preserve_storage_and_caller_files() {
+    let chrome = eoka::stealth::find_chrome().unwrap();
+    for headless in [true, false] {
+        let root = Directory::new();
+        let profile = root.0.join("profile");
+        let runtime = root.0.join("runtime");
+        let document = root.0.join("fixture.html");
+        std::fs::create_dir(&profile).unwrap();
+        std::fs::write(profile.join("keep"), "caller data").unwrap();
+        std::fs::write(
+            profile.join("DevToolsActivePort"),
+            "9\n/devtools/browser/stale\n",
+        )
+        .unwrap();
+        std::fs::write(&document, "<title>Persistent profile fixture</title>").unwrap();
+        let config = StealthConfig {
+            chrome_path: Some(chrome.to_string_lossy().into_owned()),
+            runtime_dir: Some(runtime.to_string_lossy().into_owned()),
+            user_data_dir: Some(profile.to_string_lossy().into_owned()),
+            headless,
+            ..Default::default()
+        };
+        for launch in 0..2 {
+            let browser = Browser::launch_with_config(config.clone()).await.unwrap();
+            assert!(browser.owns_process(), "restart must own a new Chrome");
+            let page = browser
+                .new_page(&format!("file://{}", document.display()))
+                .await
+                .unwrap();
+            let retained = page
+                .evaluate::<Option<String>>("localStorage.getItem('restart-marker')")
+                .await
+                .unwrap();
+            assert_eq!(retained.as_deref(), (launch > 0).then_some("retained"));
+            page.execute("localStorage.setItem('restart-marker', 'retained')")
+                .await
+                .unwrap();
+            browser.close().await.unwrap();
+            assert_eq!(
+                std::fs::read_to_string(profile.join("keep")).unwrap(),
+                "caller data"
+            );
+            assert_eq!(std::fs::read_dir(&runtime).unwrap().count(), 0);
+        }
+    }
 }
