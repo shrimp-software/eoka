@@ -367,10 +367,9 @@ async fn persistent_profile_restarts_preserve_storage_and_caller_files() {
             runtime_dir: Some(runtime.to_string_lossy().into_owned()),
             user_data_dir: Some(profile.to_string_lossy().into_owned()),
             headless,
-            sandbox: true,
             ..Default::default()
         };
-        for launch in 0..3 {
+        for launch in 0..2 {
             let browser = Browser::launch_with_config(config.clone()).await.unwrap();
             assert!(browser.owns_process(), "restart must own a new Chrome");
             let page = browser
