@@ -138,6 +138,17 @@ fn launch_chrome_impl(
     if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
         return Err(Error::Launch("Browser launch was cancelled".into()));
     }
+    if let Some(profile) = fallback_profile_dir {
+        // Chrome leaves this file behind on exit. Discovery must only consume
+        // the endpoint written by the process we are about to spawn.
+        if let Err(error) = std::fs::remove_file(profile.join("DevToolsActivePort")) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(Error::Launch(format!(
+                    "Failed to remove stale DevToolsActivePort before launch: {error}"
+                )));
+            }
+        }
+    }
     let mut guard = ChildCleanupGuard::new(
         cmd.spawn()
             .map_err(|e| Error::Launch(format!("Failed to launch Chrome: {}", e)))?,
