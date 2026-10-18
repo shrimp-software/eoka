@@ -1,4 +1,3 @@
-
 const navProps = {
     languages: { get: () => Object.freeze(__EOKA_LANGUAGES__) },
     language: { get: () => '__EOKA_LANGUAGE__' },
@@ -8,6 +7,16 @@ const navProps = {
     deviceMemory: { get: () => __EOKA_MEM__ },
     maxTouchPoints: { get: () => 0 }
 };
+
+// Chrome on Linux exposes no `navigator.deviceMemory` (the Device Memory API
+// is not implemented for that platform). Defining it on a Linux identity adds
+// a property stock Linux Chrome never has, which is exactly what a reflection
+// sweep looks for. Windows and macOS Chrome do expose it, so keep the
+// fingerprint value there.
+if (/Linux/i.test('__EOKA_PLATFORM__')) {
+    delete navProps.deviceMemory;
+}
+
 for (const [prop, desc] of Object.entries(navProps)) {
     _eoka_mark(desc.get, 'get ' + prop);
     Object.defineProperty(Navigator.prototype, prop, {
@@ -16,3 +25,22 @@ for (const [prop, desc] of Object.entries(navProps)) {
         enumerable: true
     });
 }
+
+// `navigator.cookieEnabled` is native and truthful. Only repair the impossible
+// pair "cookies disabled but a cookie write succeeds" (some embedded/automation
+// contexts report false while the cookie jar works); never override a browser
+// where cookies are genuinely disabled.
+try {
+    if (navigator.cookieEnabled === false) {
+        const probe = '__eoka_cookie_probe__';
+        document.cookie = probe + '=1; path=/';
+        if (document.cookie.indexOf(probe) !== -1) {
+            Object.defineProperty(Navigator.prototype, 'cookieEnabled', {
+                get: _eoka_mark(function () { return true; }, 'get cookieEnabled'),
+                configurable: true,
+                enumerable: true
+            });
+        }
+        document.cookie = probe + '=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/';
+    }
+} catch(e) {}

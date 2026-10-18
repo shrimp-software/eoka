@@ -135,6 +135,37 @@ fn test_chrome_object_matches_stock() {
     );
 }
 
+// Audit regression: Linux Chrome exposes neither `navigator.deviceMemory` nor
+// `navigator.bluetooth`. Claiming either on a Linux identity adds properties
+// stock Linux Chrome never has, which reflection sweeps look for.
+#[test]
+fn test_linux_identity_does_not_claim_linux_missing_apis() {
+    let linux_fp = Fingerprint::resolve(
+        Some("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
+        None,
+    );
+    let script = build_evasion_script_for(&StealthConfig::default(), &linux_fp);
+    assert!(
+        script.contains("if (/Linux/i.test('Linux x86_64')) {\n    delete navProps.deviceMemory;"),
+        "Linux script must remove the deviceMemory claim before defining the prototype"
+    );
+    assert!(
+        script.contains("if (!/Linux/i.test('Linux x86_64') && !navigator.bluetooth)"),
+        "Linux script must leave navigator.bluetooth absent"
+    );
+
+    // Windows Chrome does expose deviceMemory, so the claim stays.
+    let windows_fp = Fingerprint::resolve(
+        Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
+        None,
+    );
+    let windows_script = build_evasion_script_for(&StealthConfig::default(), &windows_fp);
+    assert!(
+        windows_script.contains("deviceMemory: { get: () => "),
+        "Windows script must keep the deviceMemory claim"
+    );
+}
+
 // Audit regression: the old matchMedia wrapper reported matches:false for
 // BOTH prefers-reduced-motion variants — an impossible state (one always
 // matches in real Chrome) — and returned a non-MediaQueryList object.

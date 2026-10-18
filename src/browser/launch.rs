@@ -82,6 +82,13 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
             "--ozone-override-screen-size={},{}",
             config.viewport_width, config.viewport_height
         ),
+        // Xvfb and headless sessions have no pointing device, so Blink
+        // reports `(pointer: none)` and `(hover: none)`. Desktop bot checks
+        // (Cloudflare Turnstile included) cross-check the pointer/hover media
+        // queries against a desktop UA. Pin the media-query state to what a
+        // real desktop browser reports instead of wrapping `matchMedia` in
+        // JS, which leaves a detectable proxy/identity behind.
+        "--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2".into(),
     ];
     if !config.sandbox {
         args.push("--no-sandbox".into());
@@ -508,6 +515,19 @@ mod try_attach_existing_tests {
         let fp = Fingerprint::random();
         let args = stealth_args(&config, &fp);
         assert!(args.iter().any(|arg| arg == "--disable-field-trial-config"));
+    }
+
+    // Regression: Xvfb/headless has no pointing device, so Blink reports
+    // `(pointer: none)` / `(hover: none)`. Desktop bot checks cross-check those
+    // against a desktop UA; the launch args must pin the desktop state.
+    #[test]
+    fn stealth_args_pin_desktop_pointer_and_hover() {
+        let config = StealthConfig::default();
+        let fp = Fingerprint::random();
+        let args = stealth_args(&config, &fp);
+        assert!(args.iter().any(|arg| {
+            arg == "--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2"
+        }));
     }
 
     // Privacy regression: profile dirs hold the cookie store and previously
