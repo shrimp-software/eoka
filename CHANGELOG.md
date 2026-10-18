@@ -2,7 +2,35 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.7.1] - Unreleased
+## [0.7.2] - Unreleased
+
+### Fixed
+
+- Stop scrambling `webdriver` in the Chrome binary. Chrome derives the
+  `Navigator.prototype.webdriver` accessor name from that literal, so patching
+  it in place exposed an `ewdbirevr` property on every reflection sweep. The JS
+  evasion already redefines the property; patched copies are re-created via a
+  schema-versioned cache key.
+- Headless media-query state: launch Chrome with
+  `--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2`
+  so `(pointer: fine)` / `(hover: hover)` match a desktop browser instead of
+  reporting the Xvfb-only `(pointer: none)` / `(hover: none)` pair.
+- Linux identities no longer claim `navigator.bluetooth`; stock Linux Chrome
+  does not expose it, and the extra property was a reflection-visible platform
+  tell.
+- `navigator.deviceMemory` and `navigator.bluetooth` are only spoofed in secure
+  contexts, matching their `[SecureContext]` exposure, so `http:` pages no
+  longer gain properties stock Chrome omits there.
+- Spoofed Bluetooth and Permissions status methods are marked as native and
+  use method syntax, so `toString()`, `prototype` and `new` probes see
+  interface methods rather than script functions.
+- Native-consistency repairs in the headless evasion, applied only when
+  headless Chrome reports a state stock Chrome cannot: an empty
+  `PerformanceObserver.supportedEntryTypes`, a top-level `https:` page with
+  `isSecureContext === false`, a leaked `window.sandbox`, or `cookieEnabled`
+  false while cookie writes succeed.
+
+## [0.7.1] - 2026-10-14
 
 ### Changed
 
@@ -50,7 +78,7 @@ All notable changes to this project will be documented in this file.
   socket setup outside virtual-time phases, establish actual write backpressure
   within time/byte bounds, and drain queued frames before requiring termination.
 
-## [0.7.0] - Unreleased
+## [0.7.0] - 2026-10-14
 
 ### Added
 

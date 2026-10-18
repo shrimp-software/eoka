@@ -30,7 +30,9 @@ pub const PLUGINS_EVASION: &str = include_str!("evasions/scripts/plugins.js");
 /// Navigator properties (languages, platform, hardware) filled from the fingerprint.
 pub const NAVIGATOR_PROPS_EVASION: &str = include_str!("evasions/scripts/navigator_props.js");
 
-/// Headless detection bypass
+/// Headless detection bypass. Screen/window metrics plus native-consistency
+/// repairs (PerformanceObserver entry types, isSecureContext, sandbox) that
+/// only apply when headless Chrome reports a state stock Chrome cannot.
 pub const HEADLESS_EVASION: &str = include_str!("evasions/scripts/headless.js");
 
 /// Battery API fix - Proxy over the real BatteryManager with spoofed values.
@@ -55,7 +57,9 @@ pub const SPEECH_EVASION: &str = include_str!("evasions/scripts/speech.js");
 /// seed, so IDs are stable per identity and never shared across sessions.
 pub const MEDIA_DEVICES_EVASION: &str = include_str!("evasions/scripts/media_devices.js");
 
-/// Bluetooth API - headless throws error, real Chrome returns object
+/// Bluetooth API - only filled on platforms whose Chrome ships Web Bluetooth.
+/// Stock Linux Chrome exposes no `navigator.bluetooth`, so claiming it on a
+/// Linux identity is a platform tell; the script leaves that platform untouched.
 pub const BLUETOOTH_EVASION: &str = include_str!("evasions/scripts/bluetooth.js");
 
 /// System-font probing via `document.fonts.check(font, text)`: stock Chrome

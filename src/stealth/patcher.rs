@@ -37,10 +37,12 @@ static PATCH_PATTERNS: &[PatchPattern] = &[
         pattern: b"cdc_",
         strategy: PatchStrategy::RandomizePrefix,
     },
-    PatchPattern {
-        pattern: b"webdriver",
-        strategy: PatchStrategy::Scramble,
-    },
+    // Do NOT scramble the `webdriver` literal. Chrome builds the
+    // `Navigator.prototype.webdriver` accessor name from that string, so
+    // scrambling it in the binary renames the accessor to `ewdbirevr` and
+    // leaves an impossible property visible to every reflection sweep. The
+    // JS evasion (`webdriver.js`) already redefines the property on the same
+    // prototype, which is the supported way to hide it.
     PatchPattern {
         pattern: b"--enable-automation",
         strategy: PatchStrategy::Nullify,
@@ -112,6 +114,12 @@ fn get_verify_matcher() -> Result<&'static AhoCorasick> {
     build_matcher(&VERIFY_MATCHER, false)
 }
 
+/// Bumped whenever `PATCH_PATTERNS` changes in a way that makes previously
+/// patched copies invalid. It participates in the cache key, so stale copies
+/// (for example ones where `webdriver` was scrambled into `ewdbirevr`) are
+/// never reused.
+const PATCHER_SCHEMA_VERSION: u64 = 2;
+
 /// Stable temp-subdir name for the patched copy, keyed on the original binary's
 /// identity (path + size + mtime) so the cache hits across runs.
 fn stable_cache_name(original_path: &Path) -> String {
@@ -119,6 +127,7 @@ fn stable_cache_name(original_path: &Path) -> String {
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
 
+    PATCHER_SCHEMA_VERSION.hash(&mut hasher);
     let abs = fs::canonicalize(original_path).unwrap_or_else(|_| original_path.to_path_buf());
     abs.hash(&mut hasher);
 
@@ -1032,10 +1041,19 @@ mod tests {
 
     #[test]
     fn test_aho_corasick_patterns() {
-        let test_data = b"$cdc_test webdriver HeadlessChrome";
+        let test_data = b"$cdc_test devtoolsw HeadlessChrome webdriver";
         let ac = get_pattern_matcher().expect("pattern matcher should build");
         let matches: Vec<_> = ac.find_iter(test_data).collect();
-        assert!(matches.len() >= 3);
+        assert!(
+            matches.len() >= 3,
+            "every rewritten literal except webdriver must match"
+        );
+        assert!(
+            !matches
+                .iter()
+                .any(|m| &test_data[m.start()..m.end()] == b"webdriver"),
+            "webdriver must not be a rewrite pattern"
+        );
     }
 
     #[test]
@@ -1043,8 +1061,12 @@ mod tests {
         let ac = get_verify_matcher().expect("verify matcher should build");
         // Patterns that patching actually rewrites must be flagged by the
         // verification matcher (an unpatched sample should fail verification).
-        assert!(ac.is_match(b"webdriver"), "should match webdriver");
+        assert!(ac.is_match(b"devtoolsw"), "should match devtoolsw");
         assert!(ac.is_match(b"$cdc_"), "should match $cdc_");
+        assert!(
+            !ac.is_match(b"webdriver"),
+            "webdriver is no longer rewritten and must not fail verification"
+        );
     }
 
     #[test]
@@ -1074,17 +1096,39 @@ mod tests {
 
         let patcher = ChromePatcher::new(&fake).expect("patcher should construct");
 
-        let mut buf = b"prefix webdriver suffix".to_vec();
+        let mut buf = b"prefix devtoolsw suffix".to_vec();
         let original_len = buf.len();
         let count = patcher.apply_patches(&mut buf).expect("apply_patches");
 
         // Scramble strategy swaps bytes in place: length is unchanged.
         assert_eq!(buf.len(), original_len);
-        assert!(count >= 1, "webdriver should have been patched");
-        // The literal "webdriver" must no longer be present verbatim.
+        assert!(count >= 1, "devtoolsw should have been patched");
+        // The literal "devtoolsw" must no longer be present verbatim.
         assert!(
-            !buf.windows(b"webdriver".len()).any(|w| w == b"webdriver"),
-            "webdriver should have been scrambled"
+            !buf.windows(b"devtoolsw".len()).any(|w| w == b"devtoolsw"),
+            "devtoolsw should have been scrambled"
+        );
+
+        let _ = fs::remove_file(&fake);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_webdriver_literal_is_not_rewritten() {
+        // Scrambling this literal renames Chrome's native
+        // `Navigator.prototype.webdriver` accessor to `ewdbirevr`, which is a
+        // reflection-visible automation marker. The JS evasion handles it.
+        let dir = std::env::temp_dir().join(format!("eoka-patcher-test-wd-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("fake-chrome");
+        fs::write(&fake, b"placeholder").unwrap();
+        let patcher = ChromePatcher::new(&fake).expect("patcher should construct");
+
+        let mut buf = b"prefix webdriver suffix".to_vec();
+        patcher.apply_patches(&mut buf).expect("apply_patches");
+        assert!(
+            buf.windows(b"webdriver".len()).any(|w| w == b"webdriver"),
+            "webdriver literal must survive binary patching"
         );
 
         let _ = fs::remove_file(&fake);
@@ -1107,7 +1151,7 @@ mod cache_directory_tests {
         fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
         fs::set_permissions(&private_root, fs::Permissions::from_mode(0o700)).unwrap();
         let executable = runtime.path().join("chrome");
-        let original = b"\x7fELF webdriver";
+        let original = b"\x7fELF devtoolsw";
         fs::write(&executable, original).unwrap();
 
         assert!(
@@ -1124,7 +1168,7 @@ mod cache_directory_tests {
         let source = runtime.path().join("source");
         fs::create_dir(&source).unwrap();
         let executable = source.join("chrome");
-        let original = b"\x7fELF webdriver";
+        let original = b"\x7fELF devtoolsw";
         fs::write(&executable, original).unwrap();
         let patcher = ChromePatcher::new_with_root(&executable, runtime.path()).unwrap();
         let cache = patcher.cache_directory().unwrap();
@@ -1142,7 +1186,7 @@ mod cache_directory_tests {
     fn existing_non_private_cache_directory_is_rejected_without_chmod() {
         let runtime = RuntimeDirectory::create(None).unwrap();
         let executable = runtime.path().join("chrome");
-        let original = b"\x7fELF webdriver";
+        let original = b"\x7fELF devtoolsw";
         fs::write(&executable, original).unwrap();
         let patcher = ChromePatcher::new_with_root(&executable, runtime.path()).unwrap();
         let cache = patcher.cache_directory().unwrap();
@@ -1175,7 +1219,7 @@ mod runtime_tests {
         let source_dir = root.path().join("source");
         fs::create_dir(&source_dir).unwrap();
         let source = source_dir.join("chrome");
-        let original = b"\x7fELF prefix webdriver suffix";
+        let original = b"\x7fELF prefix devtoolsw suffix";
         fs::write(&source, original).unwrap();
         fs::write(source_dir.join("icudtl.dat"), b"dependency").unwrap();
         let runtimes: Vec<_> = (0..8)
@@ -1224,7 +1268,7 @@ mod runtime_tests {
         fs::write(&wrapper, b"#!/bin/sh\nexit 1\n").unwrap();
         assert!(ChromePatcher::new_in_runtime(&wrapper, runtime.path()).is_err());
         let binary = runtime.path().join("chrome");
-        fs::write(&binary, b"\x7fELF webdriver").unwrap();
+        fs::write(&binary, b"\x7fELF devtoolsw").unwrap();
         assert_eq!(resolve_to_elf(&wrapper, true), binary);
     }
 }
@@ -1242,7 +1286,7 @@ mod macos_bundle_tests {
         let source = applications.join("Chrome.app");
         let executable = source.join("Contents/MacOS/Chrome");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        let original = b"not a Mach-O binary webdriver";
+        let original = b"not a Mach-O binary devtoolsw";
         fs::write(&executable, original).unwrap();
         let resource = source.join("resource");
         fs::write(&resource, b"original bundle resource").unwrap();
@@ -1270,7 +1314,7 @@ mod macos_bundle_tests {
         let frameworks = source.join("Contents/Frameworks/Chrome.framework");
         fs::create_dir_all(frameworks.join("Versions/A")).unwrap();
         fs::create_dir_all(source.join("Contents/MacOS")).unwrap();
-        fs::write(source.join("Contents/MacOS/Chrome"), b"webdriver").unwrap();
+        fs::write(source.join("Contents/MacOS/Chrome"), b"devtoolsw").unwrap();
         let resource = frameworks.join("Versions/A/resource");
         fs::write(&resource, b"verified resource").unwrap();
         symlink("A", frameworks.join("Versions/Current")).unwrap();
@@ -1334,7 +1378,7 @@ mod macos_bundle_tests {
         let source = runtime.path().join("source.app");
         let executable = source.join("Contents/MacOS/Chrome");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        let original = b"not a Mach-O binary webdriver";
+        let original = b"not a Mach-O binary devtoolsw";
         fs::write(&executable, original).unwrap();
         let source = fs::canonicalize(source).unwrap();
         let resource = source.join("resource");
@@ -1387,7 +1431,7 @@ mod macos_bundle_tests {
         let runtime = RuntimeDirectory::create(None).unwrap();
         let executable = runtime.path().join("invalid.app/Contents/MacOS/Chrome");
         fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        let original = b"not a Mach-O binary webdriver";
+        let original = b"not a Mach-O binary devtoolsw";
         fs::write(&executable, original).unwrap();
         File::options()
             .write(true)
