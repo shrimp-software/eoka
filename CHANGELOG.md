@@ -54,15 +54,18 @@ All notable changes to this project will be documented in this file.
   `--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=2,availableHoverTypes=2`
   so `(pointer: fine)` / `(hover: hover)` match a desktop browser instead of
   reporting the Xvfb-only `(pointer: none)` / `(hover: none)` pair.
-- Linux identities no longer claim `navigator.deviceMemory` or
-  `navigator.bluetooth`; stock Linux Chrome exposes neither, and the extra
-  properties were reflection-visible platform tells.
-- Spoofed Bluetooth and Permissions status methods are marked as native so
-  `toString()`/descriptor probes see interface methods rather than arrow
-  function source.
+- Linux identities no longer claim `navigator.bluetooth`; stock Linux Chrome
+  does not expose it, and the extra property was a reflection-visible platform
+  tell.
+- `navigator.deviceMemory` and `navigator.bluetooth` are only spoofed in secure
+  contexts, matching their `[SecureContext]` exposure, so `http:` pages no
+  longer gain properties stock Chrome omits there.
+- Spoofed Bluetooth and Permissions status methods are marked as native and
+  use method syntax, so `toString()`, `prototype` and `new` probes see
+  interface methods rather than script functions.
 - Native-consistency repairs in the headless evasion, applied only when
   headless Chrome reports a state stock Chrome cannot: an empty
-  `PerformanceObserver.supportedEntryTypes`, an `https:` page with
+  `PerformanceObserver.supportedEntryTypes`, a top-level `https:` page with
   `isSecureContext === false`, a leaked `window.sandbox`, or `cookieEnabled`
   false while cookie writes succeed.
 

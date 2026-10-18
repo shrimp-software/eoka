@@ -13,13 +13,13 @@ try {
     if (typeof PerformanceObserver === 'function') {
         const types = PerformanceObserver.supportedEntryTypes;
         if (!Array.isArray(types) || types.length === 0) {
+            // Native returns the same frozen array on every read.
+            const desktop = Object.freeze(['element', 'event', 'first-input',
+                'interaction-contentful-paint', 'largest-contentful-paint', 'layout-shift',
+                'long-animation-frame', 'longtask', 'mark', 'measure', 'navigation', 'paint',
+                'resource', 'soft-navigation', 'visibility-state']);
             Object.defineProperty(PerformanceObserver, 'supportedEntryTypes', {
-                get: _eoka_mark(function () {
-                    return ['element', 'event', 'first-input', 'interaction-contentful-paint',
-                        'largest-contentful-paint', 'layout-shift', 'long-animation-frame',
-                        'longtask', 'mark', 'measure', 'navigation', 'paint', 'resource',
-                        'soft-navigation', 'visibility-state'];
-                }, 'get supportedEntryTypes'),
+                get: _eoka_mark(() => desktop, 'get supportedEntryTypes'),
                 configurable: true
             });
         }
@@ -28,11 +28,15 @@ try {
 
 // `isSecureContext` must stay native: it follows the scheme (and sandbox
 // flags), so forcing it true on an http:// page would contradict
-// location.protocol. Only repair the impossible https-but-insecure state.
+// location.protocol. Only repair the impossible https-but-insecure state, and
+// only in the top-level frame: an https iframe under an http (or sandboxed)
+// ancestor is genuinely not a secure context and lacks every [SecureContext]
+// API, so claiming true there would contradict the rest of the frame.
 try {
-    if (window.isSecureContext === false && window.location.protocol === 'https:') {
+    if (window.isSecureContext === false && window.location.protocol === 'https:' &&
+            window.top === window) {
         Object.defineProperty(window, 'isSecureContext', {
-            get: _eoka_mark(function () { return true; }, 'get isSecureContext'),
+            get: _eoka_mark(() => true, 'get isSecureContext'),
             configurable: true
         });
     }

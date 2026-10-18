@@ -10,20 +10,22 @@ try {
 } catch(e) {}
 
 // Status objects are plain records (constructing a real PermissionStatus
-// without its internal slots makes EventTarget methods throw), so mark every
-// function property native. A descriptor/toString probe then sees ordinary
-// native handlers instead of arrow-function source.
-const _eoka_status = (name, state) => {
-    const status = {
-        state: state,
-        name: name,
-        onchange: null,
-        addEventListener: _eoka_mark(function addEventListener() {}, 'addEventListener'),
-        removeEventListener: _eoka_mark(function removeEventListener() {}, 'removeEventListener'),
-        dispatchEvent: _eoka_mark(function dispatchEvent() { return true; }, 'dispatchEvent')
-    };
-    return status;
+// without its internal slots makes EventTarget methods throw). Shorthand
+// methods have no `prototype` and cannot be constructed, like native ones, and
+// `_eoka_mark` makes `toString()` report native code.
+const _eoka_statusMethods = {
+    addEventListener() {},
+    removeEventListener() {},
+    dispatchEvent() { return true; }
 };
+for (const method of Object.values(_eoka_statusMethods)) _eoka_mark(method);
+
+const _eoka_status = (name, state) => ({
+    state: state,
+    name: name,
+    onchange: null,
+    ..._eoka_statusMethods
+});
 
 navigator.permissions.query = _eoka_mark(function query(parameters) {
     const name = parameters.name;
@@ -41,9 +43,9 @@ navigator.permissions.query = _eoka_mark(function query(parameters) {
             state: result.state,
             name: result.name || name,
             onchange: result.onchange,
-            addEventListener: result.addEventListener?.bind(result) || _eoka_mark(function addEventListener() {}, 'addEventListener'),
-            removeEventListener: result.removeEventListener?.bind(result) || _eoka_mark(function removeEventListener() {}, 'removeEventListener'),
-            dispatchEvent: result.dispatchEvent?.bind(result) || _eoka_mark(function dispatchEvent() { return true; }, 'dispatchEvent')
+            addEventListener: result.addEventListener?.bind(result) || _eoka_statusMethods.addEventListener,
+            removeEventListener: result.removeEventListener?.bind(result) || _eoka_statusMethods.removeEventListener,
+            dispatchEvent: result.dispatchEvent?.bind(result) || _eoka_statusMethods.dispatchEvent
         };
     }).catch(function() {
         return _eoka_status(name, 'prompt');

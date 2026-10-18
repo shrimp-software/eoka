@@ -8,12 +8,11 @@ const navProps = {
     maxTouchPoints: { get: () => 0 }
 };
 
-// Chrome on Linux exposes no `navigator.deviceMemory` (the Device Memory API
-// is not implemented for that platform). Defining it on a Linux identity adds
-// a property stock Linux Chrome never has, which is exactly what a reflection
-// sweep looks for. Windows and macOS Chrome do expose it, so keep the
-// fingerprint value there.
-if (/Linux/i.test('__EOKA_PLATFORM__')) {
+// `navigator.deviceMemory` is [SecureContext]: stock Chrome (Linux included)
+// exposes it on https/localhost/file pages and omits it on http ones. Only
+// spoof it where the native attribute exists, so an insecure page never gains
+// a property stock Chrome would not have there.
+if (!('deviceMemory' in Navigator.prototype)) {
     delete navProps.deviceMemory;
 }
 
@@ -36,7 +35,7 @@ try {
         document.cookie = probe + '=1; path=/';
         if (document.cookie.indexOf(probe) !== -1) {
             Object.defineProperty(Navigator.prototype, 'cookieEnabled', {
-                get: _eoka_mark(function () { return true; }, 'get cookieEnabled'),
+                get: _eoka_mark(() => true, 'get cookieEnabled'),
                 configurable: true,
                 enumerable: true
             });

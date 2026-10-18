@@ -1051,7 +1051,7 @@ mod tests {
         assert!(
             !matches
                 .iter()
-                .any(|m| &test_data[m.start()..m.end()] == &b"webdriver"[..]),
+                .any(|m| &test_data[m.start()..m.end()] == b"webdriver"),
             "webdriver must not be a rewrite pattern"
         );
     }

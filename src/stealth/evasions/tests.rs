@@ -135,31 +135,44 @@ fn test_chrome_object_matches_stock() {
     );
 }
 
-// Audit regression: Linux Chrome exposes neither `navigator.deviceMemory` nor
-// `navigator.bluetooth`. Claiming either on a Linux identity adds properties
-// stock Linux Chrome never has, which reflection sweeps look for.
+// Audit regression: stock Linux Chrome has no `navigator.bluetooth`, so a Linux
+// identity must not claim it. `navigator.deviceMemory` is different: Linux
+// Chrome does expose it, but only in secure contexts, so the spoof is gated on
+// the native attribute existing rather than on the platform. Assertions stay on
+// single lines so CRLF checkouts (Windows CI) see the same script text.
 #[test]
-fn test_linux_identity_does_not_claim_linux_missing_apis() {
+fn test_platform_gated_navigator_apis() {
     let linux_fp = Fingerprint::resolve(
         Some("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
         None,
     );
     let script = build_evasion_script_for(&StealthConfig::default(), &linux_fp);
     assert!(
-        script.contains("if (/Linux/i.test('Linux x86_64')) {\n    delete navProps.deviceMemory;"),
-        "Linux script must remove the deviceMemory claim before defining the prototype"
-    );
-    assert!(
-        script.contains("if (!/Linux/i.test('Linux x86_64') && !navigator.bluetooth)"),
+        script.contains(
+            "if (!/Linux/i.test('Linux x86_64') && window.isSecureContext && !navigator.bluetooth)"
+        ),
         "Linux script must leave navigator.bluetooth absent"
     );
+    assert!(
+        script.contains("deviceMemory: { get: () => "),
+        "Linux Chrome exposes deviceMemory, so the fingerprint value must replace the host's"
+    );
+    assert!(
+        script.contains("if (!('deviceMemory' in Navigator.prototype))"),
+        "deviceMemory must only be spoofed where the native [SecureContext] attribute exists"
+    );
 
-    // Windows Chrome does expose deviceMemory, so the claim stays.
     let windows_fp = Fingerprint::resolve(
         Some("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7312.86 Safari/537.36"),
         None,
     );
     let windows_script = build_evasion_script_for(&StealthConfig::default(), &windows_fp);
+    assert!(
+        windows_script.contains(
+            "if (!/Linux/i.test('Win32') && window.isSecureContext && !navigator.bluetooth)"
+        ),
+        "Windows script must fill a missing navigator.bluetooth"
+    );
     assert!(
         windows_script.contains("deviceMemory: { get: () => "),
         "Windows script must keep the deviceMemory claim"
