@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.7.2] - Unreleased
+## [0.7.3] - Unreleased
 
 ### Added
 
@@ -12,6 +12,8 @@ All notable changes to this project will be documented in this file.
   frame-local center is mapped to viewport coordinates, and the click uses
   human-like movement. This removes the need to hardcode coordinates for
   widgets such as the interactive Cloudflare Turnstile checkbox.
+
+## [0.7.2] - 2026-10-18
 
 ### Fixed
 
