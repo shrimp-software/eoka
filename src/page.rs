@@ -319,6 +319,23 @@ pub struct FrameInfo {
     pub name: Option<String>,
 }
 
+/// Result of clicking an element found through a shadow root.
+///
+/// Coordinates are top-level viewport CSS pixels, the same space used by
+/// [`Page::click_at`]. The selector is evaluated in the frame's light DOM and
+/// in every shadow root in that document, including closed roots.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ShadowClickReceipt {
+    /// Frame that owned the clicked node.
+    pub frame_id: String,
+    /// Selector that matched the node.
+    pub selector: String,
+    /// Viewport x coordinate of the click.
+    pub x: f64,
+    /// Viewport y coordinate of the click.
+    pub y: f64,
+}
+
 /// Debug information about page state
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct PageState {

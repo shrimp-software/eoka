@@ -128,6 +128,7 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 - `page.click(selector)` / `page.human_click(selector)` - Standard click
 - `page.click_at(x, y)` - Click at coordinates
 - `page.click_by_text(text)` / `page.human_click_by_text(text)` - By text
+- `page.click_shadow(selector)` / `page.click_shadow_in_frame(frame_id, selector)` - Click through closed shadow roots (top frame or any child frame); maps frame-local coordinates and uses human-like movement
 - `page.try_click(selector)` - Returns `Ok(false)` if not found/visible
 - `page.try_click_by_text(text)` / `page.try_human_click(selector)` / `page.try_human_click_by_text(text)`
 

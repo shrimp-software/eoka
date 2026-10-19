@@ -1,11 +1,45 @@
 use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{FrameInfo, Page};
+use super::{FrameInfo, Page, ShadowClickReceipt};
 use crate::cdp::{Frame, FrameTree, RuntimeEvaluateResult, Session, TargetGetTargets};
 use crate::error::{Error, Result};
+use crate::stealth::human::Human;
+
+/// Default deadline for resolving a shadow-root target.
+const SHADOW_CLICK_TIMEOUT: Duration = Duration::from_secs(10);
+const SHADOW_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const SHADOW_SELECTOR_LIMIT: usize = 4096;
+
+struct ShadowFrame {
+    frame_id: String,
+    session: Session,
+}
+
+/// Transient CDP failures during discovery, navigation or frame mapping are
+/// retried until the shadow deadline; protocol errors such as an invalid
+/// selector propagate immediately.
+fn shadow_retryable(error: &Error) -> bool {
+    if frame_discovery_raced(error) {
+        return true;
+    }
+    match error {
+        Error::Cdp { message, .. } => [
+            "Cannot find context with specified id",
+            "Execution context was destroyed",
+            "Inspected target navigated or closed",
+            "Node with given id does not belong to the document",
+            "Frame point is outside a viewport in its ancestor chain",
+            "Frame owner could not be resolved",
+        ]
+        .iter()
+        .any(|text| message.contains(text)),
+        _ => false,
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -254,6 +288,189 @@ const OWNER_HIT_TEST: &str = r#"function(x, y) {
 }"#;
 
 impl Page {
+    /// Click an element inside any shadow root in the top frame.
+    ///
+    /// The selector is evaluated in the light DOM and in every shadow root in
+    /// the document, including closed roots. The target is re-resolved until
+    /// the deadline; the click uses human-like movement after mapping the
+    /// node's frame-local center to top-level viewport coordinates.
+    pub async fn click_shadow(&self, selector: &str) -> Result<ShadowClickReceipt> {
+        self.click_shadow_with_timeout(None, selector, SHADOW_CLICK_TIMEOUT)
+            .await
+    }
+
+    /// Click an element inside any shadow root in `frame_id`.
+    ///
+    /// Use IDs from [`Page::frames`]. The selector is evaluated in the frame's
+    /// light DOM and in every shadow root in that document, including closed
+    /// roots.
+    pub async fn click_shadow_in_frame(
+        &self,
+        frame_id: &str,
+        selector: &str,
+    ) -> Result<ShadowClickReceipt> {
+        self.click_shadow_with_timeout(Some(frame_id), selector, SHADOW_CLICK_TIMEOUT)
+            .await
+    }
+
+    /// Click a shadow-root element with an explicit deadline.
+    ///
+    /// `frame_id` defaults to the top frame. The selector is re-evaluated every
+    /// 200 ms until it resolves and maps to a visible viewport point. Closed
+    /// shadow roots are traversed through CDP's DOM search; no JavaScript
+    /// shadow-root access is required. Coordinates are mapped through the frame
+    /// chain without an overlay hit-test: closed shadow roots hide their
+    /// internals from `elementFromPoint`, so the caller owns occlusion checks.
+    pub async fn click_shadow_with_timeout(
+        &self,
+        frame_id: Option<&str>,
+        selector: &str,
+        timeout: Duration,
+    ) -> Result<ShadowClickReceipt> {
+        let selector = selector.trim();
+        if selector.is_empty() || selector.len() > SHADOW_SELECTOR_LIMIT {
+            return Err(Error::cdp_msg(
+                "Shadow selector must be 1..=4096 characters",
+            ));
+        }
+        if timeout.is_zero() {
+            return Err(Error::Timeout(
+                "Shadow click deadline must be positive".into(),
+            ));
+        }
+        // Keep the snapshot alive: its AttachedFrame guards detach OOPIF sessions.
+        let snapshot = Snapshot::capture(self).await?;
+        let requested = frame_id
+            .map(str::to_owned)
+            .or_else(|| snapshot.order.first().cloned())
+            .ok_or_else(|| Error::cdp_msg("Page has no frames"))?;
+        let entry = snapshot.get(&requested)?;
+        let frame = ShadowFrame {
+            frame_id: requested,
+            session: entry.session.clone(),
+        };
+        frame
+            .session
+            .send::<_, Value>("DOM.enable", &json!({}))
+            .await?;
+        // Prime the DOM agent's document tree; performSearch needs it.
+        frame
+            .session
+            .send::<_, Value>("DOM.getDocument", &json!({"depth": -1, "pierce": true}))
+            .await?;
+        let deadline = Instant::now() + timeout;
+        let mut last = String::from("selector not found in any shadow root");
+        loop {
+            match Self::find_shadow_node(&frame, selector).await {
+                Ok(Some(node_id)) => {
+                    match Self::shadow_node_center(&frame.session, node_id).await {
+                        Ok((x, y)) => {
+                            match self.frame_point_to_viewport(&frame.frame_id, x, y).await {
+                                Ok((x, y)) => {
+                                    Human::new(&self.session).move_and_click(x, y).await?;
+                                    return Ok(ShadowClickReceipt {
+                                        frame_id: frame.frame_id,
+                                        selector: selector.to_string(),
+                                        x,
+                                        y,
+                                    });
+                                }
+                                Err(error) if shadow_retryable(&error) => last = error.to_string(),
+                                Err(error) => return Err(error),
+                            }
+                        }
+                        Err(error) if shadow_retryable(&error) => last = error.to_string(),
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(None) => {}
+                Err(error) if shadow_retryable(&error) => last = error.to_string(),
+                Err(error) => return Err(error),
+            }
+            if Instant::now() >= deadline {
+                return Err(Error::Timeout(format!(
+                    "Shadow selector {selector:?} was not clickable in frame {} within {timeout:?}: {last}",
+                    frame.frame_id
+                )));
+            }
+            tokio::time::sleep(SHADOW_POLL_INTERVAL).await;
+        }
+    }
+
+    async fn find_shadow_node(frame: &ShadowFrame, selector: &str) -> Result<Option<i32>> {
+        // CDP's DOM search traverses closed shadow roots and returns allocated
+        // node IDs; DOM.querySelector cannot cross a shadow boundary. For a
+        // same-process child frame the session is the parent target, whose
+        // search also covers the child document.
+        let search: Value = frame
+            .session
+            .send(
+                "DOM.performSearch",
+                &json!({"query": selector, "includeUserAgentShadowDOM": false}),
+            )
+            .await?;
+        let search_id = search
+            .get("searchId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::cdp_msg("Shadow search returned no search id"))?;
+        let count = search
+            .get("resultCount")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let mut node_id = 0;
+        if count > 0 {
+            let results: Value = frame
+                .session
+                .send(
+                    "DOM.getSearchResults",
+                    &json!({"searchId": search_id, "fromIndex": 0, "toIndex": count.min(1)}),
+                )
+                .await?;
+            node_id = results
+                .get("nodeIds")
+                .and_then(Value::as_array)
+                .and_then(|ids| ids.first())
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+        }
+        let _: Result<Value> = frame
+            .session
+            .send("DOM.discardSearchResults", &json!({"searchId": search_id}))
+            .await;
+        if node_id == 0 {
+            return Ok(None);
+        }
+        Ok(Some(node_id as i32))
+    }
+
+    async fn shadow_node_center(session: &Session, node_id: i32) -> Result<(f64, f64)> {
+        let model: Value = session
+            .send("DOM.getBoxModel", &json!({"nodeId": node_id}))
+            .await?;
+        let quad = model
+            .get("model")
+            .and_then(|model| model.get("content"))
+            .and_then(Value::as_array)
+            .map(|quad| quad.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if quad.len() < 8 || quad.iter().any(|value| !value.is_finite()) {
+            return Err(Error::cdp_msg("Shadow node has no finite content quad"));
+        }
+        let area = (0..4)
+            .map(|index| {
+                let next = (index + 1) % 4;
+                quad[index * 2] * quad[next * 2 + 1] - quad[next * 2] * quad[index * 2 + 1]
+            })
+            .sum::<f64>();
+        if !area.is_finite() || area.abs() < 1e-8 {
+            return Err(Error::cdp_msg("Shadow node content quad is degenerate"));
+        }
+        Ok((
+            (quad[0] + quad[2] + quad[4] + quad[6]) / 4.0,
+            (quad[1] + quad[3] + quad[5] + quad[7]) / 4.0,
+        ))
+    }
+
     pub(crate) async fn frame_target_id(&self, frame_id: &str) -> Result<String> {
         let snapshot = Snapshot::capture(self).await?;
         Ok(snapshot.get(frame_id)?.session.target_id().to_owned())
