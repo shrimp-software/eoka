@@ -50,17 +50,22 @@ async fn clicks_inside_nested_closed_shadow_roots() {
 #[ignore = "browser"]
 async fn clicks_inside_closed_shadow_root_of_child_frame() {
     let inner = data_url(
-        r#"<!doctype html><body>
+        r#"<!doctype html><body style="margin:0">
 <div id="host"></div>
 <script>
   const root = document.getElementById('host').attachShadow({mode:'closed'});
-  root.innerHTML = '<button id="inner" style="width:120px;height:40px">go</button>';
+  root.innerHTML = '<button id="inner" style="width:40px;height:20px">go</button>';
   root.getElementById('inner').addEventListener('click', () => { parent.postMessage('clicked', '*'); });
 </script></body>"#,
     );
+    // The parent has a matching button and the iframe is offset. A search that
+    // is not scoped to the child frame clicks the parent button; a box model
+    // that is mapped twice misses the child button entirely.
     let outer = format!(
-        r#"<!doctype html><title>start</title><body>
-<iframe src="{inner}" style="width:400px;height:300px;border:0"></iframe>
+        r#"<!doctype html><title>start</title><body style="margin:0">
+<button id="inner" style="position:absolute;left:0;top:0;width:120px;height:40px"
+  onclick="document.title='parent-clicked'">parent</button>
+<iframe src="{inner}" style="position:absolute;left:300px;top:200px;width:200px;height:100px;border:0"></iframe>
 <script>
   addEventListener('message', event => {{ if (event.data === 'clicked') document.title = 'frame-clicked'; }});
 </script></body>"#
