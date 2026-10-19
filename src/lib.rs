@@ -108,7 +108,10 @@ pub use page::{
     CaptureBodyError, CapturedFrameResponse, FrameResponseCapture, FrameResponseCaptureOptions,
     FrameResponseCaptureReport,
 };
-pub use page::{CapturedRequest, FrameInfo, MouseButton, Page, PageState, ResponseBody, TextMatch};
+pub use page::{
+    CapturedRequest, FrameInfo, MouseButton, Page, PageState, ResponseBody, ShadowClickReceipt,
+    TextMatch,
+};
 pub use page::{ScreenshotClip, ScreenshotFormat, ScreenshotOptions};
 pub use recording::{NativeRecording, NativeRecordingOptions, RecordingChunk, RecordingError};
 pub use session::{BrowserSession, BrowserState, SessionCookie};

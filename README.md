@@ -257,6 +257,13 @@ page.human_click_by_text("Submit").await?;
 page.try_click("#optional").await?;             // Ok(false) if missing
 page.try_click_by_text("Accept").await?;
 
+// Closed shadow roots (including widgets inside cross-origin frames): the
+// selector is searched through the frame's light DOM and every shadow root.
+// The node's center is mapped to viewport coordinates and clicked with
+// human-like movement.
+page.click_shadow("#consent").await?;                       // top frame
+page.click_shadow_in_frame(&frame_id, "input[type='checkbox']").await?;
+
 // Native held pointer input for drags. Call release_all_inputs before close
 // if an operation is interrupted.
 page.mouse_move(100.0, 100.0).await?;

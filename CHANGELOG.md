@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [0.7.2] - Unreleased
 
+### Added
+
+- `Page::click_shadow` / `Page::click_shadow_in_frame`: click an element found
+  through closed shadow roots in the top frame or any child frame (same-process
+  or OOPIF). The selector is searched through CDP's DOM tree, the node's
+  frame-local center is mapped to viewport coordinates, and the click uses
+  human-like movement. This removes the need to hardcode coordinates for
+  widgets such as the interactive Cloudflare Turnstile checkbox.
+
 ### Fixed
 
 - Stop scrambling `webdriver` in the Chrome binary. Chrome derives the
