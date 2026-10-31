@@ -216,6 +216,13 @@ fn transport_fmt(
 }
 
 impl Error {
+    /// Decode a CDP JavaScript exception without exposing protocol implementation types.
+    pub fn javascript_exception(details: &serde_json::Value) -> Self {
+        match serde_json::from_value::<crate::cdp::types::ExceptionDetails>(details.clone()) {
+            Ok(details) => Self::cdp_msg(details.message()),
+            Err(_) => Self::cdp_msg("JavaScript exception details unavailable"),
+        }
+    }
     /// Create a transport error with context
     pub fn transport(context: impl Into<String>) -> Self {
         Self::Transport {

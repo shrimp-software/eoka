@@ -14,6 +14,7 @@ pub(crate) struct Dispatch {
     observer: Option<Arc<dyn DispatchObserver>>,
     tokens: Mutex<Vec<(Arc<CommandDispatch>, Arc<AtomicBool>)>>,
     preparation: AtomicBool,
+    context: Mutex<&'static str>,
 }
 
 impl Dispatch {
@@ -22,6 +23,7 @@ impl Dispatch {
             observer,
             tokens: Mutex::new(Vec::new()),
             preparation: AtomicBool::new(false),
+            context: Mutex::new("queue admission"),
         }
     }
 
@@ -41,6 +43,14 @@ impl Dispatch {
 
     pub fn prepared(&self) -> bool {
         self.preparation.load(Ordering::Acquire)
+    }
+
+    pub fn note(&self, context: &'static str) {
+        *self.context.lock().unwrap_or_else(|e| e.into_inner()) = context;
+    }
+
+    pub fn context(&self) -> &'static str {
+        *self.context.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     pub async fn send(

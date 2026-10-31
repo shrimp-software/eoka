@@ -15,9 +15,9 @@ impl Page {
         Ok(())
     }
 
-    /// Navigate and verify a new document or same-document navigation commit.
+    /// Navigate and verify a navigation commit and an interactive document.
     /// The full operation, including the target queue, obeys the configured deadline.
-    /// Use an explicit expectation when application readiness requires more than a commit.
+    /// Use an explicit expectation when application readiness requires more than document readiness.
     pub async fn goto(&self, url: &str) -> Result<()> {
         self.act(
             crate::Action::Navigate {

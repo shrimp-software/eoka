@@ -107,8 +107,13 @@ impl ActionInput {
         Ok(())
     }
 
-    pub async fn text(&mut self, dispatch: &Dispatch, text: &str, human: bool) -> Result<()> {
-        if human && !text.is_empty() {
+    pub async fn text(
+        &mut self,
+        dispatch: &Dispatch,
+        text: &str,
+        mode: crate::InputMode,
+    ) -> Result<()> {
+        if mode == crate::InputMode::Sequential && !text.is_empty() {
             for ch in text.chars() {
                 dispatch
                     .send(
@@ -118,7 +123,7 @@ impl ActionInput {
                         false,
                     )
                     .await?;
-                sleep_ms(30 + fastrand::u64(0..60)).await;
+                sleep_ms(30).await;
             }
         } else {
             dispatch

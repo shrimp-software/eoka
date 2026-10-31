@@ -141,7 +141,7 @@ pub enum MouseButton {
 pub struct Page {
     pub(crate) session: Session,
     pub(crate) action_options: crate::ActionOptions,
-    config: Arc<StealthConfig>,
+    pub(crate) config: Arc<StealthConfig>,
     /// Cached root `DOM.getDocument` node id (invalidated on navigation).
     /// CDP node IDs are positive, so zero represents an empty cache. Fetching
     /// twice during a race is harmless and avoids a poisonable lock.

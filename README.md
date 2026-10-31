@@ -15,7 +15,7 @@ the browser via CDP.
 
 ```toml
 [dependencies]
-eoka = "0.7"
+eoka = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
@@ -738,3 +738,11 @@ The key insight: most detection comes from CDP commands leaking (`Runtime.enable
 ## License
 
 MIT
+
+## Login and navigation reliability (0.8)
+
+Text fill/type deliver sequential native Unicode character input by default; `InputMode::Bulk` is explicit. Each character checks the original input's focus and editability, stopping if the page moves focus or replaces it. Fill verification proves the element value, not application validation. Use native focus/Tab blur and `Expectation::Enabled`, `Focused`, or `All` for form readiness. Navigation waits for commit and an interactive document within one deadline; application completion requires its own expectation.
+
+`ActionOptions::destination` selects the current page, a correlated new child tab, or either. Receipts retain origin and destination target IDs. Only a uniquely matching observed destination is accepted. `Locator::state` reads connected/visible/enabled state without converting backend references to CSS. Target discovery is shared for the transport lifetime, so stopping downloads does not disable popup observation.
+
+`Page::evaluate_function` and `execute_function` call a function once with JSON arguments in a fresh lexical scope and await promises. Arguments preserve JSON object keys, reject unsafe integers and nesting beyond 64, and have a 1 MiB limit; evaluation results have a 1 MiB limit. Existing `evaluate`/`execute` remain explicit raw JavaScript primitives. Actual exception descriptions and navigation error text are retained.
