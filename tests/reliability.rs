@@ -63,6 +63,9 @@ async fn function_results_reject_lossy_values_and_enforce_utf8_limits() {
 #[ignore = "requires Chrome; self-closing popup destination"]
 async fn destination_survives_the_origin_window_closing() {
     let server = support::HttpFixture::start(|request| async move {
+        if request.target == "/ready" {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
         support::Response::html(if request.target == "/origin" {
             "<button id=go onclick=\"window.open('/ready');window.close()\">Continue</button>"
         } else {
@@ -92,7 +95,7 @@ async fn destination_survives_the_origin_window_closing() {
     })
     .await
     .unwrap();
-    let receipt = origin
+    let result = origin
         .locator("#go")
         .click(ActionOptions {
             expect: Some(Expectation::Visible {
@@ -101,8 +104,13 @@ async fn destination_survives_the_origin_window_closing() {
             timeout_ms: 4000,
             ..Default::default()
         })
-        .await
-        .unwrap();
+        .await;
+    assert!(
+        result.is_ok(),
+        "{result:?}; tabs: {:?}",
+        browser.tabs().await.unwrap()
+    );
+    let receipt = result.unwrap();
     assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
     let destination = browser
         .attach_page(receipt.destination_target_id.as_deref().unwrap())

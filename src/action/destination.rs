@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use futures_util::future::{select, Either};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
@@ -131,10 +132,35 @@ enum Observation {
 }
 
 async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
-    match page.check_expectation(expect).await {
-        Ok(true) => Ok(Observation::Matches),
-        Ok(false) => Ok(Observation::Pending),
-        Err(error) => lifecycle_error(&error).ok_or(error),
+    let mut events = page.session().transport().subscribe();
+    let destroyed = async {
+        loop {
+            match events.recv().await {
+                Ok(CdpMessage::Event { method, params, .. })
+                    if method == "Target.targetDestroyed"
+                        && params["targetId"] == page.target_id() =>
+                {
+                    return Ok(Observation::Closed);
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(Error::cdp_msg(format!(
+                        "Destination event stream lost: {error}"
+                    )))
+                }
+            }
+        }
+    };
+    let observation = std::pin::pin!(page.check_expectation(expect));
+    let destroyed = std::pin::pin!(destroyed);
+    let result = select(observation, destroyed).await;
+    match result {
+        Either::Left((result, _)) => match result {
+            Ok(true) => Ok(Observation::Matches),
+            Ok(false) => Ok(Observation::Pending),
+            Err(error) => lifecycle_error(&error).ok_or(error),
+        },
+        Either::Right((result, _)) => result,
     }
 }
 
@@ -184,5 +210,53 @@ impl Drop for DestinationWatch {
                 }
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cdp::{Connection, Transport};
+    use futures_util::{SinkExt, StreamExt};
+    use std::{sync::Arc, time::Duration};
+    use tokio_tungstenite::tungstenite::Message;
+
+    #[tokio::test]
+    async fn target_destruction_interrupts_an_unanswered_observation() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("ws://{}", listener.local_addr().unwrap());
+        let peer = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let command: Value = serde_json::from_str(&text).unwrap();
+                let response = match command["method"].as_str().unwrap() {
+                    "Target.attachToTarget" => {
+                        json!({"id":command["id"],"result":{"sessionId":"origin-session"}})
+                    }
+                    "Runtime.evaluate" => {
+                        json!({"method":"Target.targetDestroyed","params":{"targetId":"origin"}})
+                    }
+                    method => panic!("unexpected command: {method}"),
+                };
+                socket
+                    .send(Message::Text(response.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+        });
+        let connection = Connection::new(Transport::connect(&url, 30).await.unwrap());
+        let page = Page::new(
+            connection.attach_to_target("origin").await.unwrap(),
+            Arc::default(),
+        );
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            observe(&page, &Expectation::DocumentReady),
+        )
+        .await;
+        connection.transport().close().await.unwrap();
+        peer.await.unwrap();
+        assert!(matches!(result, Ok(Ok(Observation::Closed))));
     }
 }

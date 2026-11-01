@@ -93,6 +93,7 @@ impl Drop for HttpFixture {
 
 pub async fn browser() -> eoka::Browser {
     eoka::Browser::launch_with(|c| {
+        c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
         c.patch_binary = false;
         c.strip_x_client_data = false;
         c.cdp_timeout = 5;
