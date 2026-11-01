@@ -102,7 +102,8 @@ fn is_element_cdp_error(e: &Error) -> bool {
         | Error::Io(_)
         | Error::ChromeNotFound
         | Error::Patching { .. }
-        | Error::RetryExhausted { .. } => false,
+        | Error::RetryExhausted { .. }
+        | Error::EvaluationTooLarge { .. } => false,
     }
 }
 

@@ -4,6 +4,121 @@ use eoka::{Action, ActionOptions, Error};
 use eoka::{ActionOutcome, Destination, Expectation, InputMode, LocatorSpec};
 
 #[tokio::test]
+#[ignore = "requires Chrome; checked JSON evaluation"]
+async fn function_results_reject_lossy_values_and_enforce_utf8_limits() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    for result in [
+        "undefined",
+        "NaN",
+        "Infinity",
+        "9007199254740992",
+        "1n",
+        "(()=>1)",
+        "({nested:undefined})",
+        "({n:NaN})",
+        "[1,,2]",
+        "new Date()",
+        "new Map()",
+        "({[Symbol('key')]:1})",
+        "(()=>{const v={};v.self=v;return v})()",
+    ] {
+        let function = format!("()=>{{window.calls=(window.calls||0)+1;return {result}}}");
+        page.execute("window.calls=0").await.unwrap();
+        assert!(
+            page.evaluate_function::<serde_json::Value>(&function, &[])
+                .await
+                .is_err(),
+            "{result}"
+        );
+        assert_eq!(page.evaluate::<u32>("window.calls").await.unwrap(), 1);
+    }
+    let value: serde_json::Value = page
+        .evaluate_function(
+            "value=>value",
+            &[serde_json::json!({"__proto__":42,"items":[null,false,0,""]})],
+        )
+        .await
+        .unwrap();
+    assert_eq!(value["__proto__"], 42);
+    let text: String = page
+        .evaluate_function("()=> 'é'.repeat(524287)", &[])
+        .await
+        .unwrap();
+    assert_eq!(text.len(), 1_048_574);
+    assert!(matches!(
+        page.evaluate_function::<String>("()=> 'é'.repeat(524288)", &[])
+            .await,
+        Err(Error::EvaluationTooLarge {
+            maximum_bytes: 1_048_576
+        })
+    ));
+    page.execute_function("()=>{const v={};v.self=v;return v}", &[])
+        .await
+        .unwrap();
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; self-closing popup destination"]
+async fn destination_survives_the_origin_window_closing() {
+    let server = support::HttpFixture::start(|request| async move {
+        support::Response::html(if request.target == "/origin" {
+            "<button id=go onclick=\"window.open('/ready');window.close()\">Continue</button>"
+        } else {
+            "<button id=ready>Ready</button>"
+        })
+    })
+    .await;
+    let browser = support::browser().await;
+    let parent = browser.new_blank_page().await.unwrap();
+    parent
+        .execute(&format!("void window.open('{}origin')", server.url))
+        .await
+        .unwrap();
+    let origin = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if let Some(tab) = browser
+                .tabs()
+                .await
+                .unwrap()
+                .into_iter()
+                .find(|tab| tab.url.ends_with("/origin"))
+            {
+                break browser.attach_page(&tab.id).await.unwrap();
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let receipt = origin
+        .locator("#go")
+        .click(ActionOptions {
+            expect: Some(Expectation::Visible {
+                target: LocatorSpec::css("#ready"),
+            }),
+            timeout_ms: 4000,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    let destination = browser
+        .attach_page(receipt.destination_target_id.as_deref().unwrap())
+        .await
+        .unwrap();
+    assert!(destination.url().await.unwrap().ends_with("/ready"));
+    assert!(!browser
+        .tabs()
+        .await
+        .unwrap()
+        .iter()
+        .any(|tab| tab.id == origin.target_id()));
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
 #[ignore = "requires Chrome; sequential typing target ownership"]
 async fn sequential_input_stops_when_the_page_moves_focus() {
     let browser = support::browser().await;

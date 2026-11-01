@@ -11,6 +11,7 @@ pub(super) struct DestinationWatch {
     events: broadcast::Receiver<CdpMessage>,
     existing: HashSet<String>,
     candidates: HashMap<String, Option<Page>>,
+    origin_closed: bool,
 }
 
 impl DestinationWatch {
@@ -38,6 +39,7 @@ impl DestinationWatch {
             events,
             existing,
             candidates: HashMap::new(),
+            origin_closed: false,
         })
     }
 
@@ -66,6 +68,9 @@ impl DestinationWatch {
                     if method == "Target.targetDestroyed" =>
                 {
                     if let Some(id) = params["targetId"].as_str() {
+                        if id == self.origin.target_id() {
+                            self.origin_closed = true;
+                        }
                         self.candidates.remove(id);
                     }
                 }
@@ -79,19 +84,36 @@ impl DestinationWatch {
             }
         }
         let mut matches = Vec::new();
-        if self.scope != Destination::NewTab && self.origin.check_expectation(expect).await? {
-            matches.push(self.origin.target_id().to_owned());
+        if self.scope != Destination::NewTab && !self.origin_closed {
+            match observe(&self.origin, expect).await? {
+                Observation::Matches => matches.push(self.origin.target_id().to_owned()),
+                Observation::Closed => self.origin_closed = true,
+                Observation::Pending => {}
+            }
         }
+        let mut closed = Vec::new();
         for (id, page) in &mut self.candidates {
             if page.is_none() {
-                let session = self.origin.session().attach_frame_target(id).await?;
+                let session = match self.origin.session().attach_frame_target(id).await {
+                    Ok(session) => session,
+                    Err(error) if matches!(lifecycle_error(&error), Some(Observation::Closed)) => {
+                        closed.push(id.clone());
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 *page = Some(Page::new(session, self.origin.config.clone()));
             }
             if let Some(page) = page {
-                if page.check_expectation(expect).await? {
-                    matches.push(id.clone());
+                match observe(page, expect).await? {
+                    Observation::Matches => matches.push(id.clone()),
+                    Observation::Closed => closed.push(id.clone()),
+                    Observation::Pending => {}
                 }
             }
+        }
+        for id in closed {
+            self.candidates.remove(&id);
         }
         if matches.len() > 1 {
             return Err(Error::cdp_msg(
@@ -100,6 +122,50 @@ impl DestinationWatch {
         }
         Ok(matches.pop())
     }
+}
+
+enum Observation {
+    Matches,
+    Pending,
+    Closed,
+}
+
+async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
+    match page.check_expectation(expect).await {
+        Ok(true) => Ok(Observation::Matches),
+        Ok(false) => Ok(Observation::Pending),
+        Err(error) => lifecycle_error(&error).ok_or(error),
+    }
+}
+
+fn lifecycle_error(error: &Error) -> Option<Observation> {
+    let Error::Cdp {
+        code: Some(code),
+        message,
+        ..
+    } = error
+    else {
+        return None;
+    };
+    if (*code == -32001 && message == "Session with given id not found.")
+        || (*code == -32602 && message == "No target with given id found")
+        || (*code == -32000 && message == "Not attached to an active page")
+    {
+        return Some(Observation::Closed);
+    }
+    if *code == -32000
+        && [
+            "Cannot find context",
+            "Execution context was destroyed",
+            "Could not find object",
+            "Cannot find object",
+        ]
+        .iter()
+        .any(|prefix| message.starts_with(prefix))
+    {
+        return Some(Observation::Pending);
+    }
+    None
 }
 
 impl Drop for DestinationWatch {

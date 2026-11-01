@@ -107,14 +107,16 @@ impl ActionInput {
         Ok(())
     }
 
-    pub async fn text(
+    pub async fn text<F: std::future::Future<Output = Result<()>>>(
         &mut self,
         dispatch: &Dispatch,
         text: &str,
         mode: crate::InputMode,
+        mut before_insert: impl FnMut() -> F,
     ) -> Result<()> {
         if mode == crate::InputMode::Sequential && !text.is_empty() {
             for ch in text.chars() {
+                before_insert().await?;
                 dispatch
                     .send(
                         &self.session,
@@ -126,6 +128,7 @@ impl ActionInput {
                 sleep_ms(30).await;
             }
         } else {
+            before_insert().await?;
             dispatch
                 .send(
                     &self.session,

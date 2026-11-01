@@ -1,6 +1,32 @@
 use super::Page;
 use crate::error::{Error, Result};
 
+const MAX_FUNCTION_BYTES: usize = 1_048_576;
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JsonEvaluation {
+    Value { value: serde_json::Value },
+    TooLarge,
+}
+
+impl JsonEvaluation {
+    fn expression(expression: &str, maximum_bytes: usize) -> Result<String> {
+        Ok(format!(
+            "({})({}, {maximum_bytes})",
+            include_str!("json_evaluation.js"),
+            serde_json::to_string(expression)?,
+        ))
+    }
+
+    fn decode<T: serde::de::DeserializeOwned>(self, maximum_bytes: usize) -> Result<T> {
+        match self {
+            Self::Value { value } => Ok(serde_json::from_value(value)?),
+            Self::TooLarge => Err(Error::EvaluationTooLarge { maximum_bytes }),
+        }
+    }
+}
+
 fn evaluated_value(remote: crate::cdp::types::RemoteObject) -> Result<serde_json::Value> {
     match (
         remote.value,
@@ -20,13 +46,41 @@ impl Page {
         function: &str,
         arguments: &[serde_json::Value],
     ) -> Result<T> {
-        let value: serde_json::Value = self
-            .evaluate(&Self::function_expression(function, arguments)?)
+        self.evaluate_json(
+            &Self::function_expression(function, arguments)?,
+            MAX_FUNCTION_BYTES,
+        )
+        .await
+    }
+
+    /// Evaluate once and reject non-JSON values before CDP can coerce them.
+    /// The UTF-8 JSON result must fit `maximum_bytes`, checked inside the browser.
+    pub async fn evaluate_json<T: serde::de::DeserializeOwned>(
+        &self,
+        expression: &str,
+        maximum_bytes: usize,
+    ) -> Result<T> {
+        let result: JsonEvaluation = self
+            .evaluate(&JsonEvaluation::expression(expression, maximum_bytes)?)
             .await?;
-        if serde_json::to_vec(&value)?.len() > 1_048_576 {
-            return Err(Error::cdp_msg("JavaScript result exceeds 1 MiB"));
-        }
-        Ok(serde_json::from_value(value)?)
+        result.decode(maximum_bytes)
+    }
+
+    /// Evaluate JSON in an explicit frame's isolated world with the same validation
+    /// and byte limit as [`Page::evaluate_json`].
+    pub async fn evaluate_json_in_frame_id<T: serde::de::DeserializeOwned>(
+        &self,
+        frame_id: &str,
+        expression: &str,
+        maximum_bytes: usize,
+    ) -> Result<T> {
+        let result: JsonEvaluation = self
+            .evaluate_in_frame_id(
+                frame_id,
+                &JsonEvaluation::expression(expression, maximum_bytes)?,
+            )
+            .await?;
+        result.decode(maximum_bytes)
     }
 
     /// Call a function once and discard its result while retaining exceptions.
@@ -35,7 +89,8 @@ impl Page {
         function: &str,
         arguments: &[serde_json::Value],
     ) -> Result<()> {
-        self.execute(&Self::function_expression(function, arguments)?)
+        let invocation = Self::function_expression(function, arguments)?;
+        self.execute(&format!("(async()=>{{await {invocation};}})()"))
             .await
     }
 
@@ -73,7 +128,7 @@ impl Page {
             validate(value, 0)?;
         }
         let args = serde_json::to_string(arguments)?;
-        if args.len() > 1_048_576 || function.len() > 1_048_576 {
+        if args.len() > MAX_FUNCTION_BYTES || function.len() > MAX_FUNCTION_BYTES {
             return Err(Error::cdp_msg(
                 "JavaScript function or arguments exceed 1 MiB",
             ));

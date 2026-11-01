@@ -94,6 +94,9 @@ child targets recorded in `ActionReceipt::destination_target_id`.
 `Locator::state` returns a `ControlState` without input values.
 `Page::evaluate_function` and `execute_function` accept a function and bounded
 JSON arguments, execute once in fresh scope and propagate actual exceptions.
+Function results reject non-JSON values before CDP serialization and are limited
+to 1 MiB of UTF-8 JSON. `evaluate_json` and `evaluate_json_in_frame_id` reuse this
+validator for raw expressions with an explicit result byte limit.
 
 See [MIGRATION-0.6.md](MIGRATION-0.6.md). `Page::act(Action, ActionOptions)` and
 `Page::locator`/`locator_text` provide receipts, strict execution-time resolution,

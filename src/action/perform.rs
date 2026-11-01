@@ -195,19 +195,9 @@ async fn type_into(
     text: &str,
     mode: crate::InputMode,
 ) -> Result<()> {
-    if mode == crate::InputMode::Sequential && !text.is_empty() {
-        for character in text.chars() {
-            require_focused_editable(node).await?;
-            input
-                .text(dispatch, &character.to_string(), crate::InputMode::Bulk)
-                .await?;
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-        }
-        Ok(())
-    } else {
-        require_focused_editable(node).await?;
-        input.text(dispatch, text, crate::InputMode::Bulk).await
-    }
+    input
+        .text(dispatch, text, mode, || require_focused_editable(node))
+        .await
 }
 
 pub(super) async fn perform(
@@ -234,7 +224,9 @@ pub(super) async fn perform(
     match action {
         Action::InsertText { text } => {
             input
-                .text(dispatch, text, crate::InputMode::default())
+                .text(dispatch, text, crate::InputMode::default(), || async {
+                    Ok(())
+                })
                 .await?;
             Ok(Verification::Explicit)
         }
