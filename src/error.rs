@@ -90,6 +90,13 @@ pub enum Error {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
 
+    /// A checked JavaScript result exceeded its UTF-8 JSON byte limit.
+    #[error("Evaluation result exceeds its JSON byte limit of {maximum_bytes}")]
+    EvaluationTooLarge {
+        /// Maximum encoded result size accepted by the caller.
+        maximum_bytes: usize,
+    },
+
     /// Decode error (e.g., base64)
     #[error("Decode error: {0}")]
     Decode(String),
@@ -171,6 +178,9 @@ impl Clone for Error {
                 actual: actual.clone(),
             },
             Self::Serialization(e) => Self::Serialization(serde_json::Error::custom(e.to_string())),
+            Self::EvaluationTooLarge { maximum_bytes } => Self::EvaluationTooLarge {
+                maximum_bytes: *maximum_bytes,
+            },
             Self::Decode(s) => Self::Decode(s.clone()),
             Self::Io(e) => Self::Io(std::io::Error::new(e.kind(), e.to_string())),
             Self::ChromeNotFound => Self::ChromeNotFound,
@@ -216,6 +226,13 @@ fn transport_fmt(
 }
 
 impl Error {
+    /// Decode a CDP JavaScript exception without exposing protocol implementation types.
+    pub fn javascript_exception(details: &serde_json::Value) -> Self {
+        match serde_json::from_value::<crate::cdp::types::ExceptionDetails>(details.clone()) {
+            Ok(details) => Self::cdp_msg(details.message()),
+            Err(_) => Self::cdp_msg("JavaScript exception details unavailable"),
+        }
+    }
     /// Create a transport error with context
     pub fn transport(context: impl Into<String>) -> Self {
         Self::Transport {

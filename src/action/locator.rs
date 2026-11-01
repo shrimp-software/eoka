@@ -5,6 +5,17 @@ use serde_json::{json, Value};
 use super::{Action, ActionOptions, ActionReceipt, LocatorQuery, LocatorSpec};
 use crate::{cdp::Session, Error, Page, Result};
 
+/// A read-only observation of a resolved control, without its input value.
+#[derive(Debug, Clone)]
+pub struct ControlState {
+    /// Whether the node is attached to the document.
+    pub connected: bool,
+    /// Whether the node is rendered and visible.
+    pub visible: bool,
+    /// Whether the node is not disabled.
+    pub enabled: bool,
+}
+
 /// A lazy query bound to a page; it holds no cached DOM node.
 #[derive(Clone)]
 pub struct Locator {
@@ -13,6 +24,19 @@ pub struct Locator {
 }
 
 impl Locator {
+    /// Inspect the current match without dispatching input or generating a selector.
+    pub async fn state(&self) -> Result<Option<ControlState>> {
+        let Some(node) = resolve(&self.page, &self.spec).await? else {
+            return Ok(None);
+        };
+        let properties = node.properties().await?;
+        Ok(Some(ControlState {
+            connected: properties["connected"] == true,
+            visible: properties["visible"] == true,
+            enabled: properties["disabled"] != true,
+        }))
+    }
+
     /// Explicitly select the first matching element.
     pub fn first(self) -> Self {
         self.nth(0)
@@ -65,7 +89,7 @@ impl Locator {
                 Action::Fill {
                     target: self.spec.clone(),
                     value: value.into(),
-                    human: false,
+                    input_mode: Default::default(),
                 },
                 options,
             )
@@ -139,8 +163,10 @@ impl Node {
             "arguments":args.into_iter().map(|value| json!({"value":value})).collect::<Vec<_>>(),
             "returnByValue":true, "awaitPromise":true,
         })).await?;
-        if result.get("exceptionDetails").is_some() {
-            return Err(Error::cdp_msg("Action DOM inspection failed"));
+        if let Some(exception) = result.get("exceptionDetails").filter(|v| !v.is_null()) {
+            let exception: crate::cdp::types::ExceptionDetails =
+                serde_json::from_value(exception.clone())?;
+            return Err(Error::cdp_msg(exception.message()));
         }
         Ok(result["result"]["value"].clone())
     }

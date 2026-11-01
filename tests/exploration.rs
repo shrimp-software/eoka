@@ -46,7 +46,7 @@ async fn exploratory_dispatch_does_not_claim_completion_and_keeps_verification()
             Action::Fill {
                 target: LocatorSpec::css("#name"),
                 value: "Ada".into(),
-                human: false,
+                input_mode: Default::default(),
             },
             ActionOptions::default(),
         )

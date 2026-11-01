@@ -88,6 +88,20 @@ impl LocatorSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Expectation {
+    /// Wait for the document to be interactive or complete, without claiming application readiness.
+    DocumentReady,
+    /// Require every supplied condition in the same observation pass.
+    All {
+        /// Conditions that must all hold.
+        conditions: Vec<Expectation>,
+    },
+    /// Wait for a visible control to become enabled or disabled.
+    Enabled {
+        /// Control to inspect.
+        target: LocatorSpec,
+        /// Required enabled state.
+        enabled: bool,
+    },
     /// Observe a new native download originating from this page.
     DownloadStarted,
     /// Wait for a target to hold focus.
@@ -150,6 +164,9 @@ impl Expectation {
     /// Return the stable kind name without sensitive values.
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::DocumentReady => "document_ready",
+            Self::All { .. } => "all",
+            Self::Enabled { .. } => "enabled",
             Self::DownloadStarted => "download_started",
             Self::Focused { .. } => "focused",
             Self::Url { .. } => "url",
@@ -161,6 +178,32 @@ impl Expectation {
             Self::Selected { .. } => "selected",
         }
     }
+}
+
+/// Text event delivery, independent of pointer pacing.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InputMode {
+    /// Deliver one native input event per Unicode scalar, 30ms apart.
+    #[default]
+    Sequential,
+    /// Insert the whole string in one native input event.
+    Bulk,
+}
+
+/// Which page may satisfy an action's completion expectation.
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Destination {
+    /// Only the originating page.
+    Current,
+    /// A new page with the originating page as its opener.
+    NewTab,
+    /// The originating page or one uniquely matching new child page.
+    #[default]
+    CurrentOrNew,
 }
 
 /// Native input or document action to perform once.
@@ -226,8 +269,8 @@ pub enum Action {
         /// Expected or requested value.
         value: String,
         #[serde(default)]
-        /// Use paced native input.
-        human: bool,
+        /// Choose sequential or bulk native text delivery.
+        input_mode: InputMode,
     },
     /// Insert text into a target and verify an explicit condition.
     Type {
@@ -236,8 +279,8 @@ pub enum Action {
         /// Text to match or insert.
         text: String,
         #[serde(default)]
-        /// Use paced native input.
-        human: bool,
+        /// Choose sequential or bulk native text delivery.
+        input_mode: InputMode,
     },
     /// Select options and verify their values.
     Select {
@@ -371,6 +414,9 @@ pub trait DispatchObserver: Send + Sync {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ActionOptions {
+    /// Scope of the completion expectation. Does not change the input target.
+    #[serde(default)]
+    pub destination: Destination,
     /// Wait for target actionability; false makes try-actions skip immediately.
     #[serde(default = "wait_for_target")]
     pub wait_for_target: bool,
@@ -396,6 +442,7 @@ fn default_timeout() -> u64 {
 impl Default for ActionOptions {
     fn default() -> Self {
         Self {
+            destination: Destination::default(),
             wait_for_target: true,
             timeout_ms: default_timeout(),
             expect: None,
@@ -444,6 +491,9 @@ pub enum DispatchState {
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActionReceipt {
+    /// Page that satisfied the completion expectation, if known.
+    #[serde(default)]
+    pub destination_target_id: Option<String>,
     /// Unix time at admission, in milliseconds.
     pub started_at_ms: u64,
     /// Unix time when this receipt was produced, in milliseconds.

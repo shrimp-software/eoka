@@ -1,11 +1,12 @@
 //! Deadline-bounded actions with explicit, observable completion conditions.
+mod destination;
 pub(crate) mod dispatch;
 mod locator;
 mod perform;
 mod runner;
 mod types;
 
-pub use locator::Locator;
+pub use locator::{ControlState, Locator};
 pub use types::*;
 
 use std::sync::Arc;

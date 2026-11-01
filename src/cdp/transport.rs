@@ -238,6 +238,7 @@ fn is_risky(method: &str) -> bool {
 
 /// CDP transport with owned request-pause routing and automatic continuation.
 pub struct Transport {
+    target_discovery: tokio::sync::OnceCell<()>,
     /// The Chrome child process (None when connecting to an existing instance)
     child: Option<std::sync::Mutex<Child>>,
     runtime: std::sync::Mutex<Option<RuntimeDirectory>>,
@@ -293,6 +294,19 @@ pub enum CdpMessage {
 }
 
 impl Transport {
+    pub(crate) async fn ensure_target_discovery(&self) -> Result<()> {
+        self.target_discovery
+            .get_or_try_init(|| async {
+                self.send::<_, Value>(
+                    "Target.setDiscoverTargets",
+                    &serde_json::json!({"discover":true}),
+                )
+                .await?;
+                Ok::<_, Error>(())
+            })
+            .await?;
+        Ok(())
+    }
     pub(crate) fn browser_endpoint(&self) -> Option<&str> {
         self.browser_endpoint.as_deref()
     }
@@ -400,6 +414,7 @@ impl Transport {
         });
 
         Ok(Self {
+            target_discovery: tokio::sync::OnceCell::new(),
             child: child.map(std::sync::Mutex::new),
             runtime: std::sync::Mutex::new(None),
             browser_endpoint: None,

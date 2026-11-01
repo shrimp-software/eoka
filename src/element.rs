@@ -144,7 +144,7 @@ impl Element {
                 Action::Type {
                     target: self.action_target(),
                     text: text.into(),
-                    human: false,
+                    input_mode: Default::default(),
                 },
                 self.page.action_options.clone(),
             )

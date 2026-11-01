@@ -72,6 +72,7 @@ impl Page {
         let started = tokio::time::Instant::now();
         let dispatch = Arc::new(Dispatch::new(options.observer.clone()));
         let mut receipt = ActionReceipt {
+            destination_target_id: None,
             started_at_ms: timestamp(),
             finished_at_ms: 0,
             download_guid: None,
@@ -110,10 +111,26 @@ impl Page {
                 ));
             }
             if let Some(expect) = &options.expect {
-                if self.check_expectation(expect).await? {
+                validate_expectation(expect, 0)?;
+            }
+            if let Some(expect) = &options.expect {
+                if options.destination != Destination::NewTab
+                    && self.check_expectation(expect).await?
+                {
                     return Err(Error::cdp_msg("expectation_already_satisfied: choose a condition that proves a new result"));
                 }
             }
+            let mut destination_watch = if options.destination != Destination::Current
+                && options
+                    .expect
+                    .as_ref()
+                    .is_some_and(|e| !matches!(e, Expectation::DownloadStarted))
+            {
+                Some(super::destination::DestinationWatch::begin(self, options.destination).await?)
+            } else {
+                None
+            };
+            dispatch.note("preparation");
             cleanup.input = Some(ActionInput::acquire(self.session()).await?);
             let download_frames = if matches!(options.expect, Some(Expectation::DownloadStarted)) {
                 self.frames()
@@ -164,6 +181,7 @@ impl Page {
             };
 
             receipt.already_satisfied = matches!(verification, Verification::Noop);
+            dispatch.note("verification");
             match verification {
                 Verification::Properties { field, expected } => {
                     loop {
@@ -218,11 +236,11 @@ impl Page {
                             }
                         }
                     }
-                    // Retain the convenience API's brief document-installation interval.
-                    // It remains inside the operation deadline.
-                    tokio::time::sleep(Duration::from_millis(100)).await;
                     self.invalidate_document();
-                    receipt.verification = Some("navigation_commit".into());
+                    while !self.check_expectation(&Expectation::DocumentReady).await? {
+                        perform::pause().await;
+                    }
+                    receipt.verification = Some("document_ready".into());
                 }
                 Verification::Noop => {
                     receipt.verification = Some("already_satisfied".into());
@@ -252,7 +270,15 @@ impl Page {
                 }
             } else if let Some(expect) = &options.expect {
                 loop {
-                    if self.check_expectation(expect).await? {
+                    let target = if let Some(watch) = destination_watch.as_mut() {
+                        watch.check(expect).await?
+                    } else if self.check_expectation(expect).await? {
+                        Some(self.target_id().into())
+                    } else {
+                        None
+                    };
+                    if let Some(target) = target {
+                        receipt.destination_target_id = Some(target);
                         break;
                     }
                     perform::pause().await;
@@ -278,7 +304,12 @@ impl Page {
             execution,
         )
         .await
-        .unwrap_or_else(|_| Err(Error::Timeout("Action deadline exceeded".into())));
+        .unwrap_or_else(|_| {
+            Err(Error::Timeout(format!(
+                "Action deadline exceeded during {}",
+                dispatch.context()
+            )))
+        });
         receipt.finished_at_ms = timestamp();
         receipt.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
         receipt.dispatch = dispatch.state();
@@ -327,6 +358,27 @@ impl Page {
 
     pub(super) async fn check_expectation(&self, expect: &Expectation) -> Result<bool> {
         let (target, field, expected, contains) = match expect {
+            Expectation::DocumentReady => return self
+                .evaluate_sync(
+                    "document.readyState === 'interactive' || document.readyState === 'complete'",
+                )
+                .await,
+            Expectation::All { conditions } => {
+                if conditions.is_empty() {
+                    return Err(Error::cdp_msg(
+                        "invalid_expectation: all requires at least one condition",
+                    ));
+                }
+                for condition in conditions {
+                    if !Box::pin(self.check_expectation(condition)).await? {
+                        return Ok(false);
+                    }
+                }
+                return Ok(true);
+            }
+            Expectation::Enabled { target, enabled } => {
+                (target, "disabled", Value::Bool(!enabled), false)
+            }
             Expectation::DownloadStarted => return Ok(false),
             Expectation::Focused { target } => (target, "focused", Value::Bool(true), false),
             Expectation::Url { value, contains } => {
@@ -360,7 +412,11 @@ impl Page {
         let Some(node) = resolve(self, target).await? else {
             return Ok(matches!(expect, Expectation::Hidden { .. }));
         };
-        let mut actual = node.properties().await?[field].clone();
+        let properties = node.properties().await?;
+        if matches!(expect, Expectation::Enabled { .. }) && properties["visible"] != true {
+            return Ok(false);
+        }
+        let mut actual = properties[field].clone();
         if field == "selected" {
             if let Some(values) = actual.as_array_mut() {
                 values.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
@@ -374,6 +430,54 @@ impl Page {
             actual == expected
         })
     }
+
+    /// Wait for observable page state without dispatching input or replaying an action.
+    pub async fn wait_for_expectation(
+        &self,
+        expectation: &Expectation,
+        timeout_ms: u64,
+    ) -> Result<()> {
+        validate_expectation(expectation, 0)?;
+        if timeout_ms == 0
+            || timeout_ms > 86_400_000
+            || matches!(expectation, Expectation::DownloadStarted)
+        {
+            return Err(Error::cdp_msg("Invalid observation wait"));
+        }
+        tokio::time::timeout(Duration::from_millis(timeout_ms), async {
+            while !self.check_expectation(expectation).await? {
+                perform::pause().await;
+            }
+            Ok(())
+        })
+        .await
+        .map_err(|_| Error::Timeout("Page expectation was not satisfied".into()))?
+    }
+}
+
+fn validate_expectation(expectation: &Expectation, depth: usize) -> Result<()> {
+    if depth > 8 {
+        return Err(Error::cdp_msg("invalid_expectation: nesting exceeds 8"));
+    }
+    match expectation {
+        Expectation::All { conditions } => {
+            if conditions.is_empty() || conditions.len() > 16 {
+                return Err(Error::cdp_msg(
+                    "invalid_expectation: all requires 1 through 16 conditions",
+                ));
+            }
+            for condition in conditions {
+                validate_expectation(condition, depth + 1)?;
+            }
+        }
+        Expectation::DownloadStarted if depth > 0 => {
+            return Err(Error::cdp_msg(
+                "invalid_expectation: download_started must be a standalone event expectation",
+            ))
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 fn timestamp() -> u64 {

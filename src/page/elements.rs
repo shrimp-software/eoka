@@ -213,7 +213,7 @@ impl Page {
             Action::Type {
                 target: LocatorSpec::css(selector),
                 text: text.into(),
-                human: false,
+                input_mode: Default::default(),
             },
             self.action_options.clone(),
         )
@@ -287,7 +287,7 @@ impl Page {
             Action::Fill {
                 target: LocatorSpec::css(selector),
                 value: value.into(),
-                human: false,
+                input_mode: Default::default(),
             },
             self.action_options.clone(),
         )
@@ -315,7 +315,7 @@ impl Page {
             Action::Type {
                 target: LocatorSpec::css(selector),
                 text: text.into(),
-                human: true,
+                input_mode: Default::default(),
             },
             self.action_options.clone(),
         )
@@ -365,7 +365,7 @@ impl Page {
             Action::Fill {
                 target: LocatorSpec::css(selector),
                 value: value.into(),
-                human: true,
+                input_mode: Default::default(),
             },
             self.action_options.clone(),
         )

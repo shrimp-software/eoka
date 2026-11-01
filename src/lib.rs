@@ -72,8 +72,8 @@ pub mod cdp;
 pub mod download;
 pub mod element;
 pub use action::{
-    Action, ActionOptions, ActionOutcome, ActionReceipt, DispatchObserver, DispatchState,
-    Expectation, Locator, LocatorQuery, LocatorSpec,
+    Action, ActionOptions, ActionOutcome, ActionReceipt, ControlState, Destination,
+    DispatchObserver, DispatchState, Expectation, InputMode, Locator, LocatorQuery, LocatorSpec,
 };
 pub mod error;
 pub mod fetch;

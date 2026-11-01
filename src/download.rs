@@ -87,10 +87,7 @@ impl DownloadWatch {
             permit: Some(permit),
             openers: HashMap::new(),
         };
-        watch
-            .transport
-            .send::<_, Value>("Target.setDiscoverTargets", &json!({"discover": true}))
-            .await?;
+        watch.transport.ensure_target_discovery().await?;
         watch
             .transport
             .send::<_, Value>(
@@ -192,11 +189,7 @@ async fn restore(transport: &Transport) -> Result<()> {
                 &json!({"behavior": "default", "eventsEnabled": false}),
             )
             .await;
-        let discovery = transport
-            .send::<_, Value>("Target.setDiscoverTargets", &json!({"discover": false}))
-            .await;
         behavior?;
-        discovery?;
         Ok(())
     })
     .await

@@ -67,9 +67,31 @@ pub struct RemoteObject {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExceptionDetails {
+    #[serde(default)]
     pub text: String,
+    #[serde(default)]
     pub line_number: i32,
+    #[serde(default)]
     pub column_number: i32,
+    #[serde(default)]
+    pub exception: Option<RemoteObject>,
+}
+
+impl ExceptionDetails {
+    /// Format the browser's exception description without including evaluated source.
+    pub fn message(&self) -> String {
+        let description = self
+            .exception
+            .as_ref()
+            .and_then(|e| e.description.as_deref())
+            .unwrap_or(&self.text);
+        let description: String = description.chars().take(8192).collect();
+        format!(
+            "JavaScript error: {description} at {}:{}",
+            self.line_number.saturating_add(1),
+            self.column_number.saturating_add(1)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

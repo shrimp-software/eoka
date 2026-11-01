@@ -79,12 +79,24 @@ src/
     └── fingerprint/catalog.rs # Platform defaults and lookup tables
 ```
 
-## Action contract (0.6)
+## Action contract (0.8)
 
 `Page::explore(Action, ActionOptions)` is the opt-in agent exploration entry point
 in 0.6.1. It preserves actionability, one deadline, durable dispatch hooks and
 cleanup. Without intrinsic or explicit completion evidence, `Ok(receipt)` has
 `OutcomeUnknown`; inspect the receipt. `Page::act` remains strict.
+
+Text fill/type use `InputMode::Sequential` by default and check the original
+input before each character; `InputMode::Bulk` opts into one native insertion.
+`Expectation::DocumentReady`, `Enabled` and `All` express readiness within one
+deadline. `Destination` controls current/new-tab verification, with correlated
+child targets recorded in `ActionReceipt::destination_target_id`.
+`Locator::state` returns a `ControlState` without input values.
+`Page::evaluate_function` and `execute_function` accept a function and bounded
+JSON arguments, execute once in fresh scope and propagate actual exceptions.
+Function results reject non-JSON values before CDP serialization and are limited
+to 1 MiB of UTF-8 JSON. `evaluate_json` and `evaluate_json_in_frame_id` reuse this
+validator for raw expressions with an explicit result byte limit.
 
 See [MIGRATION-0.6.md](MIGRATION-0.6.md). `Page::act(Action, ActionOptions)` and
 `Page::locator`/`locator_text` provide receipts, strict execution-time resolution,
@@ -186,7 +198,7 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 
 ### Page - Network & Cookies
 - `page.fetch_bounded(&BoundedFetchRequest)` - Credentialed streaming text inspection, default 8192 raw bytes, maximum 16 MiB; binary MIME bodies skipped, zero means headers only. Original `Page::fetch` is unchanged.
-- `browser.watch_downloads(staging_directory)` - Owned-browser exclusive native GUID events, popup ancestry and cancellation. Subscribe before triggering, await `stop()` to restore download settings and disable target discovery; failed restoration blocks reuse. File/job policy belongs to eoka-tools. `page.navigate_for_download(url, referrer)` tolerates attachment navigation, but completion requires native events and file verification. Regression: `cargo test --lib download::`.
+- `browser.watch_downloads(staging_directory)` - Owned-browser exclusive native GUID events, popup ancestry and cancellation. Subscribe before triggering, await `stop()` to restore download settings while keeping shared target discovery active; failed restoration blocks reuse. File/job policy belongs to eoka-tools. `page.navigate_for_download(url, referrer)` tolerates attachment navigation, but completion requires native events and file verification. Regression: `cargo test --lib download::`.
 - `page.cookies()` / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
 - `page.clear_all_cookies()` / `page.set_cookies_bulk(cookies)` - Bulk operations
 - `page.set_extra_headers(headers)` / `page.clear_extra_headers()` - Custom HTTP headers

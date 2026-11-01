@@ -1,6 +1,32 @@
 use super::Page;
 use crate::error::{Error, Result};
 
+const MAX_FUNCTION_BYTES: usize = 1_048_576;
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JsonEvaluation {
+    Value { value: serde_json::Value },
+    TooLarge,
+}
+
+impl JsonEvaluation {
+    fn expression(expression: &str, maximum_bytes: usize) -> Result<String> {
+        Ok(format!(
+            "({})({}, {maximum_bytes})",
+            include_str!("json_evaluation.js"),
+            serde_json::to_string(expression)?,
+        ))
+    }
+
+    fn decode<T: serde::de::DeserializeOwned>(self, maximum_bytes: usize) -> Result<T> {
+        match self {
+            Self::Value { value } => Ok(serde_json::from_value(value)?),
+            Self::TooLarge => Err(Error::EvaluationTooLarge { maximum_bytes }),
+        }
+    }
+}
+
 fn evaluated_value(remote: crate::cdp::types::RemoteObject) -> Result<serde_json::Value> {
     match (
         remote.value,
@@ -14,6 +40,103 @@ fn evaluated_value(remote: crate::cdp::types::RemoteObject) -> Result<serde_json
 }
 
 impl Page {
+    /// Call a function once with JSON arguments in a fresh lexical scope.
+    pub async fn evaluate_function<T: serde::de::DeserializeOwned>(
+        &self,
+        function: &str,
+        arguments: &[serde_json::Value],
+    ) -> Result<T> {
+        self.evaluate_json(
+            &Self::function_expression(function, arguments)?,
+            MAX_FUNCTION_BYTES,
+        )
+        .await
+    }
+
+    /// Evaluate once and reject non-JSON values before CDP can coerce them.
+    /// The UTF-8 JSON result must fit `maximum_bytes`, checked inside the browser.
+    pub async fn evaluate_json<T: serde::de::DeserializeOwned>(
+        &self,
+        expression: &str,
+        maximum_bytes: usize,
+    ) -> Result<T> {
+        let result: JsonEvaluation = self
+            .evaluate(&JsonEvaluation::expression(expression, maximum_bytes)?)
+            .await?;
+        result.decode(maximum_bytes)
+    }
+
+    /// Evaluate JSON in an explicit frame's isolated world with the same validation
+    /// and byte limit as [`Page::evaluate_json`].
+    pub async fn evaluate_json_in_frame_id<T: serde::de::DeserializeOwned>(
+        &self,
+        frame_id: &str,
+        expression: &str,
+        maximum_bytes: usize,
+    ) -> Result<T> {
+        let result: JsonEvaluation = self
+            .evaluate_in_frame_id(
+                frame_id,
+                &JsonEvaluation::expression(expression, maximum_bytes)?,
+            )
+            .await?;
+        result.decode(maximum_bytes)
+    }
+
+    /// Call a function once and discard its result while retaining exceptions.
+    pub async fn execute_function(
+        &self,
+        function: &str,
+        arguments: &[serde_json::Value],
+    ) -> Result<()> {
+        let invocation = Self::function_expression(function, arguments)?;
+        self.execute(&format!("(async()=>{{await {invocation};}})()"))
+            .await
+    }
+
+    /// Build an explicit function invocation; arguments never become executable source.
+    pub fn function_expression(function: &str, arguments: &[serde_json::Value]) -> Result<String> {
+        fn validate(value: &serde_json::Value, depth: usize) -> Result<()> {
+            if depth > 64 {
+                return Err(Error::cdp_msg("JavaScript argument nesting exceeds 64"));
+            }
+            match value {
+                serde_json::Value::Number(n)
+                    if n.as_f64().is_none_or(|n| {
+                        !n.is_finite() || (n.fract() == 0.0 && n.abs() > 9_007_199_254_740_991.0)
+                    }) =>
+                {
+                    return Err(Error::cdp_msg(
+                        "JavaScript argument contains an unsafe number",
+                    ))
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        validate(value, depth + 1)?;
+                    }
+                }
+                serde_json::Value::Object(values) => {
+                    for value in values.values() {
+                        validate(value, depth + 1)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        for value in arguments {
+            validate(value, 0)?;
+        }
+        let args = serde_json::to_string(arguments)?;
+        if args.len() > MAX_FUNCTION_BYTES || function.len() > MAX_FUNCTION_BYTES {
+            return Err(Error::cdp_msg(
+                "JavaScript function or arguments exceed 1 MiB",
+            ));
+        }
+        let encoded = serde_json::to_string(&args)?;
+        Ok(format!("({function})(...JSON.parse({encoded}))"))
+    }
+
     /// Evaluate JavaScript and return the result
     pub async fn evaluate<T: serde::de::DeserializeOwned>(&self, expression: &str) -> Result<T> {
         self.eval_impl(self.session.evaluate(expression).await?)
@@ -55,10 +178,7 @@ impl Page {
         result: crate::cdp::types::RuntimeEvaluateResult,
     ) -> Result<crate::cdp::types::RemoteObject> {
         if let Some(exception) = result.exception_details {
-            return Err(Error::cdp_msg(format!(
-                "JavaScript error: {} at {}:{}",
-                exception.text, exception.line_number, exception.column_number
-            )));
+            return Err(Error::cdp_msg(exception.message()));
         }
         Ok(result.result)
     }

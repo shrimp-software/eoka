@@ -29,8 +29,10 @@ pub(super) async fn mutation(
         "objectId":node.object,"functionDeclaration":function,"returnByValue":true,"awaitPromise":true,
         "arguments":args.into_iter().map(|value|json!({"value":value})).collect::<Vec<_>>(),
     }), preparation).await?;
-    if result.get("exceptionDetails").is_some() {
-        return Err(Error::cdp_msg("Action mutation failed"));
+    if let Some(exception) = result.get("exceptionDetails").filter(|v| !v.is_null()) {
+        let exception: crate::cdp::types::ExceptionDetails =
+            serde_json::from_value(exception.clone())?;
+        return Err(Error::cdp_msg(exception.message()));
     }
     Ok(result["result"]["value"].clone())
 }
@@ -46,6 +48,7 @@ pub(super) async fn prepare(
     };
     loop {
         let Some(node) = resolve(page, target).await? else {
+            dispatch.note("preparation: target not found");
             if !wait {
                 return Err(Error::ElementNotFound("Action target".into()));
             }
@@ -65,6 +68,15 @@ pub(super) async fn prepare(
             || (!upload && props["visible"] != true)
             || (editable && props["editable"] != true)
         {
+            dispatch.note(if props["connected"] != true {
+                "preparation: target disconnected"
+            } else if props["disabled"] == true {
+                "preparation: target disabled"
+            } else if props["visible"] != true {
+                "preparation: target hidden"
+            } else {
+                "preparation: target readonly or not editable"
+            });
             if !wait {
                 return Err(Error::ElementNotVisible {
                     selector: "Action target".into(),
@@ -80,6 +92,11 @@ pub(super) async fn prepare(
             let stable = node.call("function(){return new Promise(resolve=>requestAnimationFrame(()=>{const a=this.getBoundingClientRect();requestAnimationFrame(()=>{const b=this.getBoundingClientRect();resolve(this.isConnected && ['x','y','width','height'].every(k=>Math.abs(a[k]-b[k])<0.5))})}))}",vec![]).await?;
             let current = node.properties().await?;
             if stable != true || (pointer && current["receives"] != true) {
+                dispatch.note(if stable != true {
+                    "preparation: target moving"
+                } else {
+                    "preparation: target covered"
+                });
                 if !wait {
                     return Err(Error::ElementNotVisible {
                         selector: "Action target".into(),
@@ -89,6 +106,7 @@ pub(super) async fn prepare(
                 continue;
             }
         }
+        dispatch.note("input dispatch");
         return Ok(Some(node));
     }
 }
@@ -170,6 +188,18 @@ async fn require_focused_editable(node: &Node) -> Result<()> {
     Ok(())
 }
 
+async fn type_into(
+    node: &Node,
+    input: &mut ActionInput,
+    dispatch: &Dispatch,
+    text: &str,
+    mode: crate::InputMode,
+) -> Result<()> {
+    input
+        .text(dispatch, text, mode, || require_focused_editable(node))
+        .await
+}
+
 pub(super) async fn perform(
     page: &Page,
     action: &Action,
@@ -193,7 +223,11 @@ pub(super) async fn perform(
     };
     match action {
         Action::InsertText { text } => {
-            input.text(dispatch, text, false).await?;
+            input
+                .text(dispatch, text, crate::InputMode::default(), || async {
+                    Ok(())
+                })
+                .await?;
             Ok(Verification::Explicit)
         }
         Action::Drag { dx, dy, .. } => {
@@ -240,7 +274,9 @@ pub(super) async fn perform(
             }
             Ok(Verification::Explicit)
         }
-        Action::Fill { value, human, .. } => {
+        Action::Fill {
+            value, input_mode, ..
+        } => {
             let node = required()?;
             let props = node.properties().await?;
             let expected = if props["type"] == "range" {
@@ -259,12 +295,13 @@ pub(super) async fn perform(
                 mutation(node,dispatch,"function(v){this.value=v;this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}))}",vec![expected.clone()],false).await?;
             } else {
                 mutation(node,dispatch,"function(){this.focus();if(this.isContentEditable){const r=this.ownerDocument.createRange();r.selectNodeContents(this);const s=this.ownerDocument.getSelection();s.removeAllRanges();s.addRange(r)}else{this.select()}}",vec![],true).await?;
-                require_focused_editable(node).await?;
-                input.text(dispatch, value, *human).await?;
+                type_into(node, input, dispatch, value, *input_mode).await?;
             }
             Ok(property("value", expected))
         }
-        Action::Type { text, human, .. } => {
+        Action::Type {
+            text, input_mode, ..
+        } => {
             mutation(
                 required()?,
                 dispatch,
@@ -273,8 +310,7 @@ pub(super) async fn perform(
                 true,
             )
             .await?;
-            require_focused_editable(required()?).await?;
-            input.text(dispatch, text, *human).await?;
+            type_into(required()?, input, dispatch, text, *input_mode).await?;
             Ok(Verification::Explicit)
         }
         Action::Select { values, .. } => {
@@ -456,7 +492,12 @@ async fn navigate(page: &Page, dispatch: &Dispatch, params: Value) -> Result<Ver
         .as_str()
         .is_some_and(|e| e != "net::ERR_HTTP_RESPONSE_CODE_FAILURE" && e != "net::ERR_ABORTED")
     {
-        return Err(Error::Navigation("Navigation failed".into()));
+        return Err(Error::Navigation(
+            result["errorText"]
+                .as_str()
+                .unwrap_or("Navigation failed")
+                .into(),
+        ));
     }
     Ok(Verification::Navigation {
         loader: result["loaderId"].as_str().map(str::to_owned),
