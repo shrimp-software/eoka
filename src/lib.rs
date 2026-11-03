@@ -139,8 +139,9 @@ pub struct StealthConfig {
     /// Absolute parent directory for a unique private browser runtime.
     /// The parent is preserved; only Eoka's owned child is removed.
     pub runtime_dir: Option<String>,
-    /// Enable Chrome's sandbox. Defaults to false for existing callers.
-    /// Unsupported sandbox environments fail without an unsandboxed retry.
+    /// Enable Chrome's sandbox. Defaults to true. Unsupported sandbox
+    /// environments (some containers/CI) fail without an unsandboxed retry;
+    /// set this to false there explicitly.
     pub sandbox: bool,
     /// Patch Chrome binary to bypass detection
     pub patch_binary: bool,
@@ -159,9 +160,10 @@ pub struct StealthConfig {
     /// Durable Chrome user-data directory. When set, Eoka preserves the
     /// profile and its full fingerprint identity across browser launches.
     ///
-    /// A running instance may be borrowed only with the legacy default launch
-    /// policy. Explicit executable/runtime paths or sandboxing reject reuse,
-    /// since those launch requirements cannot be applied to another process.
+    /// A running instance may be borrowed only without explicit
+    /// executable/runtime paths, since those cannot be applied to another
+    /// process. With `sandbox` enabled, it is borrowed only when its argv is
+    /// readable and carries no sandbox-disabling flag.
     pub user_data_dir: Option<String>,
     /// Named profile within `user_data_dir` (Chrome's `--profile-directory`,
     /// e.g. "Profile 1"). Only meaningful when `user_data_dir` is set;
@@ -232,7 +234,7 @@ impl Default for StealthConfig {
             headless: true,
             chrome_path: None,
             runtime_dir: None,
-            sandbox: false,
+            sandbox: true,
             patch_binary: true,
             viewport_width: 1920,
             viewport_height: 1080,

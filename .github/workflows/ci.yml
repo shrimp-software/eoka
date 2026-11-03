@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
-      CHROME_VERSION: 155.0.8059.39
+      CHROME_VERSION: 156.0.8078.80
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
@@ -98,6 +98,11 @@ jobs:
           rustc --version
           command -v Xvfb
           xvfb-run -a true
+      - name: Allow Chrome's namespace sandbox on the ephemeral runner
+        # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces, and the
+        # unzipped Chrome for Testing has no setuid helper. Tests run with the
+        # default (sandboxed) launch policy, so lift the restriction here.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run every ignored browser test
         shell: bash
         run: |
