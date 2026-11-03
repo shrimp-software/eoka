@@ -179,7 +179,11 @@ impl Drop for PreparedBrowserLaunch {
 /// implemented) — the caller should spawn normally. Returns `Err` when a
 /// live instance exists but can't safely be attached to (headless/headed
 /// mismatch, no debug port, or an unresponsive port).
-fn try_attach_existing(profile_dir: &Path, want_headless: bool) -> Result<Option<String>> {
+fn try_attach_existing(
+    profile_dir: &Path,
+    want_headless: bool,
+    require_sandbox: bool,
+) -> Result<Option<String>> {
     use crate::cdp::discover;
 
     let Some(pid) = discover::read_singleton_lock(profile_dir) else {
@@ -193,10 +197,26 @@ fn try_attach_existing(profile_dir: &Path, want_headless: bool) -> Result<Option
         return Ok(None);
     }
 
+    let argv = discover::read_process_argv(pid);
+    // Sandboxing is the default, so reuse stays possible, but only of the
+    // same pid we attach to, verifiably launched without sandbox-disabling
+    // flags. Unreadable argv is unverified, never assumed sandboxed.
+    if require_sandbox
+        && argv
+            .as_ref()
+            .is_none_or(|argv| argv.iter().any(|arg| disables_sandbox(arg)))
+    {
+        return Err(Error::Launch(format!(
+            "A Chrome instance (pid {}) is already running on profile {} without a verifiable \
+             sandbox; close it, or set StealthConfig.sandbox = false to borrow it",
+            pid,
+            profile_dir.display()
+        )));
+    }
     // Check the cheap local signal before touching the network — a
     // headless/headed mismatch always fails the attach, so there's no
     // reason to round-trip to Chrome's DevTools port first.
-    if let Some(argv) = discover::read_process_argv(pid) {
+    if let Some(argv) = argv {
         let running_headless = argv.iter().any(|arg| arg.starts_with("--headless"));
         if running_headless != want_headless {
             let (running, requested) = if running_headless {
@@ -263,15 +283,15 @@ pub(super) fn prepare_browser_launch(
     // Only a durable, user-owned profile can already have a live Chrome on
     // it — ephemeral profiles are freshly created above and can't collide.
     if !profile.owned {
-        if (config.chrome_path.is_some() || config.runtime_dir.is_some() || config.sandbox)
+        if (config.chrome_path.is_some() || config.runtime_dir.is_some())
             && crate::cdp::discover::read_singleton_lock(&profile.path)
                 .is_some_and(crate::cdp::discover::pid_is_alive)
         {
             return Err(Error::Launch(
-                "A Chrome instance is already running on this profile; explicit executable, runtime or sandbox policy requires a new process".into(),
+                "A Chrome instance is already running on this profile; explicit executable or runtime policy requires a new process".into(),
             ));
         }
-        if let Some(ws_url) = try_attach_existing(&profile.path, config.headless)? {
+        if let Some(ws_url) = try_attach_existing(&profile.path, config.headless, config.sandbox)? {
             tracing::info!("Reusing running Chrome on profile {:?}", profile.path);
             let fingerprint = Fingerprint::resolve_for_profile(
                 config.user_agent.as_deref(),
@@ -371,19 +391,30 @@ fn validate_executable(path: &Path) -> Result<PathBuf> {
     Ok(std::fs::canonicalize(path)?)
 }
 
+/// Chromium accepts `--`, `-` (and `/` on Windows) switch prefixes and
+/// matches names case-insensitively on Windows, so normalize before matching.
+/// Includes switches that run sandboxed code in the browser process.
+fn disables_sandbox(arg: &str) -> bool {
+    let name = arg.split('=').next().unwrap_or(arg);
+    let name = name.trim_start_matches(['-', '/']).to_ascii_lowercase();
+    matches!(
+        name.as_str(),
+        "no-sandbox"
+            | "no-sandbox-and-elevated"
+            | "disable-sandbox"
+            | "disable-setuid-sandbox"
+            | "disable-seccomp-filter-sandbox"
+            | "disable-namespace-sandbox"
+            | "disable-gpu-sandbox"
+            | "no-zygote"
+            | "single-process"
+            | "in-process-gpu"
+    )
+}
+
 fn validate_sandbox_args(config: &StealthConfig) -> Result<()> {
     for arg in &config.extra_args {
-        let name = arg.split('=').next().unwrap_or(arg);
-        if matches!(
-            name,
-            "--no-sandbox"
-                | "--no-sandbox-and-elevated"
-                | "--disable-sandbox"
-                | "--disable-setuid-sandbox"
-                | "--disable-seccomp-filter-sandbox"
-                | "--disable-namespace-sandbox"
-                | "--disable-gpu-sandbox"
-        ) {
+        if disables_sandbox(arg) {
             return Err(Error::Launch(format!(
                 "Sandbox arguments must use StealthConfig.sandbox, not extra_args: {}",
                 arg,
@@ -413,6 +444,30 @@ fn installed_chrome_user_agent(
 
 #[cfg(all(test, unix))]
 mod try_attach_existing_tests {
+    #[test]
+    fn sandbox_switches_match_every_chromium_prefix_and_case() {
+        for arg in [
+            "--no-sandbox",
+            "-no-sandbox",
+            "/no-sandbox",
+            "--No-Sandbox",
+            "--disable-gpu-sandbox=1",
+            "--single-process",
+            "--no-zygote",
+            "--in-process-gpu",
+        ] {
+            assert!(disables_sandbox(arg), "{arg}");
+        }
+        for arg in [
+            "--headless=new",
+            "--sandbox-ipc",
+            "chrome",
+            "--no-sandboxing",
+        ] {
+            assert!(!disables_sandbox(arg), "{arg}");
+        }
+    }
+
     use super::*;
     use crate::browser::{accept_language_for, ua_override_for};
     use crate::stealth::build_evasion_script_for;
@@ -444,7 +499,7 @@ mod try_attach_existing_tests {
     #[test]
     fn no_lock_returns_none() {
         let dir = temp_profile_dir("no-lock");
-        assert!(try_attach_existing(&dir, true).unwrap().is_none());
+        assert!(try_attach_existing(&dir, true, false).unwrap().is_none());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -454,7 +509,7 @@ mod try_attach_existing_tests {
         // A pid this large is never a real live process.
         symlink("some-host-2147483647", dir.join("SingletonLock")).unwrap();
 
-        assert!(try_attach_existing(&dir, true).unwrap().is_none());
+        assert!(try_attach_existing(&dir, true, false).unwrap().is_none());
         assert!(
             !dir.join("SingletonLock").exists(),
             "stale lock should have been removed"
@@ -468,7 +523,9 @@ mod try_attach_existing_tests {
         lock_self(&dir);
         // No DevToolsActivePort written — if the headless check didn't run
         // first, this would produce the "no debug port" error instead.
-        let error = try_attach_existing(&dir, true).unwrap_err().to_string();
+        let error = try_attach_existing(&dir, true, false)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("non-headless") && error.contains("requesting headless mode"),
             "expected a headless/headed mismatch error, got: {}",
@@ -484,7 +541,9 @@ mod try_attach_existing_tests {
 
         // Matches our own (non-headless) argv, so the headless check passes
         // and the missing-port error is what should surface.
-        let error = try_attach_existing(&dir, false).unwrap_err().to_string();
+        let error = try_attach_existing(&dir, false, false)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("debug port"),
             "expected a missing-debug-port error, got: {}",
@@ -500,7 +559,9 @@ mod try_attach_existing_tests {
         // Port 0 is never a connectable listener.
         std::fs::write(dir.join("DevToolsActivePort"), "0\n/devtools/browser/x\n").unwrap();
 
-        let error = try_attach_existing(&dir, false).unwrap_err().to_string();
+        let error = try_attach_existing(&dir, false, false)
+            .unwrap_err()
+            .to_string();
         assert!(
             error.contains("isn't responding"),
             "expected an unresponsive-port error, got: {}",

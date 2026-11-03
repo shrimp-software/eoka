@@ -648,13 +648,14 @@ println!("{}", browser.version().await?); // actual CDP browser product
 browser.close().await?;
 ```
 
-`sandbox: false` retains existing callers' unsandboxed launch behavior.
-Set `sandbox: true` to enable Chrome's sandbox; an unsupported environment
-returns the launch error without retrying unsandboxed. Sandbox-control switches
-in `extra_args` are rejected: use the boolean rather than conflicting arguments.
-Existing-profile reuse cannot apply new launch policy, so an active profile
-rejects explicit executable/runtime paths or enabled sandboxing. Legacy default
-reuse remains borrowed and does not modify existing tabs.
+Chrome's sandbox is enabled by default (`sandbox: true`). An unsupported
+environment (some containers and CI runners) returns the launch error without
+retrying unsandboxed; set `sandbox: false` explicitly there. Sandbox-control
+switches in `extra_args` are rejected: use the boolean rather than conflicting
+arguments. Existing-profile reuse cannot apply new launch policy, so an active
+profile rejects explicit executable/runtime paths, and with `sandbox: true` it
+is borrowed only when the running process's argv is readable and has no
+sandbox-disabling flag. Borrowed reuse does not modify existing tabs.
 
 `Browser::close` terminates owned Chrome and reports runtime cleanup failures.
 `Browser::disconnect` does not send `Browser.close`, but still terminates an owned

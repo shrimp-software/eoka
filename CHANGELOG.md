@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** `StealthConfig::sandbox` now defaults to `true`, so Eoka no
+  longer launches Chrome with `--no-sandbox` unless asked. Environments that
+  cannot run Chrome's sandbox (some containers/CI) must set `sandbox = false`
+  explicitly; launch fails rather than silently retrying unsandboxed.
+- Reusing a running Chrome on a durable profile with `sandbox = true` is now
+  allowed when that process's argv is readable and has no sandbox-disabling
+  flag (previously any sandboxed reuse was rejected).
+- Sandbox-disabling switch detection now normalizes `-`/`/` prefixes and case,
+  and also treats `--single-process`, `--no-zygote` and `--in-process-gpu` as
+  disabling the sandbox, both for `extra_args` and for reuse verification.
+
 ## [0.7.3] - Unreleased
 
 ### Added

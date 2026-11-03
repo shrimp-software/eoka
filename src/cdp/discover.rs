@@ -82,7 +82,7 @@ pub(crate) fn read_process_argv(pid: u32) -> Option<Vec<String>> {
     {
         // No /proc/<pid>/cmdline on macOS; shell out to `ps` instead.
         let output = std::process::Command::new("ps")
-            .args(["-p", &pid.to_string(), "-o", "args="])
+            .args(["-ww", "-p", &pid.to_string(), "-o", "args="])
             .output()
             .ok()?;
         if !output.status.success() {

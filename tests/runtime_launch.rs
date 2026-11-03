@@ -207,12 +207,11 @@ async fn explicit_policy_rejects_active_profile_and_sandbox_extra_args() {
     .unwrap();
     let source = root.0.join("chrome");
     executable(&source, "#!/bin/sh\nexit 99\n");
-    for policy in 0..3 {
+    for policy in 0..2 {
         let config = StealthConfig {
             chrome_path: (policy == 0).then(|| source.to_string_lossy().into_owned()),
             runtime_dir: (policy == 1)
                 .then(|| root.0.join("runtime").to_string_lossy().into_owned()),
-            sandbox: policy == 2,
             user_data_dir: Some(profile.to_string_lossy().into_owned()),
             ..Default::default()
         };
@@ -223,6 +222,62 @@ async fn explicit_policy_rejects_active_profile_and_sandbox_extra_args() {
         assert!(error.to_string().contains("already running"), "{error}");
         assert!(std::fs::symlink_metadata(profile.join("SingletonLock")).is_ok());
     }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn sandboxed_default_borrows_only_verifiably_sandboxed_profiles() {
+    assert!(StealthConfig::default().sandbox, "sandbox must default on");
+    let root = Directory::new();
+    let profile = root.0.join("profile");
+    std::fs::create_dir(&profile).unwrap();
+    let launch = || {
+        Browser::launch_with_config(StealthConfig {
+            user_data_dir: Some(profile.to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+    };
+    let lock = |pid: u32| {
+        let _ = std::fs::remove_file(profile.join("SingletonLock"));
+        std::os::unix::fs::symlink(format!("fixture-{pid}"), profile.join("SingletonLock"))
+            .unwrap();
+    };
+
+    // An unsandboxed live process is never borrowed by a sandboxed launch.
+    let mut unsandboxed = Command::new("sh")
+        .args([
+            "-c",
+            "sleep 30; exit 0",
+            "sh",
+            "--headless=new",
+            "--no-sandbox",
+        ])
+        .spawn()
+        .unwrap();
+    lock(unsandboxed.id());
+    let error = launch().await.err().expect("unsandboxed reuse must fail");
+    unsandboxed.kill().unwrap();
+    unsandboxed.wait().unwrap();
+    assert!(error.to_string().contains("verifiable sandbox"), "{error}");
+
+    // A process without sandbox-disabling flags passes the sandbox check and
+    // proceeds to normal attach (which fails here only for lack of a port).
+    let mut sandboxed = Command::new("sh")
+        .args(["-c", "sleep 30; exit 0", "sh", "--headless=new"])
+        .spawn()
+        .unwrap();
+    lock(sandboxed.id());
+    let error = launch().await.err().expect("fixture has no DevTools port");
+    sandboxed.kill().unwrap();
+    sandboxed.wait().unwrap();
+    assert!(error.to_string().contains("debug port"), "{error}");
+}
+
+#[tokio::test]
+async fn sandbox_extra_args_are_rejected() {
+    let root = Directory::new();
+    let source = root.0.join("chrome");
+    executable(&source, "#!/bin/sh\nexit 99\n");
     for sandbox in [false, true] {
         let error = Browser::launch_with_config(StealthConfig {
             chrome_path: Some(source.to_string_lossy().into_owned()),
