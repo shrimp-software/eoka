@@ -71,12 +71,7 @@ pub(crate) fn read_process_argv(pid: u32) -> Option<Vec<String>> {
     #[cfg(target_os = "linux")]
     {
         let raw = std::fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
-        Some(
-            raw.split(|&b| b == 0)
-                .filter(|piece| !piece.is_empty())
-                .map(|piece| String::from_utf8_lossy(piece).into_owned())
-                .collect(),
-        )
+        Some(parse_proc_cmdline(&raw))
     }
     #[cfg(target_os = "macos")]
     {
@@ -94,6 +89,24 @@ pub(crate) fn read_process_argv(pid: u32) -> Option<Vec<String>> {
                 .map(str::to_owned)
                 .collect(),
         )
+    }
+}
+
+/// Split `/proc/<pid>/cmdline`. Chrome may rewrite its process title so the
+/// whole command line becomes one space-joined string (Chrome for Testing 156
+/// does); split that back into words so switch detection still sees each flag.
+#[cfg(any(target_os = "linux", test))]
+fn parse_proc_cmdline(raw: &[u8]) -> Vec<String> {
+    let pieces: Vec<String> = raw
+        .split(|&b| b == 0)
+        .filter(|piece| !piece.is_empty())
+        .map(|piece| String::from_utf8_lossy(piece).into_owned())
+        .collect();
+    match pieces.as_slice() {
+        [title] if title.contains(char::is_whitespace) => {
+            title.split_whitespace().map(str::to_owned).collect()
+        }
+        _ => pieces,
     }
 }
 
@@ -475,6 +488,31 @@ mod singleton_tests {
         let dir = temp_profile_dir("no-lock");
         assert!(read_singleton_lock(&dir).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn proc_cmdline_splits_rewritten_process_title() {
+        let argv =
+            parse_proc_cmdline(b"/opt/chrome --headless=new --no-sandbox --user-data-dir=/p\0");
+        assert_eq!(
+            argv,
+            [
+                "/opt/chrome",
+                "--headless=new",
+                "--no-sandbox",
+                "--user-data-dir=/p"
+            ]
+        );
+        let argv =
+            parse_proc_cmdline(b"/opt/chrome\0--user-agent=Mozilla/5.0 (X11)\0--headless=new\0");
+        assert_eq!(
+            argv,
+            [
+                "/opt/chrome",
+                "--user-agent=Mozilla/5.0 (X11)",
+                "--headless=new"
+            ]
+        );
     }
 
     #[test]
