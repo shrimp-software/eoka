@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **Security:** sandbox verification for durable-profile reuse failed open on
+  Linux when Chrome rewrites its process title (Chrome for Testing 156 joins
+  `/proc/<pid>/cmdline` into one space-separated string). `--no-sandbox` was
+  not detected, so a sandboxed launch could borrow an unsandboxed browser. The
+  same parsing made headless instances look headed. Rewritten titles are now
+  split back into arguments.
+
 ## [0.9.0] - 2026-11-04
 
 ### Changed
