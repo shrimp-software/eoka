@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.9.0] - 2026-11-04
 
 ### Changed
 
@@ -17,7 +17,28 @@ All notable changes to this project will be documented in this file.
   and also treats `--single-process`, `--no-zygote` and `--in-process-gpu` as
   disabling the sandbox, both for `extra_args` and for reuse verification.
 
-## [0.7.3] - Unreleased
+## [0.8.0] - 2026-10-31
+
+### Changed
+
+- **Breaking:** text input is sequential by default, with target checks before
+  every character; bulk insertion is explicit.
+- **Breaking:** function evaluation rejects non-JSON results (for example
+  `{n: NaN}`) instead of letting CDP silently coerce them, with a 1 MiB UTF-8
+  result limit and actual exception descriptions.
+
+### Added
+
+- Document-ready, enabled and composite expectations; destination selection and
+  destination IDs in action receipts.
+
+### Fixed
+
+- Popup verification keeps checking eligible destinations after the originating
+  window closes or a candidate's execution context changes, within the original
+  deadline.
+
+## [0.7.3] - 2026-10-18
 
 ### Added
 
