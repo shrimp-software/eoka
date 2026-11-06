@@ -96,6 +96,7 @@ pub(crate) fn read_process_argv(pid: u32) -> Option<Vec<String>> {
 /// whole command line becomes one space-joined string (Chrome for Testing 156
 /// does); split that back into words so switch detection still sees each flag.
 #[cfg(any(target_os = "linux", test))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn parse_proc_cmdline(raw: &[u8]) -> Vec<String> {
     let pieces: Vec<String> = raw
         .split(|&b| b == 0)

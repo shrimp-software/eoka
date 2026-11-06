@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "Cargo.toml"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -15,6 +16,7 @@ env:
 jobs:
   publish:
     name: Tag & Publish to crates.io
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -30,28 +32,43 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
 
-      - name: Check if tag exists
+      - name: Check crates.io and tag state
         id: check
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "exists=true" >> $GITHUB_OUTPUT
-            echo "Tag v${{ steps.version.outputs.version }} already exists, skipping"
+          set -euo pipefail
+          status=$(curl -sS -o /dev/null -w "%{http_code}" -A "eoka-publish (${{ github.repository }})" \
+            "https://crates.io/api/v1/crates/eoka/${VERSION}" || echo 000)
+          case "$status" in
+            200) echo "published=true" >> "$GITHUB_OUTPUT" ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "crates.io returned ${status} for eoka ${VERSION}"; exit 1 ;;
+          esac
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "tagged=true" >> "$GITHUB_OUTPUT"
           else
-            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "tagged=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Create tag
-        if: steps.check.outputs.exists == 'false'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
-
+      # Publish before tagging: a failed publish must leave no tag behind, so a
+      # rerun (or the next push) retries instead of skipping the release.
       - name: Install Rust
-        if: steps.check.outputs.exists == 'false'
+        if: steps.check.outputs.published == 'false'
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
 
       - name: Publish to crates.io
-        if: steps.check.outputs.exists == 'false'
-        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        if: steps.check.outputs.published == 'false'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --locked
+
+      - name: Create tag
+        if: steps.check.outputs.tagged == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin "v${VERSION}"
