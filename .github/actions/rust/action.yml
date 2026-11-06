@@ -1,0 +1,34 @@
+name: Rust toolchain and cache
+description: Install a Rust toolchain and restore the cargo cache. Shared by eoka and eoka-tools.
+inputs:
+  toolchain:
+    description: Toolchain to install
+    default: stable
+  components:
+    description: Extra components (e.g. "rustfmt, clippy")
+    default: ""
+  targets:
+    description: Extra targets
+    default: ""
+  cache-key:
+    description: Extra cache key, for jobs whose build differs
+    default: ""
+  workspaces:
+    description: Workspaces to cache (rust-cache syntax)
+    default: ". -> target"
+  save-cache:
+    description: Whether this job may write the cache
+    default: "true"
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}
+    - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        key: ${{ inputs.cache-key }}
+        workspaces: ${{ inputs.workspaces }}
+        save-if: ${{ inputs.save-cache }}

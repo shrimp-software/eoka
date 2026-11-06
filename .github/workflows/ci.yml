@@ -1,14 +1,16 @@
 name: CI
 
 on:
-  push:
-    branches: [main, master]
   pull_request:
     branches: [main, master]
     # labeled/unlabeled re-evaluate the downstream-breaking escape hatch.
     types: [opened, synchronize, reopened, labeled, unlabeled]
-  # Nightly: browser tests against the latest stable Chrome for Testing (not
-  # the pin) and the downstream check against eoka-tools main.
+  # The merge queue tests the exact commit that lands, so main is not
+  # re-tested after merge.
+  merge_group:
+  # Nightly on main: browser tests against the latest stable Chrome for
+  # Testing (not the pin), the downstream check against eoka-tools main, and
+  # a warm cache for pull requests.
   schedule:
     - cron: "23 7 * * *"
   workflow_dispatch:
@@ -31,11 +33,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: ./.github/actions/rust
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo clippy --all-features --all-targets --locked -- -D warnings
 
   msrv:
@@ -43,10 +44,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+      - uses: ./.github/actions/rust
         with:
           toolchain: 1.85.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --lib --all-features --locked
 
   unit:
@@ -58,12 +58,34 @@ jobs:
         os: [ubuntu-latest, macos-15, windows-2025]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: ./.github/actions/rust
       - run: cargo test --all-features --locked
+
+  # Compile the browser tests once per OS; the shards only run them.
+  browser-build:
+    name: Browser build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/rust
+        with:
+          cache-key: browser
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-nextest
+      - run: cargo nextest archive --all-features --locked --archive-file nextest.tar.zst
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nextest-${{ matrix.os }}
+          path: nextest.tar.zst
+          retention-days: 1
 
   browser:
     name: Browser (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})
+    needs: browser-build
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
@@ -79,37 +101,48 @@ jobs:
           - { os: macos-15, shard: 2, shards: 2 }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
         with:
           tool: cargo-nextest
-      - name: Install Chrome for Testing and Xvfb
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nextest-${{ matrix.os }}
+      - name: Resolve Chrome for Testing version
         if: runner.os == 'Linux'
         env:
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          set -euo pipefail
           if [ "$EVENT_NAME" = schedule ]; then
             version=$(curl -sSf https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json | jq -r .channels.Stable.version)
           else
             version=$(cat .github/chrome-version)
           fi
-          echo "Chrome for Testing ${version}"
+          echo "CHROME_VERSION=${version}" >> "$GITHUB_ENV"
+      - name: Cache Chrome for Testing
+        if: runner.os == 'Linux'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/eoka-chrome
+          key: chrome-for-testing-linux64-${{ env.CHROME_VERSION }}
+      - name: Install Chrome for Testing and Xvfb
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y xvfb xauth libnss3 libatk-bridge2.0-0 libgbm1 libasound2t64
-          mkdir -p "$RUNNER_TEMP/eoka-chrome"
-          curl --fail --location --retry 3 \
-            "https://storage.googleapis.com/chrome-for-testing-public/${version}/linux64/chrome-linux64.zip" \
-            --output "$RUNNER_TEMP/eoka-chrome/chrome.zip"
-          unzip -q "$RUNNER_TEMP/eoka-chrome/chrome.zip" -d "$RUNNER_TEMP/eoka-chrome"
+          dir="$RUNNER_TEMP/eoka-chrome"
+          if [ ! -x "$dir/chrome-linux64/chrome" ]; then
+            mkdir -p "$dir"
+            curl --fail --location --retry 3 \
+              "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chrome-linux64.zip" \
+              --output "$dir/chrome.zip"
+            unzip -q "$dir/chrome.zip" -d "$dir"
+            rm "$dir/chrome.zip"
+          fi
           # Keep the launcher beside the ELF so the patcher finds Chrome's resources.
-          cat > "$RUNNER_TEMP/eoka-chrome/chrome-linux64/google-chrome" <<'SH'
-          #!/bin/sh
-          exec "$(dirname "$(readlink -f "$0")")/chrome" "$@"
-          SH
-          chmod +x "$RUNNER_TEMP/eoka-chrome/chrome-linux64/google-chrome"
-          sudo ln -sf "$RUNNER_TEMP/eoka-chrome/chrome-linux64/google-chrome" /usr/bin/google-chrome
+          printf '#!/bin/sh\nexec "$(dirname "$(readlink -f "$0")")/chrome" "$@"\n' > "$dir/chrome-linux64/google-chrome"
+          chmod +x "$dir/chrome-linux64/google-chrome"
+          sudo ln -sf "$dir/chrome-linux64/google-chrome" /usr/bin/google-chrome
           /usr/bin/google-chrome --version
           # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces, and the
           # unzipped Chrome for Testing has no setuid helper. Tests run with
@@ -122,8 +155,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          run=(cargo nextest run --profile ci --all-features --locked --run-ignored only
-            --partition "hash:${{ matrix.shard }}/${{ matrix.shards }}"
+          run=(cargo nextest run --profile ci --archive-file nextest.tar.zst --workspace-remap .
+            --run-ignored only --partition "hash:${{ matrix.shard }}/${{ matrix.shards }}"
             -E 'not test(/known_gap/)')
           if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a "${run[@]}"; else "${run[@]}"; fi
       - name: Upload test report
@@ -147,11 +180,9 @@ jobs:
           ref: main
           path: downstream
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: ./.github/actions/rust
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
           workspaces: downstream
       - run: .github/scripts/downstream.sh downstream
 
@@ -169,7 +200,7 @@ jobs:
   ci-ok:
     name: CI OK
     if: always()
-    needs: [lint, msrv, unit, browser, downstream, deny]
+    needs: [lint, msrv, unit, browser-build, browser, downstream, deny]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -192,6 +223,7 @@ jobs:
       issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: .github/scripts/nightly-issue.sh ${{ needs.ci-ok.result }}
+      - uses: ./.github/actions/nightly-issue
+        with:
+          result: ${{ needs.ci-ok.result }}
+          token: ${{ github.token }}

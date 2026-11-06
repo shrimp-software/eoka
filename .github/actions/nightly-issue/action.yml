@@ -1,0 +1,17 @@
+name: Nightly status issue
+description: Keep one open issue per failing scheduled workflow; close it on the next green run. Shared by eoka and eoka-tools.
+inputs:
+  result:
+    description: Overall result of the run (success or anything else)
+    required: true
+  token:
+    description: Token with issues write permission
+    required: true
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.token }}
+        GH_REPO: ${{ github.repository }}
+      run: ${{ github.action_path }}/nightly-issue.sh "${{ inputs.result }}"
