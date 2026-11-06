@@ -469,7 +469,7 @@ mod try_attach_existing_tests {
     }
 
     use super::*;
-    use crate::browser::{accept_language_for, ua_override_for};
+    use crate::browser::ua_override_for;
     use crate::stealth::build_evasion_script_for;
     use std::os::unix::fs::symlink;
 
@@ -627,22 +627,14 @@ mod try_attach_existing_tests {
     // a header-vs-JS mismatch any server can compare.
     #[test]
     fn accept_language_matches_fingerprint_languages() {
-        assert_eq!(
-            accept_language_for(&["en-US".into(), "en".into()]),
-            "en-US,en;q=0.9"
-        );
-        assert_eq!(
-            accept_language_for(&["de-DE".into(), "de".into(), "en".into()]),
-            "de-DE,de;q=0.9,en;q=0.8"
-        );
-
+        // Chrome appends the quality values itself (en-US,en becomes
+        // en-US,en;q=0.9), so the override carries the bare list. Sending
+        // q-values here produced a doubled `en;q=0.9;q=0.9` header.
         let fp = Fingerprint::random();
         let override_payload = ua_override_for(&fp);
-        assert_eq!(
-            override_payload.accept_language.as_deref(),
-            Some(accept_language_for(&fp.languages).as_str()),
-            "Accept-Language must be derived from navigator.languages"
-        );
+        let accept_language = override_payload.accept_language.unwrap();
+        assert_eq!(accept_language, fp.languages.join(","));
+        assert!(!accept_language.contains(";q="), "{accept_language}");
     }
 
     // Regression: the fonts and keyboard hooks must be present and driven by

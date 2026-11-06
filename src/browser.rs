@@ -39,9 +39,10 @@ fn ua_override_for(fp: &Fingerprint) -> EmulationSetUserAgentOverride {
     let architecture = fp.ch_architecture();
     EmulationSetUserAgentOverride {
         user_agent: fp.user_agent.clone(),
-        // Chrome sends the first language bare and the rest at q=0.9; the
-        // header must match `navigator.languages` (filled from the same list).
-        accept_language: Some(accept_language_for(&fp.languages)),
+        // Chrome adds the quality values itself (`en-US,en` is sent as
+        // `en-US,en;q=0.9`); passing them here would double them. The header
+        // must match `navigator.languages` (filled from the same list).
+        accept_language: Some(fp.languages.join(",")),
         platform: Some(fp.nav_platform().to_string()),
         user_agent_metadata: Some(UserAgentMetadata {
             brands: to_brands(fp.ch_brands()),
@@ -55,21 +56,6 @@ fn ua_override_for(fp: &Fingerprint) -> EmulationSetUserAgentOverride {
             wow64: false,
         }),
     }
-}
-
-/// Chrome-style `Accept-Language` value for a language list:
-/// `de-DE,de;q=0.9,en;q=0.8` — first entry bare, each following entry one
-/// quality step lower (minimum 0.1).
-fn accept_language_for(languages: &[String]) -> String {
-    languages
-        .iter()
-        .enumerate()
-        .map(|(index, language)| match index {
-            0 => language.clone(),
-            _ => format!("{};q={:.1}", language, (1.0 - 0.1 * index as f64).max(0.1)),
-        })
-        .collect::<Vec<_>>()
-        .join(",")
 }
 
 /// The main stealth browser
