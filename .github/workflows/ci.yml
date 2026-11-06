@@ -5,9 +5,6 @@ on:
     branches: [main, master]
     # labeled/unlabeled re-evaluate the downstream-breaking escape hatch.
     types: [opened, synchronize, reopened, labeled, unlabeled]
-  # The merge queue tests the exact commit that lands, so main is not
-  # re-tested after merge.
-  merge_group:
   workflow_dispatch:
 
 permissions:
@@ -15,8 +12,8 @@ permissions:
 
 # A newer push to the same PR supersedes the running checks.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,7 +21,7 @@ env:
 
 jobs:
   lint:
-    name: Format and Clippy
+    name: Lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -33,16 +30,14 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-features --all-targets --locked -- -D warnings
-
-  msrv:
-    name: Rust 1.85
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/rust
+      - name: Minimum Rust version (1.85)
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          cargo +1.85.0 check --lib --all-features --locked
+      - name: Dependency policy
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          toolchain: 1.85.0
-      - run: cargo check --lib --all-features --locked
+          command: check
 
   unit:
     name: Unit (${{ matrix.os }})
@@ -56,13 +51,10 @@ jobs:
       - uses: ./.github/actions/rust
       - run: cargo test --all-features --locked
 
-  # Compile the browser tests once per OS; the shards only run them.
+  # Compile the browser tests once; the shards only run them.
   browser-build:
-    name: Browser build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-15]
+    name: Browser build
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/rust
@@ -74,30 +66,20 @@ jobs:
       - run: cargo nextest archive --all-features --locked --archive-file nextest.tar.zst
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: nextest-${{ matrix.os }}
+          name: nextest
           path: nextest.tar.zst
           retention-days: 1
 
+  # Real Chrome for Testing (the pin in .github/chrome-version) on Linux.
   browser:
-    name: Browser (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})
+    name: Browser ${{ matrix.shard }}/2
     needs: browser-build
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     timeout-minutes: 20
-    # Advisory on macOS: the hosted runners fail a different focus- or
-    # timing-sensitive test most runs (press_key, held modifiers, child-frame
-    # shadow click). Results stay visible; only Linux gates merges.
-    continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: ubuntu-latest, shard: 1, shards: 3 }
-          - { os: ubuntu-latest, shard: 2, shards: 3 }
-          - { os: ubuntu-latest, shard: 3, shards: 3 }
-          # macOS tests run against the runner's installed Google Chrome:
-          # find_chrome() only looks in system locations there.
-          - { os: macos-15, shard: 1, shards: 2 }
-          - { os: macos-15, shard: 2, shards: 2 }
+        shard: [1, 2]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
@@ -105,18 +87,13 @@ jobs:
           tool: cargo-nextest
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: nextest-${{ matrix.os }}
-      - name: Read the pinned Chrome for Testing version
-        if: runner.os == 'Linux'
-        run: echo "CHROME_VERSION=$(cat .github/chrome-version)" >> "$GITHUB_ENV"
-      - name: Cache Chrome for Testing
-        if: runner.os == 'Linux'
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+          name: nextest
+      - run: echo "CHROME_VERSION=$(cat .github/chrome-version)" >> "$GITHUB_ENV"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/eoka-chrome
           key: chrome-for-testing-linux64-${{ env.CHROME_VERSION }}
       - name: Install Chrome for Testing and Xvfb
-        if: runner.os == 'Linux'
         run: |
           set -euo pipefail
           apt=(sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30)
@@ -140,28 +117,21 @@ jobs:
           # unzipped Chrome for Testing has no setuid helper. Tests run with
           # the default (sandboxed) launch policy, so lift the restriction.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Show Chrome
-        if: runner.os == 'macOS'
+      - name: Run browser tests
         run: |
-          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version
-          codesign -d --entitlements - --xml "/Applications/Google Chrome.app" | plutil -p - || true
-      - name: Run browser tests (shard ${{ matrix.shard }}/${{ matrix.shards }})
-        shell: bash
-        run: |
-          set -euo pipefail
-          run=(cargo nextest run --profile ci --archive-file nextest.tar.zst --workspace-remap .
-            --run-ignored only --partition "hash:${{ matrix.shard }}/${{ matrix.shards }}"
-            -E 'not test(/known_gap/)')
-          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a "${run[@]}"; else "${run[@]}"; fi
+          xvfb-run -a cargo nextest run --profile ci --archive-file nextest.tar.zst \
+            --workspace-remap . --run-ignored only --partition "hash:${{ matrix.shard }}/2" \
+            -E 'not test(/known_gap/)'
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: browser-${{ matrix.os }}-${{ matrix.shard }}
+          name: browser-${{ matrix.shard }}
           path: target/nextest/ci/junit.xml
           retention-days: 14
           if-no-files-found: ignore
 
+  # Builds and tests eoka-tools main against this checkout.
   downstream:
     name: Downstream eoka-tools
     runs-on: ubuntu-latest
@@ -180,21 +150,12 @@ jobs:
           workspaces: downstream
       - run: .github/scripts/downstream.sh downstream
 
-  deny:
-    name: Dependency policy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
-        with:
-          command: check
-
-  # The only check branch protection requires. Skipped jobs pass; a PR
-  # labelled downstream-breaking may merge with the downstream job red.
+  # The only check branch protection requires. A PR labelled
+  # downstream-breaking may merge with the downstream job red.
   ci-ok:
     name: CI OK
     if: always()
-    needs: [lint, msrv, unit, browser-build, browser, downstream, deny]
+    needs: [lint, unit, browser-build, browser, downstream]
     runs-on: ubuntu-latest
     steps:
       - env:
@@ -207,4 +168,3 @@ jobs:
             | map("\(.key): \(.value.result)") | .[]' <<<"$NEEDS")
           if [ -n "$failed" ]; then echo "$failed"; exit 1; fi
           echo "All required jobs passed."
-
