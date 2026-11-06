@@ -5,13 +5,20 @@ on:
     branches: [main, master]
   pull_request:
     branches: [main, master]
+    # labeled/unlabeled re-evaluate the downstream-breaking escape hatch.
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  # Nightly: browser tests against the latest stable Chrome for Testing (not
+  # the pin) and the downstream check against eoka-tools main.
+  schedule:
+    - cron: "23 7 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
-# A newer push to the same PR or branch supersedes the running checks.
+# A newer push to the same PR supersedes the running checks.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -19,34 +26,7 @@ env:
   RUSTFLAGS: -Dwarnings
 
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-
-      - name: Run tests
-        run: cargo test --all-features --locked
-
-  native-test:
-    name: Native Rust (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-15, macos-15-intel, windows-2025]
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo test --all-features --locked
-
-  clippy:
+  lint:
     name: Format and Clippy
     runs-on: ubuntu-latest
     steps:
@@ -54,11 +34,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           components: rustfmt, clippy
-      - name: Check formatting
-        run: cargo fmt --all -- --check
+      - run: cargo fmt --all -- --check
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Lint all targets
-        run: cargo clippy --all-features --all-targets --locked -- -D warnings
+      - run: cargo clippy --all-features --all-targets --locked -- -D warnings
 
   msrv:
     name: Rust 1.85
@@ -71,24 +49,58 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo check --lib --all-features --locked
 
-  browser:
-    name: Chrome browser tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      CHROME_VERSION: 156.0.8078.80
+  unit:
+    name: Unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-2025]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - name: Install pinned Chrome and Xvfb
-        shell: bash
+      - run: cargo test --all-features --locked
+
+  browser:
+    name: Browser (${{ matrix.os }} ${{ matrix.shard }}/${{ matrix.shards }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, shard: 1, shards: 3 }
+          - { os: ubuntu-latest, shard: 2, shards: 3 }
+          - { os: ubuntu-latest, shard: 3, shards: 3 }
+          # macOS tests run against the runner's installed Google Chrome:
+          # find_chrome() only looks in system locations there.
+          - { os: macos-15, shard: 1, shards: 2 }
+          - { os: macos-15, shard: 2, shards: 2 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@c509219cf42fba86913069efd0ade2458c59337b # v2.90.1
+        with:
+          tool: cargo-nextest
+      - name: Install Chrome for Testing and Xvfb
+        if: runner.os == 'Linux'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = schedule ]; then
+            version=$(curl -sSf https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json | jq -r .channels.Stable.version)
+          else
+            version=$(cat .github/chrome-version)
+          fi
+          echo "Chrome for Testing ${version}"
           sudo apt-get update
           sudo apt-get install -y xvfb xauth libnss3 libatk-bridge2.0-0 libgbm1 libasound2t64
           mkdir -p "$RUNNER_TEMP/eoka-chrome"
           curl --fail --location --retry 3 \
-            "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/linux64/chrome-linux64.zip" \
+            "https://storage.googleapis.com/chrome-for-testing-public/${version}/linux64/chrome-linux64.zip" \
             --output "$RUNNER_TEMP/eoka-chrome/chrome.zip"
           unzip -q "$RUNNER_TEMP/eoka-chrome/chrome.zip" -d "$RUNNER_TEMP/eoka-chrome"
           # Keep the launcher beside the ELF so the patcher finds Chrome's resources.
@@ -98,25 +110,88 @@ jobs:
           SH
           chmod +x "$RUNNER_TEMP/eoka-chrome/chrome-linux64/google-chrome"
           sudo ln -sf "$RUNNER_TEMP/eoka-chrome/chrome-linux64/google-chrome" /usr/bin/google-chrome
-          test -x /usr/bin/google-chrome
           /usr/bin/google-chrome --version
-          rustc --version
-          command -v Xvfb
-          xvfb-run -a true
-      - name: Allow Chrome's namespace sandbox on the ephemeral runner
-        # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces, and the
-        # unzipped Chrome for Testing has no setuid helper. Tests run with the
-        # default (sandboxed) launch policy, so lift the restriction here.
-        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Run every ignored browser test
+          # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces, and the
+          # unzipped Chrome for Testing has no setuid helper. Tests run with
+          # the default (sandboxed) launch policy, so lift the restriction.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Show Chrome
+        if: runner.os == 'macOS'
+        run: '"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --version'
+      - name: Run browser tests (shard ${{ matrix.shard }}/${{ matrix.shards }})
         shell: bash
         run: |
-          set -o pipefail
-          xvfb-run -a cargo test --all-features --locked --no-fail-fast --tests -- --ignored --test-threads=1 2>&1 | tee browser-tests.log
-      - name: Upload browser test log
+          set -euo pipefail
+          run=(cargo nextest run --profile ci --all-features --locked --run-ignored only
+            --partition "hash:${{ matrix.shard }}/${{ matrix.shards }}"
+            -E 'not test(/known_gap/)')
+          if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a "${run[@]}"; else "${run[@]}"; fi
+      - name: Upload test report
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: browser-tests
-          path: browser-tests.log
+          name: browser-${{ matrix.os }}-${{ matrix.shard }}
+          path: target/nextest/ci/junit.xml
           retention-days: 14
+          if-no-files-found: ignore
+
+  downstream:
+    name: Downstream eoka-tools
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: shrimp-software/eoka-tools
+          ref: main
+          path: downstream
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: downstream
+      - run: .github/scripts/downstream.sh downstream
+
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+
+  # The only check branch protection requires. Skipped jobs pass; a PR
+  # labelled downstream-breaking may merge with the downstream job red.
+  ci-ok:
+    name: CI OK
+    if: always()
+    needs: [lint, msrv, unit, browser, downstream, deny]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          NEEDS: ${{ toJSON(needs) }}
+          ALLOW_DOWNSTREAM: ${{ contains(github.event.pull_request.labels.*.name, 'downstream-breaking') }}
+        run: |
+          failed=$(jq -r --arg allow "$ALLOW_DOWNSTREAM" 'to_entries
+            | map(select(.value.result != "success" and .value.result != "skipped"
+                and (.key != "downstream" or $allow != "true")))
+            | map("\(.key): \(.value.result)") | .[]' <<<"$NEEDS")
+          if [ -n "$failed" ]; then echo "$failed"; exit 1; fi
+          echo "All required jobs passed."
+
+  notify:
+    name: Nightly status issue
+    if: always() && github.event_name == 'schedule'
+    needs: [ci-ok]
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/nightly-issue.sh ${{ needs.ci-ok.result }}
