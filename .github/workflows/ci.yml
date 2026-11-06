@@ -8,11 +8,6 @@ on:
   # The merge queue tests the exact commit that lands, so main is not
   # re-tested after merge.
   merge_group:
-  # Nightly on main: browser tests against the latest stable Chrome for
-  # Testing (not the pin), the downstream check against eoka-tools main, and
-  # a warm cache for pull requests.
-  schedule:
-    - cron: "23 7 * * *"
   workflow_dispatch:
 
 permissions:
@@ -107,17 +102,9 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nextest-${{ matrix.os }}
-      - name: Resolve Chrome for Testing version
+      - name: Read the pinned Chrome for Testing version
         if: runner.os == 'Linux'
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [ "$EVENT_NAME" = schedule ]; then
-            version=$(curl -sSf https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json | jq -r .channels.Stable.version)
-          else
-            version=$(cat .github/chrome-version)
-          fi
-          echo "CHROME_VERSION=${version}" >> "$GITHUB_ENV"
+        run: echo "CHROME_VERSION=$(cat .github/chrome-version)" >> "$GITHUB_ENV"
       - name: Cache Chrome for Testing
         if: runner.os == 'Linux'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -214,16 +201,3 @@ jobs:
           if [ -n "$failed" ]; then echo "$failed"; exit 1; fi
           echo "All required jobs passed."
 
-  notify:
-    name: Nightly status issue
-    if: always() && github.event_name == 'schedule'
-    needs: [ci-ok]
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/nightly-issue
-        with:
-          result: ${{ needs.ci-ok.result }}
-          token: ${{ github.token }}
