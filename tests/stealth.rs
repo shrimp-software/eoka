@@ -132,7 +132,7 @@ async fn default_launch_hides_automation_signals() {
 }
 
 #[tokio::test]
-#[ignore = "known gap: window outer size equals inner size, unlike a real window with browser chrome"]
+#[ignore = "known gap: outer size equals inner size (shrimp-software/eoka#50)"]
 async fn known_gap_outer_window_is_larger_than_viewport() {
     let (s, _) = probe().await;
     assert!(
@@ -144,7 +144,7 @@ async fn known_gap_outer_window_is_larger_than_viewport() {
 }
 
 #[tokio::test]
-#[ignore = "known gap: WebGL renderer exposes SwiftShader (software rendering)"]
+#[ignore = "known gap: WebGL renderer is SwiftShader (shrimp-software/eoka#51)"]
 async fn known_gap_webgl_renderer_is_not_software() {
     let (s, _) = probe().await;
     let renderer = s["webglRenderer"].as_str().unwrap_or_default();

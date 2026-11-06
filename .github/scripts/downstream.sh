@@ -12,7 +12,7 @@ version=$(cargo metadata --no-deps --format-version 1 \
 cd "$tools_dir"
 # Point every eoka requirement at this version so the patch applies even
 # across a semver-incompatible bump.
-grep -rl --include=Cargo.toml -E '^eoka = ' crates | while read -r manifest; do
+grep -rl --include=Cargo.toml --exclude-dir=target -E '^eoka = ' . | while read -r manifest; do
   sed -i -E \
     -e "s/^eoka = \"[^\"]+\"/eoka = \"=${version}\"/" \
     -e "s/^eoka = \{ version = \"[^\"]+\"/eoka = { version = \"=${version}\"/" \
