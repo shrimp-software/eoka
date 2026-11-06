@@ -183,14 +183,21 @@ async fn owned_close_and_drop_clean_runtime_with_live_page_handles() {
         .unwrap();
         assert!(browser.owns_process());
         let page = browser.new_blank_page().await.unwrap();
-        let children: Vec<_> = std::fs::read_dir(&root.0).unwrap().collect();
-        assert_eq!(children.len(), 1);
+        let children: Vec<_> = std::fs::read_dir(&root.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(children.len(), 1, "close={close}: {children:?}");
         if close {
             browser.close().await.unwrap();
         } else {
             drop(browser);
         }
-        assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+        let left: Vec<_> = std::fs::read_dir(&root.0)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "close={close}: {left:?}");
         drop(page);
     }
 }
