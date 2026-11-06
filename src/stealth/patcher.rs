@@ -919,6 +919,14 @@ impl ChromePatcher {
 
         tracing::info!("Re-signing {:?} with ad-hoc signature...", sign_path);
 
+        // The copied bundle keeps extended attributes (quarantine, Finder
+        // info) from the installed Chrome, and codesign rejects any bundle
+        // carrying them. Strip them from the private copy first.
+        let _ = Command::new("/usr/bin/xattr")
+            .arg("-cr")
+            .arg(sign_path)
+            .output();
+
         let output = Command::new("/usr/bin/codesign")
             .args([
                 "--sign",

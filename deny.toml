@@ -4,6 +4,9 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Only flag unmaintained crates we depend on directly; transitive ones
+# (pin-utils via futures, unsafe-libyaml via serde_yaml) have no fix to take.
+unmaintained = "workspace"
 
 [licenses]
 version = 2
