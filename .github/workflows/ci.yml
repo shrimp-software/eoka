@@ -83,6 +83,10 @@ jobs:
     needs: browser-build
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
+    # Advisory on macOS: the hosted runners fail a different focus- or
+    # timing-sensitive test most runs (press_key, held modifiers, child-frame
+    # shadow click). Results stay visible; only Linux gates merges.
+    continue-on-error: ${{ startsWith(matrix.os, 'macos') }}
     strategy:
       fail-fast: false
       matrix:
@@ -145,17 +149,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          filter='not test(/known_gap/)'
-          # Keyboard dispatch on the hosted macOS runners is unreliable (focus
-          # and attach_page behave differently there); both tests run on Linux.
-          # Needs debugging on a real Mac.
-          if [ "$RUNNER_OS" = macOS ]; then
-            filter+=' and not test(=held_modifiers_shortcuts_and_prevent_default_preserve_native_semantics)'
-            filter+=' and not test(=input::test_press_key)'
-          fi
           run=(cargo nextest run --profile ci --archive-file nextest.tar.zst --workspace-remap .
             --run-ignored only --partition "hash:${{ matrix.shard }}/${{ matrix.shards }}"
-            -E "$filter")
+            -E 'not test(/known_gap/)')
           if [ "$RUNNER_OS" = Linux ]; then xvfb-run -a "${run[@]}"; else "${run[@]}"; fi
       - name: Upload test report
         if: always()
