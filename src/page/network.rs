@@ -5,6 +5,20 @@ use crate::error::{Error, Result};
 use crate::fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
 use crate::session::{BrowserState, SessionCookie};
 
+fn session_cookie(c: crate::cdp::types::Cookie) -> SessionCookie {
+    SessionCookie {
+        name: c.name,
+        value: c.value,
+        domain: c.domain,
+        path: c.path,
+        secure: c.secure,
+        http_only: c.http_only,
+        same_site: c.same_site,
+        // Session cookies have no meaningful expiry.
+        expires: if c.session { None } else { Some(c.expires) },
+    }
+}
+
 impl Page {
     /// Resolve the current page URL for cookie operations.
     /// Returns None for about:blank (Chrome silently rejects cookies without a URL).
@@ -35,23 +49,17 @@ impl Page {
         self.evaluate(&script).await
     }
 
-    /// Get all cookies as domain `SessionCookie`s (no `cdp::types` leak).
+    /// Get the cookies that apply to the current page URL, including HttpOnly ones.
+    /// Use [`all_cookies`](Self::all_cookies) for every site in the browser context.
     pub async fn cookies(&self) -> Result<Vec<SessionCookie>> {
         let cookies = self.session.get_cookies(None).await?;
-        Ok(cookies
-            .into_iter()
-            .map(|c| SessionCookie {
-                name: c.name,
-                value: c.value,
-                domain: c.domain,
-                path: c.path,
-                secure: c.secure,
-                http_only: c.http_only,
-                same_site: c.same_site,
-                // Session cookies have no meaningful expiry.
-                expires: if c.session { None } else { Some(c.expires) },
-            })
-            .collect())
+        Ok(cookies.into_iter().map(session_cookie).collect())
+    }
+
+    /// Get every cookie in the browser context, for all sites, including HttpOnly ones.
+    pub async fn all_cookies(&self) -> Result<Vec<SessionCookie>> {
+        let cookies = self.session.get_all_cookies().await?;
+        Ok(cookies.into_iter().map(session_cookie).collect())
     }
 
     /// Set a cookie
@@ -106,8 +114,13 @@ impl Page {
     }
 
     /// Capture cookies and origin storage needed to restore an authenticated session.
+    ///
+    /// Like Playwright's `storageState`, cookies cover every site in this page's
+    /// browser context, so the result is a credential for all of them. This includes
+    /// a browser you attached to, such as a personal Chrome. Unlike `storageState`,
+    /// storage covers only the current origin, and includes `sessionStorage`.
     pub async fn capture_state(&self) -> Result<BrowserState> {
-        let cookies = self.cookies().await?;
+        let cookies = self.all_cookies().await?;
         let local_storage = self
             .evaluate("Object.fromEntries(Object.entries(localStorage))")
             .await?;
@@ -127,10 +140,17 @@ impl Page {
     }
 
     /// Restore a captured browser state and reload its saved URL.
+    ///
+    /// Replaces the browser context's whole cookie jar with the saved cookies, so
+    /// cookies added after the capture are removed. A live session is never wiped,
+    /// because the browser isn't ours: saved cookies are added or overwritten, and
+    /// its other cookies stay.
     pub async fn restore_state(&self, state: &BrowserState) -> Result<()> {
         self.set_user_agent(&state.user_agent).await?;
         self.goto(&state.url).await?;
-        self.clear_all_cookies().await?;
+        if !self.config.live_session {
+            self.clear_all_cookies().await?;
+        }
         self.set_cookies_bulk(state.cookies.clone()).await?;
 
         let storage = serde_json::to_string(&serde_json::json!({

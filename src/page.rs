@@ -93,6 +93,7 @@ fn is_element_cdp_error(e: &Error) -> bool {
         | Error::Launch(_)
         | Error::Transport { .. }
         | Error::Navigation(_)
+        | Error::InvalidUrl(_)
         | Error::Timeout(_)
         | Error::InputState(_)
         | Error::InvalidScreenshotOptions(_)
@@ -141,7 +142,7 @@ pub enum MouseButton {
 #[derive(Clone)]
 pub struct Page {
     pub(crate) session: Session,
-    pub(crate) action_options: crate::ActionOptions,
+    pub(crate) action_defaults: crate::ActionDefaults,
     pub(crate) config: Arc<StealthConfig>,
     /// Cached root `DOM.getDocument` node id (invalidated on navigation).
     /// CDP node IDs are positive, so zero represents an empty cache. Fetching
@@ -156,7 +157,7 @@ impl Page {
     pub(crate) fn new(session: Session, config: Arc<StealthConfig>) -> Self {
         let held_input = session.held_input();
         Self {
-            action_options: crate::ActionOptions::default(),
+            action_defaults: crate::ActionDefaults::default(),
             session,
             config,
             root_node: Arc::new(AtomicI32::new(0)),
@@ -164,11 +165,12 @@ impl Page {
         }
     }
 
-    /// Return a page handle whose convenience actions use these options.
-    /// Other handles retain their options. Use `act` to receive the success receipt.
-    pub fn with_action_options(&self, options: crate::ActionOptions) -> Self {
+    /// Return a page handle whose shorthand actions use these defaults, such as
+    /// a longer deadline. Other handles retain their own. Elements found through
+    /// the returned handle inherit them.
+    pub fn with_action_defaults(&self, defaults: crate::ActionDefaults) -> Self {
         let mut page = self.clone();
-        page.action_options = options;
+        page.action_defaults = defaults;
         page
     }
 
@@ -253,8 +255,9 @@ impl Page {
     }
 }
 
-/// A captured HTTP request with its response
-#[derive(Debug, Clone)]
+/// A captured HTTP request with its response. `Debug` omits header values, the
+/// request body and URL queries.
+#[derive(Clone)]
 pub struct CapturedRequest {
     /// CDP request ID (use with `get_response_body`).
     pub request_id: String,
@@ -282,13 +285,47 @@ pub struct CapturedRequest {
     pub complete: bool,
 }
 
-/// Response body - either text or binary
-#[derive(Debug)]
+impl std::fmt::Debug for CapturedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapturedRequest")
+            .field("request_id", &self.request_id)
+            .field("url", &crate::session::without_query(&self.url))
+            .field("method", &self.method)
+            .field("header_names", &self.headers.keys())
+            .field("post_data_bytes", &self.post_data.as_ref().map(String::len))
+            .field("resource_type", &self.resource_type)
+            .field("status", &self.status)
+            .field("status_text", &self.status_text)
+            .field(
+                "response_header_names",
+                &self.response_headers.as_ref().map(HashMap::keys),
+            )
+            .field("mime_type", &self.mime_type)
+            .field("timestamp", &self.timestamp)
+            .field("complete", &self.complete)
+            .finish()
+    }
+}
+
+/// Response body - either text or binary. `Debug` prints only the length.
 pub enum ResponseBody {
     /// Textual response body.
     Text(String),
     /// Binary response body.
     Binary(Vec<u8>),
+}
+
+impl std::fmt::Debug for ResponseBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, bytes) = match self {
+            Self::Text(text) => ("Text", text.len()),
+            Self::Binary(bytes) => ("Binary", bytes.len()),
+        };
+        f.debug_struct("ResponseBody")
+            .field("kind", &kind)
+            .field("bytes", &bytes)
+            .finish()
+    }
 }
 
 impl ResponseBody {

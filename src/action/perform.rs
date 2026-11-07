@@ -175,6 +175,24 @@ pub(super) fn retryable_preparation(action: &Action, error: &Error) -> bool {
     }
 }
 
+/// Inserted text is lost without an editable focus, so reporting that as success
+/// would be false. A focused frame may hold the editable element, so it is allowed.
+async fn require_editable_focus(page: &Page) -> Result<()> {
+    let result: Value = page
+        .session()
+        .send(
+            "Runtime.evaluate",
+            &json!({"expression": include_str!("editable_focus.js"), "returnByValue": true}),
+        )
+        .await?;
+    if result["result"]["value"] != true {
+        return Err(Error::InputState(
+            "No editable element has focus; focus one, or use type_into".into(),
+        ));
+    }
+    Ok(())
+}
+
 async fn require_focused_editable(node: &Node) -> Result<()> {
     let properties = node.properties().await?;
     if properties["connected"] != true
@@ -223,6 +241,7 @@ pub(super) async fn perform(
     };
     match action {
         Action::InsertText { text } => {
+            require_editable_focus(page).await?;
             input
                 .text(dispatch, text, crate::InputMode::default(), || async {
                     Ok(())

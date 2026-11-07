@@ -63,6 +63,10 @@ pub enum Error {
         selector: String,
     },
 
+    /// A URL could not be used. The message omits the URL, which may hold secrets.
+    #[error("Invalid URL: {0}")]
+    InvalidUrl(String),
+
     /// Timeout
     #[error("Timeout: {0}")]
     Timeout(String),
@@ -165,6 +169,7 @@ impl Clone for Error {
             Self::ElementNotVisible { selector } => Self::ElementNotVisible {
                 selector: selector.clone(),
             },
+            Self::InvalidUrl(s) => Self::InvalidUrl(s.clone()),
             Self::Timeout(s) => Self::Timeout(s.clone()),
             Self::InputState(s) => Self::InputState(s.clone()),
             Self::InvalidScreenshotOptions(s) => Self::InvalidScreenshotOptions(s.clone()),

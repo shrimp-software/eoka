@@ -83,9 +83,10 @@ impl LocatorSpec {
     }
 }
 
-/// An observable completion condition. Values are not copied into receipts.
+/// An observable completion condition. Values are not copied into receipts, and
+/// `Debug` prints only the kind.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Expectation {
     /// Wait for the document to be interactive or complete, without claiming application readiness.
@@ -160,6 +161,23 @@ pub enum Expectation {
     },
 }
 
+impl std::fmt::Debug for Expectation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Expectation")
+            .field("kind", &self.kind())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Action")
+            .field("kind", &self.kind())
+            .field("target", &self.target())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Expectation {
     /// Return the stable kind name without sensitive values.
     pub fn kind(&self) -> &'static str {
@@ -206,9 +224,10 @@ pub enum Destination {
     CurrentOrNew,
 }
 
-/// Native input or document action to perform once.
+/// Native input or document action to perform once. `Debug` prints only the kind
+/// and target, because values and headers can hold secrets.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
     /// Navigate by a relative history offset; zero reloads the current document.
@@ -429,6 +448,57 @@ pub struct ActionOptions {
     #[serde(skip)]
     /// Optional durable intent hook, invoked before mutation.
     pub observer: Option<Arc<dyn DispatchObserver>>,
+}
+
+/// Settings shared by every action started from one page handle.
+///
+/// Deliberately has no expectation: an expectation describes one operation, so
+/// set it per call with [`ActionCall::expecting`](crate::ActionCall::expecting).
+#[derive(Clone)]
+pub struct ActionDefaults {
+    /// Wait for target actionability; `try_*` calls always skip immediately.
+    pub wait_for_target: bool,
+    /// Total action deadline in milliseconds, including queueing.
+    pub timeout_ms: u64,
+    /// Optional durable intent hook, invoked before mutation.
+    pub observer: Option<Arc<dyn DispatchObserver>>,
+}
+
+impl Default for ActionDefaults {
+    fn default() -> Self {
+        let ActionOptions {
+            wait_for_target,
+            timeout_ms,
+            observer,
+            ..
+        } = ActionOptions::default();
+        Self {
+            wait_for_target,
+            timeout_ms,
+            observer,
+        }
+    }
+}
+
+impl std::fmt::Debug for ActionDefaults {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionDefaults")
+            .field("wait_for_target", &self.wait_for_target)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ActionDefaults {
+    pub(crate) fn options(&self) -> ActionOptions {
+        ActionOptions {
+            destination: Destination::default(),
+            wait_for_target: self.wait_for_target,
+            timeout_ms: self.timeout_ms,
+            expect: None,
+            observer: self.observer.clone(),
+        }
+    }
 }
 
 fn wait_for_target() -> bool {

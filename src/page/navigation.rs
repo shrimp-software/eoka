@@ -24,7 +24,7 @@ impl Page {
                 url: url.into(),
                 referrer: None,
             },
-            self.action_options.clone(),
+            self.action_defaults.options(),
         )
         .await
         .map(|_| ())
@@ -45,21 +45,21 @@ impl Page {
 
     /// Reload the page
     pub async fn reload(&self) -> Result<()> {
-        self.act(crate::Action::Reload, self.action_options.clone())
+        self.act(crate::Action::Reload, self.action_defaults.options())
             .await
             .map(|_| ())
     }
 
     /// Go back in history
     pub async fn back(&self) -> Result<()> {
-        self.act(crate::Action::Back, self.action_options.clone())
+        self.act(crate::Action::Back, self.action_defaults.options())
             .await
             .map(|_| ())
     }
 
     /// Go forward in history
     pub async fn forward(&self) -> Result<()> {
-        self.act(crate::Action::Forward, self.action_options.clone())
+        self.act(crate::Action::Forward, self.action_defaults.options())
             .await
             .map(|_| ())
     }
@@ -87,7 +87,7 @@ impl Page {
                 url: url.into(),
                 headers,
             },
-            self.action_options.clone(),
+            self.action_defaults.options(),
         )
         .await
         .map(|_| ())
@@ -100,7 +100,7 @@ impl Page {
                 url: url.into(),
                 referrer: Some(referrer.into()),
             },
-            self.action_options.clone(),
+            self.action_defaults.options(),
         )
         .await
         .map(|_| ())

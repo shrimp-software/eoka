@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** shorthand input methods work without an expectation. `click`,
+  `click_by_text`, `human_click`, `human_click_by_text`, `type_into`, `human_type`,
+  `type_text`, `press_key`, `select_all`, `copy`, `paste`, `human_drag` and the
+  matching `Element` methods now return `ActionCall` instead of being `async fn`
+  returning `Result<()>`. Awaiting one yields an `ActionReceipt`: `OutcomeUnknown`
+  proves dispatch only, and `.expecting(..)` proves one call. `Page::act` and
+  `Locator` remain strict. See [MIGRATION-0.10.md](MIGRATION-0.10.md).
+- **Breaking:** `try_click`, `try_click_by_text`, `try_human_click` and
+  `try_human_click_by_text` return `TryActionCall`.
+- **Breaking:** `Page::with_action_options` is replaced by
+  `Page::with_action_defaults(ActionDefaults)`, which cannot hold an expectation.
+
+- **Breaking:** `BrowserSession::cookie_header()` is replaced by
+  `cookie_header_for(url)`, which only includes cookies that apply to that URL and
+  returns `Result`. A URL that can't be parsed safely fails with the new
+  `Error::InvalidUrl`.
+- `Page::capture_state` works like Playwright's `storageState`: it captures cookies
+  for every site in the page's browser context, so a saved state is a credential for
+  all of them. Added `Page::all_cookies`.
+- `type_text` fails with `Error::InputState` unless an editable element has focus,
+  instead of reporting success for text that was lost.
+
+### Security
+
+- `BrowserSession::cookie_header()` sent every cookie in the session regardless
+  of domain, path, `Secure` or expiry, so a header built for one site carried
+  credentials for all of them.
+- `BrowserSession::save` wrote cookies to a file readable by other local users.
+  It now writes owner-only (`0600`) on Unix, atomically.
+- `Debug` output of `StealthConfig`, `SessionCookie`, `BrowserSession`,
+  `BrowserState`, `Action`, `Expectation`, `CapturedRequest`, `NetworkEvent`,
+  `ResponseBody`, `BrowserFetchRequest` and `BrowserFetchResponse` printed
+  credentials, form values, cookie and header values, bodies or storage contents,
+  which could reach logs. These are now omitted, along with most URL queries and
+  `extra_args` values. Raw `CdpMessage` events are unchanged.
+- `Page::restore_state` deleted every cookie in an attached browser, such as a
+  personal Chrome. Live sessions now only add or overwrite the saved cookies.
+
+### Fixed
+
+- Cookie headers percent-encoded values, corrupting them: `tok%3Dabc` became
+  `tok%253Dabc`. Values are now exact, and a cookie that cannot be represented
+  safely in a header is dropped.
+- `Page::restore_state` deleted other sites' cookies, because `capture_state` only
+  saved those for the current URL. States saved by earlier versions still hold one
+  site's cookies, so restoring one still replaces the whole jar with just those.
+- `try_click` and friends failed with `expectation_required` on a default page
+  handle, even for a missing element, instead of returning `Ok(false)`.
+
 ## [0.9.1] - 2026-11-05
 
 ### Fixed

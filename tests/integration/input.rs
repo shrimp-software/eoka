@@ -1,4 +1,4 @@
-use eoka::{ActionOptions, Browser, Expectation, LocatorSpec};
+use eoka::{Browser, Expectation, LocatorSpec};
 
 #[tokio::test]
 #[ignore = "requires Chrome"]
@@ -18,14 +18,14 @@ async fn test_click_element() {
     .expect("Failed to navigate");
 
     // Click the button
-    page.with_action_options(ActionOptions::expecting(Expectation::Text {
-        target: LocatorSpec::css("#btn"),
-        value: "Clicked!".into(),
-        contains: false,
-    }))
-    .click("#btn")
-    .await
-    .expect("Failed to click");
+    page.click("#btn")
+        .expecting(Expectation::Text {
+            target: LocatorSpec::css("#btn"),
+            value: "Clicked!".into(),
+            contains: false,
+        })
+        .await
+        .expect("Failed to click");
 
     // Wait a bit for the click to process
     page.wait(100).await;
@@ -94,14 +94,14 @@ async fn test_press_key() {
     page.wait(100).await;
 
     // Press Enter
-    page.with_action_options(ActionOptions::expecting(Expectation::Text {
-        target: LocatorSpec::css("#result"),
-        value: "Enter".into(),
-        contains: false,
-    }))
-    .press_key("Enter")
-    .await
-    .expect("Failed to press key");
+    page.press_key("Enter")
+        .expecting(Expectation::Text {
+            target: LocatorSpec::css("#result"),
+            value: "Enter".into(),
+            contains: false,
+        })
+        .await
+        .expect("Failed to press key");
 
     let key: String = page
         .evaluate("window.lastKey")
@@ -110,14 +110,14 @@ async fn test_press_key() {
     assert_eq!(key, "Enter");
 
     // Press Tab
-    page.with_action_options(ActionOptions::expecting(Expectation::Text {
-        target: LocatorSpec::css("#result"),
-        value: "Tab".into(),
-        contains: false,
-    }))
-    .press_key("Tab")
-    .await
-    .expect("Failed to press tab");
+    page.press_key("Tab")
+        .expecting(Expectation::Text {
+            target: LocatorSpec::css("#result"),
+            value: "Tab".into(),
+            contains: false,
+        })
+        .await
+        .expect("Failed to press tab");
 
     let key: String = page
         .evaluate("window.lastKey")

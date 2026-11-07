@@ -3,8 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Browser fetch request options.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Browser fetch request options. `Debug` omits header values, the body and URL queries.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserFetchRequest {
     /// Request URL.
@@ -44,8 +44,8 @@ impl BrowserFetchRequest {
     }
 }
 
-/// Browser fetch response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Browser fetch response. `Debug` omits header values, the body and URL queries.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserFetchResponse {
     /// Final response URL.
@@ -64,11 +64,39 @@ pub struct BrowserFetchResponse {
     pub truncated: bool,
 }
 
+impl std::fmt::Debug for BrowserFetchRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserFetchRequest")
+            .field("url", &crate::session::without_query(&self.url))
+            .field("method", &self.method)
+            .field("header_names", &self.headers.keys())
+            .field("body_bytes", &self.body.as_ref().map(String::len))
+            .field("credentials", &self.credentials)
+            .field("redirect", &self.redirect)
+            .field("max_body_chars", &self.max_body_chars)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for BrowserFetchResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrowserFetchResponse")
+            .field("url", &crate::session::without_query(&self.url))
+            .field("status", &self.status)
+            .field("status_text", &self.status_text)
+            .field("ok", &self.ok)
+            .field("header_names", &self.headers.keys())
+            .field("body_bytes", &self.body.len())
+            .field("truncated", &self.truncated)
+            .finish()
+    }
+}
+
 /// Per-request result for `fetch_many`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserFetchOutcome {
-    /// Request URL.
+    /// Request URL. May hold a query string, which `Debug` prints.
     pub url: String,
     /// Successful response.
     #[serde(skip_serializing_if = "Option::is_none")]

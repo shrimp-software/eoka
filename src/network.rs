@@ -14,8 +14,8 @@ use crate::cdp::types::{
 };
 use crate::page::CapturedRequest;
 
-/// Network event types
-#[derive(Debug, Clone)]
+/// Network event types. `Debug` omits header values and URL queries.
+#[derive(Clone)]
 pub enum NetworkEvent {
     /// A new request was initiated
     RequestStarted(CapturedRequest),
@@ -48,6 +48,48 @@ pub enum NetworkEvent {
         /// Whether the request was canceled.
         canceled: bool,
     },
+}
+
+impl std::fmt::Debug for NetworkEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RequestStarted(request) => {
+                f.debug_tuple("RequestStarted").field(request).finish()
+            }
+            Self::ResponseReceived {
+                request_id,
+                status,
+                status_text,
+                headers,
+                mime_type,
+            } => f
+                .debug_struct("ResponseReceived")
+                .field("request_id", request_id)
+                .field("status", status)
+                .field("status_text", status_text)
+                .field("header_names", &headers.keys())
+                .field("mime_type", mime_type)
+                .finish(),
+            Self::RequestCompleted {
+                request_id,
+                encoded_data_length,
+            } => f
+                .debug_struct("RequestCompleted")
+                .field("request_id", request_id)
+                .field("encoded_data_length", encoded_data_length)
+                .finish(),
+            Self::RequestFailed {
+                request_id,
+                error_text,
+                canceled,
+            } => f
+                .debug_struct("RequestFailed")
+                .field("request_id", request_id)
+                .field("error_text", error_text)
+                .field("canceled", canceled)
+                .finish(),
+        }
+    }
 }
 
 /// Maximum number of in-flight requests tracked before evicting the oldest.

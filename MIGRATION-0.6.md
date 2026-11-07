@@ -27,6 +27,9 @@ assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
 
 ## Existing methods
 
+> Since 0.10 these methods no longer require an expectation; see
+> [MIGRATION-0.10.md](MIGRATION-0.10.md).
+
 `Page::click`, text clicks, human clicks, `type_into`, `type_text`, `human_type`,
 `press_key`, and drag now require an expectation. Configure a page handle with
 `page.with_action_options(ActionOptions::expecting(...))`, or use `Page::act`

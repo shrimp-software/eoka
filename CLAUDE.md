@@ -101,8 +101,13 @@ validator for raw expressions with an explicit result byte limit.
 See [MIGRATION-0.6.md](MIGRATION-0.6.md). `Page::act(Action, ActionOptions)` and
 `Page::locator`/`locator_text` provide receipts, strict execution-time resolution,
 actionability checks, one deadline, per-target serialization and bounded held-input
-cleanup. Click/type/key/submit/drag require an explicit expectation. Existing Page
-and Element convenience methods use `Page::with_action_options`; Element handles
+cleanup. Through `act` and `Locator`, click/type/key/submit/drag require an explicit
+expectation. Page and Element shorthand for those actions returns `ActionCall`
+(`src/action/call.rs`), which runs through `explore`: a plain `.await` proves dispatch
+only (`OutcomeUnknown`), and `.expecting(..)` proves one call. `try_*` returns
+`TryActionCall`, where `Ok(false)` means no input was sent (preparation may have
+scrolled). `type_text` requires an editable focus. Page handles carry
+`ActionDefaults` (`with_action_defaults`) and never an expectation. Element handles
 stay pinned and never retarget replacements. Fill/select/upload/focus/hover/scroll
 and navigation verify intrinsic results. `with_retry` never replays action errors.
 `Error::Action { code, receipt, source }` distinguishes not dispatched, uncertain,
@@ -137,19 +142,19 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 - `page.back()` / `page.forward()` - History navigation
 
 ### Page - Clicking
-- `page.click(selector)` / `page.human_click(selector)` - Standard click
+- `page.click(selector)` / `page.human_click(selector)` - Returns `ActionCall`: `.await` proves dispatch only, `.expecting(..)` proves the result
 - `page.click_at(x, y)` - Click at coordinates
 - `page.click_by_text(text)` / `page.human_click_by_text(text)` - By text
 - `page.click_shadow(selector)` / `page.click_shadow_in_frame(frame_id, selector)` - Click through closed shadow roots (top frame or any child frame); maps frame-local coordinates and uses human-like movement
-- `page.try_click(selector)` - Returns `Ok(false)` if not found/visible
+- `page.try_click(selector)` - Returns `TryActionCall`: `Ok(false)` if not found/actionable and no input was sent
 - `page.try_click_by_text(text)` / `page.try_human_click(selector)` / `page.try_human_click_by_text(text)`
 
 ### Page - Form Filling
 - `page.fill(selector, value)` - Clear and type
 - `page.human_fill(selector, value)` - Human-like clear and type
-- `page.type_text(text)` - Type into focused element
-- `page.type_into(selector, text)` - Type without clearing
-- `page.human_type(selector, text)` - Human-like typing
+- `page.type_text(text)` - Type into focused element (`ActionCall`)
+- `page.type_into(selector, text)` - Type without clearing (`ActionCall`)
+- `page.human_type(selector, text)` - Human-like typing (`ActionCall`)
 
 ### Page - Waiting
 - `page.wait_for(selector, timeout)` - Wait for element in DOM
@@ -193,13 +198,15 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 - `page.human_hover(selector)` - Human-like hover
 
 ### Page - Keyboard
-- `page.press_key(key)` - Press key with modifiers (`Enter`, `Ctrl+A`, `Cmd+C`)
-- `page.select_all()` / `page.copy()` / `page.paste()` - Platform-aware clipboard
+- `page.press_key(key)` - Press key with modifiers (`Enter`, `Ctrl+A`, `Cmd+C`); returns `ActionCall`
+- `page.select_all()` / `page.copy()` / `page.paste()` - Platform-aware clipboard (`ActionCall`)
 
 ### Page - Network & Cookies
 - `page.fetch_bounded(&BoundedFetchRequest)` - Credentialed streaming text inspection, default 8192 raw bytes, maximum 16 MiB; binary MIME bodies skipped, zero means headers only. Original `Page::fetch` is unchanged.
 - `browser.watch_downloads(staging_directory)` - Owned-browser exclusive native GUID events, popup ancestry and cancellation. Subscribe before triggering, await `stop()` to restore download settings while keeping shared target discovery active; failed restoration blocks reuse. File/job policy belongs to eoka-tools. `page.navigate_for_download(url, referrer)` tolerates attachment navigation, but completion requires native events and file verification. Regression: `cargo test --lib download::`.
-- `page.cookies()` / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
+- `page.capture_state()` / `page.restore_state(state)` - Like `storageState`: all sites' cookies in the page's browser context, current origin's storage; restore replaces the jar except on live sessions, which merge
+- `page.cookies()` (current URL) / `page.all_cookies()` (all sites in the page's browser context) / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
+- `BrowserSession::cookies_for_url(url)` / `cookie_header_for(url)` - RFC 6265 scoped, exact values, `Error::InvalidUrl` on ambiguous URLs; `save` writes `0600` atomically
 - `page.clear_all_cookies()` / `page.set_cookies_bulk(cookies)` - Bulk operations
 - `page.set_extra_headers(headers)` / `page.clear_extra_headers()` - Custom HTTP headers
 - `page.enable_request_capture()` / `page.disable_request_capture()` - Network capture
@@ -219,9 +226,9 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 - `page.with_retry(attempts, delay_ms, operation)` - Retry flaky operations
 
 ### Element
-- `elem.click()` / `elem.human_click()` - Click
+- `elem.click()` / `elem.human_click()` - Click (`ActionCall`)
 - `elem.center()` - Get center coordinates
-- `elem.type_text(text)` / `elem.focus()` - Input
+- `elem.type_text(text)` (`ActionCall`) / `elem.focus()` - Input
 - `elem.is_visible()` - Check if rendered (returns `Result<bool>`)
 - `elem.bounding_box()` - Get position/size (handles rotated elements)
 - `elem.get_attribute(name)` - Get attribute
@@ -274,6 +281,7 @@ Try-click methods return `Ok(false)` for both missing AND invisible elements.
 Error::ElementNotFound(selector)      // Not in DOM
 Error::ElementNotVisible { selector } // In DOM but not rendered
 Error::Timeout(message)
+Error::InvalidUrl(message)            // Unusable URL; message omits it
 Error::InvalidScreenshotOptions(message) // Invalid format/quality/crop combination
 Error::RetryExhausted { attempts, last_error }
 Error::Cdp { method, code, message }  // Raw CDP error
@@ -345,7 +353,7 @@ Minimal by design:
 ```rust
 pub use browser::{Browser, TabInfo};
 pub use error::{Error, Result};
-pub use action::{Action, ActionOptions, ActionReceipt, ActionOutcome, DispatchState, DispatchObserver, Expectation, Locator, LocatorQuery, LocatorSpec};
+pub use action::{Action, ActionCall, TryActionCall, ActionDefaults, ActionOptions, ActionReceipt, ActionOutcome, DispatchState, DispatchObserver, Expectation, Locator, LocatorQuery, LocatorSpec};
 pub use network::{NetworkEvent, NetworkWatcher};
 pub use page::{
     BoundingBox,      // Element position/size

@@ -31,14 +31,14 @@ async fn drag_by_produces_human_shaped_trajectory() {
     let browser = Browser::launch().await.unwrap();
     let page = fixture(&browser).await;
     let dx = 150.0;
-    page.with_action_options(eoka::ActionOptions::expecting(eoka::Expectation::Text {
-        target: eoka::LocatorSpec::css("#result"),
-        value: "done".into(),
-        contains: false,
-    }))
-    .human_drag("#handle", dx)
-    .await
-    .expect("drag");
+    page.human_drag("#handle", dx)
+        .expecting(eoka::Expectation::Text {
+            target: eoka::LocatorSpec::css("#result"),
+            value: "done".into(),
+            contains: false,
+        })
+        .await
+        .expect("drag");
 
     let log: Vec<Value> = page.evaluate_sync("window.__log").await.unwrap();
     browser.close().await.unwrap();

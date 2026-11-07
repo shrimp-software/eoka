@@ -73,7 +73,33 @@ impl Session {
         .await
     }
 
-    /// Get all cookies
+    /// Get every cookie in this target's browser context, for all sites.
+    ///
+    /// The context must be named: without one, `Storage.getCookies` reads the
+    /// default context, even from a session in a different context.
+    pub(crate) async fn get_all_cookies(&self) -> Result<Vec<Cookie>> {
+        self.target.headers.wait().await?;
+        let info: serde_json::Value = self
+            .transport
+            .send(
+                "Target.getTargetInfo",
+                &serde_json::json!({"targetId": self.target_id}),
+            )
+            .await?;
+        let context = info["targetInfo"]["browserContextId"]
+            .as_str()
+            .ok_or_else(|| crate::Error::cdp_msg("Target has no browser context"))?;
+        let result: NetworkGetCookiesResult = self
+            .transport
+            .send(
+                "Storage.getCookies",
+                &serde_json::json!({"browserContextId": context}),
+            )
+            .await?;
+        Ok(result.cookies)
+    }
+
+    /// Get cookies for the given URLs, or for the current page URL when `None`.
     pub(crate) async fn get_cookies(&self, urls: Option<Vec<String>>) -> Result<Vec<Cookie>> {
         let result: NetworkGetCookiesResult = self
             .send("Network.getCookies", &NetworkGetCookies { urls })
