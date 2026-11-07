@@ -93,6 +93,7 @@ fn is_element_cdp_error(e: &Error) -> bool {
         | Error::Launch(_)
         | Error::Transport { .. }
         | Error::Navigation(_)
+        | Error::InvalidUrl(_)
         | Error::Timeout(_)
         | Error::InputState(_)
         | Error::InvalidScreenshotOptions(_)

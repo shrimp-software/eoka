@@ -19,7 +19,9 @@ All notable changes to this project will be documented in this file.
   `Page::with_action_defaults(ActionDefaults)`, which cannot hold an expectation.
 
 - **Breaking:** `BrowserSession::cookie_header()` is replaced by
-  `cookie_header_for(url)`, which only includes cookies that apply to that URL.
+  `cookie_header_for(url)`, which only includes cookies that apply to that URL and
+  returns `Result`. A URL that can't be parsed safely fails with the new
+  `Error::InvalidUrl`.
 - `Page::capture_state` works like Playwright's `storageState`: it captures cookies
   for every site in the page's browser context, so a saved state is a credential for
   all of them. Added `Page::all_cookies`.

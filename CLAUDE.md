@@ -206,7 +206,7 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 - `browser.watch_downloads(staging_directory)` - Owned-browser exclusive native GUID events, popup ancestry and cancellation. Subscribe before triggering, await `stop()` to restore download settings while keeping shared target discovery active; failed restoration blocks reuse. File/job policy belongs to eoka-tools. `page.navigate_for_download(url, referrer)` tolerates attachment navigation, but completion requires native events and file verification. Regression: `cargo test --lib download::`.
 - `page.capture_state()` / `page.restore_state(state)` - Like `storageState`: all sites' cookies in the page's browser context, current origin's storage; restore replaces the jar except on live sessions, which merge
 - `page.cookies()` (current URL) / `page.all_cookies()` (all sites in the page's browser context) / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
-- `BrowserSession::cookies_for_url(url)` / `cookie_header_for(url)` - RFC 6265 scoped, exact values, fails closed on ambiguous URLs; `save` writes `0600` atomically
+- `BrowserSession::cookies_for_url(url)` / `cookie_header_for(url)` - RFC 6265 scoped, exact values, `Error::InvalidUrl` on ambiguous URLs; `save` writes `0600` atomically
 - `page.clear_all_cookies()` / `page.set_cookies_bulk(cookies)` - Bulk operations
 - `page.set_extra_headers(headers)` / `page.clear_extra_headers()` - Custom HTTP headers
 - `page.enable_request_capture()` / `page.disable_request_capture()` - Network capture
@@ -281,6 +281,7 @@ Try-click methods return `Ok(false)` for both missing AND invisible elements.
 Error::ElementNotFound(selector)      // Not in DOM
 Error::ElementNotVisible { selector } // In DOM but not rendered
 Error::Timeout(message)
+Error::InvalidUrl(message)            // Unusable URL; message omits it
 Error::InvalidScreenshotOptions(message) // Invalid format/quality/crop combination
 Error::RetryExhausted { attempts, last_error }
 Error::Cdp { method, code, message }  // Raw CDP error

@@ -98,10 +98,11 @@ you called, and percent-encoded the values.
 let header = session.cookie_header();
 
 // After: only cookies matching this URL, byte for byte
-let header = session.cookie_header_for("https://api.example.com/v1/items");
+let header = session.cookie_header_for("https://api.example.com/v1/items")?;
 ```
 
-The result is empty when no cookie applies, or when the URL can't be parsed safely.
+The result is empty when no cookie applies. A URL that can't be parsed safely fails
+with `Error::InvalidUrl`, including other schemes and non-ASCII hosts.
 Paths aren't normalized, so resolve `..` segments first. Domains aren't checked against
 the public suffix list, so only load session files you trust.
 `Secure` cookies require https or wss. If you relied on the encoding, encode values

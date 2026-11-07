@@ -98,14 +98,16 @@ async fn exported_header_matches_what_the_browser_sends() {
         url.clone(),
     );
     let mut sent: Vec<&str> = sent.split("; ").collect();
-    let header = session.cookie_header_for(&url);
+    let header = session.cookie_header_for(&url).unwrap();
     let mut exported: Vec<&str> = header.split("; ").collect();
     sent.sort();
     exported.sort();
     assert_eq!(exported, sent);
     assert!(exported.contains(&"enc=tok%3Dabc"));
     assert_eq!(
-        session.cookie_header_for(&format!("http://localhost:{port}/")),
+        session
+            .cookie_header_for(&format!("http://localhost:{port}/"))
+            .unwrap(),
         ""
     );
     browser.close().await.unwrap();

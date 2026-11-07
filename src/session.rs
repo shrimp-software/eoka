@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::Redacted;
 
 /// Browser cookie (simplified, serializable). `Debug` omits the value.
@@ -151,13 +151,19 @@ impl BrowserSession {
     /// Cookies a browser would send to `url`, longest path first (RFC 6265 §5.4):
     /// matching domain and path, not expired, and `Secure` only over https/wss.
     ///
-    /// Returns nothing for a URL that cannot be parsed safely, including other
-    /// schemes and non-ASCII hosts. SameSite is not applied, since a direct HTTP
-    /// client has no initiating site.
-    pub fn cookies_for_url(&self, url: &str) -> Vec<&SessionCookie> {
-        let Some(target) = RequestTarget::parse(url) else {
-            return Vec::new();
-        };
+    /// Fails with [`Error::InvalidUrl`] for a URL that cannot be parsed safely,
+    /// including other schemes and non-ASCII hosts, because a mistaken host would
+    /// send credentials to the wrong site. SameSite is not applied, since a direct
+    /// HTTP client has no initiating site. Paths are not normalized, so resolve `..`
+    /// segments first, and domains are not checked against the public suffix list,
+    /// so only load session files you trust.
+    pub fn cookies_for_url(&self, url: &str) -> Result<Vec<&SessionCookie>> {
+        let target = RequestTarget::parse(url).ok_or_else(|| {
+            Error::InvalidUrl(
+                "cookie selection needs an absolute http, https, ws or wss URL with an ASCII host"
+                    .into(),
+            )
+        })?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0.0, |elapsed| elapsed.as_secs_f64());
@@ -173,23 +179,25 @@ impl BrowserSession {
             })
             .collect();
         cookies.sort_by_key(|c| std::cmp::Reverse(c.path.len()));
-        cookies
+        Ok(cookies)
     }
 
-    /// `Cookie` header value for a request to `url`, or empty if no cookie applies.
+    /// `Cookie` header value for a request to `url`, empty if no cookie applies, or
+    /// [`Error::InvalidUrl`] if the URL cannot be parsed safely.
     ///
     /// Only cookies from [`cookies_for_url`](Self::cookies_for_url) are included, so
     /// credentials are not sent to other sites. Values are byte-for-byte what the
     /// browser would send. A cookie that cannot be represented safely in a header
     /// (an empty name, or a control character, `;`, or `=` in its name) is dropped
     /// rather than altered.
-    pub fn cookie_header_for(&self, url: &str) -> String {
-        self.cookies_for_url(url)
+    pub fn cookie_header_for(&self, url: &str) -> Result<String> {
+        Ok(self
+            .cookies_for_url(url)?
             .into_iter()
             .filter(|c| header_safe(c))
             .map(|c| format!("{}={}", c.name, c.value))
             .collect::<Vec<_>>()
-            .join("; ")
+            .join("; "))
     }
 }
 
@@ -201,8 +209,8 @@ struct RequestTarget<'a> {
 }
 
 impl<'a> RequestTarget<'a> {
-    /// Fails closed: anything ambiguous selects no cookies, because a mistaken
-    /// host here would send credentials to the wrong site.
+    /// Fails closed: anything ambiguous is rejected, because a mistaken host here
+    /// would send credentials to the wrong site.
     fn parse(url: &'a str) -> Option<Self> {
         let (scheme, rest) = url.split_once("://")?;
         let secure = match scheme.to_ascii_lowercase().as_str() {
@@ -423,12 +431,18 @@ mod tests {
             cookie("bank", "secret", "bank.test", "/"),
             cookie("shop", "1", "shop.test", "/"),
         ]);
-        assert_eq!(session.cookie_header_for("https://shop.test/"), "shop=1");
         assert_eq!(
-            session.cookie_header_for("https://bank.test/"),
+            session.cookie_header_for("https://shop.test/").unwrap(),
+            "shop=1"
+        );
+        assert_eq!(
+            session.cookie_header_for("https://bank.test/").unwrap(),
             "bank=secret"
         );
-        assert_eq!(session.cookie_header_for("https://other.test/"), "");
+        assert_eq!(
+            session.cookie_header_for("https://other.test/").unwrap(),
+            ""
+        );
     }
 
     #[test]
@@ -436,7 +450,7 @@ mod tests {
         for value in ["tok%3Dabc", "100%", "a b", "a,b", "\"quoted\"", "x=y", ""] {
             let session = session(vec![cookie("k", value, "x.test", "/")]);
             assert_eq!(
-                session.cookie_header_for("https://x.test/"),
+                session.cookie_header_for("https://x.test/").unwrap(),
                 format!("k={value}")
             );
         }
@@ -456,7 +470,10 @@ mod tests {
                 cookie(name, value, "x.test", "/"),
                 cookie("ok", "1", "x.test", "/"),
             ]);
-            assert_eq!(session.cookie_header_for("https://x.test/"), "ok=1");
+            assert_eq!(
+                session.cookie_header_for("https://x.test/").unwrap(),
+                "ok=1"
+            );
         }
     }
 
@@ -469,6 +486,7 @@ mod tests {
         let names = |url| -> Vec<&str> {
             session
                 .cookies_for_url(url)
+                .unwrap()
                 .iter()
                 .map(|c| c.name.as_str())
                 .collect()
@@ -488,10 +506,13 @@ mod tests {
             cookie("six", "3", "::1", "/"),
         ]);
         assert_eq!(
-            session.cookie_header_for("http://127.0.0.1:8080/"),
+            session.cookie_header_for("http://127.0.0.1:8080/").unwrap(),
             "exact=2"
         );
-        assert_eq!(session.cookie_header_for("http://[::1]:8080/"), "six=3");
+        assert_eq!(
+            session.cookie_header_for("http://[::1]:8080/").unwrap(),
+            "six=3"
+        );
     }
 
     #[test]
@@ -502,12 +523,21 @@ mod tests {
             cookie("a", "3", "x.test", "/a"),
         ]);
         assert_eq!(
-            session.cookie_header_for("https://x.test/a/b/c"),
+            session.cookie_header_for("https://x.test/a/b/c").unwrap(),
             "deep=2; a=3; root=1"
         );
-        assert_eq!(session.cookie_header_for("https://x.test/a"), "a=3; root=1");
-        assert_eq!(session.cookie_header_for("https://x.test/ab"), "root=1");
-        assert_eq!(session.cookie_header_for("https://x.test"), "root=1");
+        assert_eq!(
+            session.cookie_header_for("https://x.test/a").unwrap(),
+            "a=3; root=1"
+        );
+        assert_eq!(
+            session.cookie_header_for("https://x.test/ab").unwrap(),
+            "root=1"
+        );
+        assert_eq!(
+            session.cookie_header_for("https://x.test").unwrap(),
+            "root=1"
+        );
     }
 
     #[test]
@@ -515,10 +545,10 @@ mod tests {
         let mut secure = cookie("s", "1", "x.test", "/");
         secure.secure = true;
         let session = session(vec![secure]);
-        assert_eq!(session.cookie_header_for("https://x.test/"), "s=1");
-        assert_eq!(session.cookie_header_for("wss://x.test/"), "s=1");
-        assert_eq!(session.cookie_header_for("http://x.test/"), "");
-        assert_eq!(session.cookie_header_for("ws://x.test/"), "");
+        assert_eq!(session.cookie_header_for("https://x.test/").unwrap(), "s=1");
+        assert_eq!(session.cookie_header_for("wss://x.test/").unwrap(), "s=1");
+        assert_eq!(session.cookie_header_for("http://x.test/").unwrap(), "");
+        assert_eq!(session.cookie_header_for("ws://x.test/").unwrap(), "");
     }
 
     #[test]
@@ -534,7 +564,7 @@ mod tests {
             with_expiry("session", -1.0),
         ]);
         assert_eq!(
-            session.cookie_header_for("https://x.test/"),
+            session.cookie_header_for("https://x.test/").unwrap(),
             "future=1; session=1"
         );
     }
@@ -559,11 +589,20 @@ mod tests {
             "https://bank.test\r\nX: 1/",
             "https://[::1/",
         ] {
-            assert_eq!(session.cookie_header_for(url), "", "{url:?}");
+            let error = session.cookie_header_for(url).unwrap_err();
+            assert!(matches!(error, Error::InvalidUrl(_)), "{url:?}");
+            assert!(!error.to_string().contains("bank"), "{url:?}: {error}");
         }
+        assert_eq!(
+            session.cookie_header_for("https://other.test/").unwrap(),
+            "",
+            "a valid URL with no matching cookies is not an error"
+        );
         // Userinfo is not the host: this request goes to evil.test.
         assert_eq!(
-            session.cookie_header_for("https://bank.test@evil.test/"),
+            session
+                .cookie_header_for("https://bank.test@evil.test/")
+                .unwrap(),
             "evil=1"
         );
     }
