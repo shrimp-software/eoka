@@ -203,7 +203,8 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 ### Page - Network & Cookies
 - `page.fetch_bounded(&BoundedFetchRequest)` - Credentialed streaming text inspection, default 8192 raw bytes, maximum 16 MiB; binary MIME bodies skipped, zero means headers only. Original `Page::fetch` is unchanged.
 - `browser.watch_downloads(staging_directory)` - Owned-browser exclusive native GUID events, popup ancestry and cancellation. Subscribe before triggering, await `stop()` to restore download settings while keeping shared target discovery active; failed restoration blocks reuse. File/job policy belongs to eoka-tools. `page.navigate_for_download(url, referrer)` tolerates attachment navigation, but completion requires native events and file verification. Regression: `cargo test --lib download::`.
-- `page.cookies()` / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
+- `page.cookies()` (current URL) / `page.all_cookies()` (all sites) / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
+- `BrowserSession::cookies_for_url(url)` / `cookie_header_for(url)` - RFC 6265 scoped, exact values, fails closed on ambiguous URLs; `save` writes `0600` atomically
 - `page.clear_all_cookies()` / `page.set_cookies_bulk(cookies)` - Bulk operations
 - `page.set_extra_headers(headers)` / `page.clear_extra_headers()` - Custom HTTP headers
 - `page.enable_request_capture()` / `page.disable_request_capture()` - Network capture

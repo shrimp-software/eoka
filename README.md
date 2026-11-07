@@ -534,7 +534,8 @@ Raw transport commands bypass this coordination.
 ### Network & Cookies
 
 ```rust
-let cookies = page.cookies().await?;
+let cookies = page.cookies().await?;        // for the current URL
+let every_site = page.all_cookies().await?; // whole browser context
 page.set_cookie("name", "value", Some("example.com"), None).await?;
 page.delete_cookie("name", None).await?;
 page.clear_all_cookies().await?;

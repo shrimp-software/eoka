@@ -18,8 +18,27 @@ All notable changes to this project will be documented in this file.
 - **Breaking:** `Page::with_action_options` is replaced by
   `Page::with_action_defaults(ActionDefaults)`, which cannot hold an expectation.
 
+- **Breaking:** `BrowserSession::cookie_header()` is replaced by
+  `cookie_header_for(url)`, which only includes cookies that apply to that URL.
+- `Page::capture_state` captures cookies for every site in the browser context,
+  so a saved state is a credential for all of them. Added `Page::all_cookies`.
+
+### Security
+
+- `BrowserSession::cookie_header()` sent every cookie in the session regardless
+  of domain, path, `Secure` or expiry, so a header built for one site carried
+  credentials for all of them.
+- `BrowserSession::save` wrote cookies to a file readable by other local users.
+  It now writes owner-only (`0600`) on Unix, atomically.
+
 ### Fixed
 
+- Cookie headers percent-encoded values, corrupting them: `tok%3Dabc` became
+  `tok%253Dabc`. Values are now exact, and a cookie that cannot be represented
+  safely in a header is dropped.
+- `Page::restore_state` deleted other sites' cookies, because `capture_state` only
+  saved those for the current URL. States saved by earlier versions still hold one
+  site's cookies, so restoring one still replaces the whole jar with just those.
 - `try_click` and friends failed with `expectation_required` on a default page
   handle, even for a missing element, instead of returning `Ok(false)`.
 

@@ -73,7 +73,15 @@ impl Session {
         .await
     }
 
-    /// Get all cookies
+    /// Get every cookie in the browser context, for all sites.
+    pub(crate) async fn get_all_cookies(&self) -> Result<Vec<Cookie>> {
+        let result: NetworkGetCookiesResult = self
+            .send("Storage.getCookies", &serde_json::json!({}))
+            .await?;
+        Ok(result.cookies)
+    }
+
+    /// Get cookies for the given URLs, or for the current page URL when `None`.
     pub(crate) async fn get_cookies(&self, urls: Option<Vec<String>>) -> Result<Vec<Cookie>> {
         let result: NetworkGetCookiesResult = self
             .send("Network.getCookies", &NetworkGetCookies { urls })

@@ -82,3 +82,29 @@ let slow = page.with_action_defaults(ActionDefaults {
 
 Intrinsically verified methods such as `fill`, `select` and `goto` can no longer pick
 up an additional expectation from the handle. Use `Page::act` for those cases.
+
+## Cookie export is scoped to a URL
+
+`BrowserSession::cookie_header()` is removed. It sent every cookie to whichever host
+you called, and percent-encoded the values.
+
+```rust,ignore
+// Before: credentials for every site, with altered values
+let header = session.cookie_header();
+
+// After: only what a browser would send to this URL, byte for byte
+let header = session.cookie_header_for("https://api.example.com/v1/items");
+```
+
+The result is empty when no cookie applies, or when the URL can't be parsed safely.
+`Secure` cookies require https or wss. If you relied on the encoding, encode values
+yourself; a server that set `tok%3Dabc` expects to receive exactly that.
+
+`Page::capture_state` now saves cookies for every site in the browser context, not
+just the current URL, so protect saved states accordingly. `Page::cookies` still
+returns the current URL's cookies, and `Page::all_cookies` returns every site's.
+`Page::restore_state` still replaces the whole jar, and restoring a state saved by an
+earlier version leaves only that one site's cookies.
+
+`BrowserSession::save` now creates owner-only files on Unix and replaces the target
+atomically, so a symlink at that path is replaced rather than followed.
