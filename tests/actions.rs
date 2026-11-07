@@ -197,13 +197,17 @@ async fn pinned_handles_never_click_replacements_and_already_true_expectations_r
     )
     .await
     .unwrap();
-    let configured = page.with_action_options(expected_text("#result", "done"));
-    let original = configured.find("#go").await.unwrap();
+    let done = Expectation::Text {
+        target: LocatorSpec::css("#result"),
+        value: "done".into(),
+        contains: false,
+    };
+    let original = page.find("#go").await.unwrap();
     page.execute("document.getElementById('go').outerHTML=`<button id=go onclick=\"window.hits++;document.getElementById('result').textContent='done'\">Replacement</button>`").await.unwrap();
     assert!(original.click().await.is_err());
     assert_eq!(page.evaluate::<u32>("window.hits").await.unwrap(), 0);
-    configured.click("#go").await.unwrap();
-    let error = configured.click("#go").await.unwrap_err();
+    page.click("#go").expecting(done.clone()).await.unwrap();
+    let error = page.click("#go").expecting(done).await.unwrap_err();
     assert!(
         matches!(error,Error::Action{code,receipt,..} if code=="expectation_already_satisfied" && receipt.dispatch==DispatchState::NotSent)
     );

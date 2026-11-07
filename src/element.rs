@@ -2,6 +2,7 @@
 //!
 //! DOM element wrapper and its bounding box type. Split out of `page.rs`.
 
+use crate::action::ActionCall;
 use crate::error::{Error, Result};
 use crate::page::{escape_js_string, Page};
 use crate::{Action, LocatorQuery, LocatorSpec};
@@ -52,50 +53,41 @@ impl Element {
         })
     }
 
-    /// Click this element
-    pub async fn click(&self) -> Result<()> {
-        self.page
-            .act(
-                Action::Click {
-                    target: self.action_target(),
-                    human: false,
-                    double: false,
-                },
-                self.page.action_options.clone(),
-            )
-            .await
-            .map(|_| ())
+    /// Click this element. Awaiting proves dispatch only; see [`ActionCall`].
+    pub fn click(&self) -> ActionCall {
+        ActionCall::new(
+            &self.page,
+            Action::Click {
+                target: self.action_target(),
+                human: false,
+                double: false,
+            },
+        )
     }
 
     /// Human-like click
-    pub async fn human_click(&self) -> Result<()> {
-        self.page
-            .act(
-                Action::Click {
-                    target: self.action_target(),
-                    human: true,
-                    double: false,
-                },
-                self.page.action_options.clone(),
-            )
-            .await
-            .map(|_| ())
+    pub fn human_click(&self) -> ActionCall {
+        ActionCall::new(
+            &self.page,
+            Action::Click {
+                target: self.action_target(),
+                human: true,
+                double: false,
+            },
+        )
     }
 
     /// Drag horizontally from this element's center using human-like motion.
     /// See [`crate::stealth::Human::drag_by`] for ownership and cleanup semantics.
-    pub async fn human_drag_by(&self, dx: f64) -> Result<()> {
-        self.page
-            .act(
-                Action::Drag {
-                    target: self.action_target(),
-                    dx,
-                    dy: 0.0,
-                },
-                self.page.action_options.clone(),
-            )
-            .await
-            .map(|_| ())
+    pub fn human_drag_by(&self, dx: f64) -> ActionCall {
+        ActionCall::new(
+            &self.page,
+            Action::Drag {
+                target: self.action_target(),
+                dx,
+                dy: 0.0,
+            },
+        )
     }
 
     /// Get outer HTML
@@ -137,19 +129,16 @@ impl Element {
         Ok(value.as_bool().unwrap_or(default))
     }
 
-    /// Type text into this element
-    pub async fn type_text(&self, text: &str) -> Result<()> {
-        self.page
-            .act(
-                Action::Type {
-                    target: self.action_target(),
-                    text: text.into(),
-                    input_mode: Default::default(),
-                },
-                self.page.action_options.clone(),
-            )
-            .await
-            .map(|_| ())
+    /// Type text into this element. Awaiting proves dispatch only; see [`ActionCall`].
+    pub fn type_text(&self, text: &str) -> ActionCall {
+        ActionCall::new(
+            &self.page,
+            Action::Type {
+                target: self.action_target(),
+                text: text.into(),
+                input_mode: Default::default(),
+            },
+        )
     }
 
     /// Focus this element
@@ -159,7 +148,7 @@ impl Element {
                 Action::Focus {
                     target: self.action_target(),
                 },
-                self.page.action_options.clone(),
+                self.page.action_defaults.options(),
             )
             .await
             .map(|_| ())
@@ -258,7 +247,7 @@ impl Element {
                 Action::ScrollIntoView {
                     target: self.action_target(),
                 },
-                self.page.action_options.clone(),
+                self.page.action_defaults.options(),
             )
             .await
             .map(|_| ())

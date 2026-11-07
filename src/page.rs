@@ -141,7 +141,7 @@ pub enum MouseButton {
 #[derive(Clone)]
 pub struct Page {
     pub(crate) session: Session,
-    pub(crate) action_options: crate::ActionOptions,
+    pub(crate) action_defaults: crate::ActionDefaults,
     pub(crate) config: Arc<StealthConfig>,
     /// Cached root `DOM.getDocument` node id (invalidated on navigation).
     /// CDP node IDs are positive, so zero represents an empty cache. Fetching
@@ -156,7 +156,7 @@ impl Page {
     pub(crate) fn new(session: Session, config: Arc<StealthConfig>) -> Self {
         let held_input = session.held_input();
         Self {
-            action_options: crate::ActionOptions::default(),
+            action_defaults: crate::ActionDefaults::default(),
             session,
             config,
             root_node: Arc::new(AtomicI32::new(0)),
@@ -164,11 +164,12 @@ impl Page {
         }
     }
 
-    /// Return a page handle whose convenience actions use these options.
-    /// Other handles retain their options. Use `act` to receive the success receipt.
-    pub fn with_action_options(&self, options: crate::ActionOptions) -> Self {
+    /// Return a page handle whose shorthand actions use these defaults, such as
+    /// a longer deadline. Other handles retain their own. Elements found through
+    /// the returned handle inherit them.
+    pub fn with_action_defaults(&self, defaults: crate::ActionDefaults) -> Self {
         let mut page = self.clone();
-        page.action_options = options;
+        page.action_defaults = defaults;
         page
     }
 

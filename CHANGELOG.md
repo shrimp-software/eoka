@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- **Breaking:** shorthand input methods work without an expectation. `click`,
+  `click_by_text`, `human_click`, `human_click_by_text`, `type_into`, `human_type`,
+  `type_text`, `press_key`, `select_all`, `copy`, `paste`, `human_drag` and the
+  matching `Element` methods now return `ActionCall` instead of being `async fn`
+  returning `Result<()>`. Awaiting one yields an `ActionReceipt`: `OutcomeUnknown`
+  proves dispatch only, and `.expecting(..)` proves one call. `Page::act` and
+  `Locator` remain strict. See [MIGRATION-0.10.md](MIGRATION-0.10.md).
+- **Breaking:** `try_click`, `try_click_by_text`, `try_human_click` and
+  `try_human_click_by_text` return `TryActionCall`.
+- **Breaking:** `Page::with_action_options` is replaced by
+  `Page::with_action_defaults(ActionDefaults)`, which cannot hold an expectation.
+
+### Fixed
+
+- `try_click` and friends failed with `expectation_required` on a default page
+  handle, even for a missing element, instead of returning `Ok(false)`.
+
 ## [0.9.1] - 2026-11-05
 
 ### Fixed

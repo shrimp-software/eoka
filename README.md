@@ -70,8 +70,9 @@ async fn main() -> Result<()> {
 ## Dependable actions in 0.6
 
 Actions use strict locators, visibility/enabled checks, stable hit-tested pointer
-positions and one deadline. Click, typing, key and drag actions require an
-explicit expected result. Successful actions and `Error::Action` failures carry
+positions and one deadline. `Page::act` and `Locator` require an explicit expected
+result for click, typing, key and drag actions; shorthand methods such as
+`page.click` make it optional. Successful actions and `Error::Action` failures carry
 receipts distinguishing not dispatched, unknown outcome and verified completion.
 No action is replayed after dispatch. [Migration and complete contract](MIGRATION-0.6.md).
 Durable operation IDs and download recovery are provided by eoka-tools.
@@ -82,7 +83,8 @@ without a predicted result. A dispatched click returns `Ok(receipt)` with
 `outcome_unknown` unless an explicit expectation proves completion. Intrinsic
 checks, such as verifying a filled value, still run. Always inspect the receipt;
 `Ok` alone does not establish that the website completed the task. `Page::act`
-and existing convenience methods retain their strict verification contract.
+retains its strict verification contract. Shorthand input methods such as
+`page.click` follow the same rules as `explore`; see [Clicking](#clicking).
 
 ## API
 
@@ -244,17 +246,30 @@ page.text_exists("Error").await;                // bool
 
 ### Clicking
 
-Configure a fresh expectation for the operation before using convenience methods:
+A plain `.await` checks that the target is actionable and dispatches the input.
+**`Ok` proves dispatch, not that the page reacted**: the receipt's outcome is
+`OutcomeUnknown`. Add `.expecting(...)` to prove the result. Missing, covered or
+disabled targets are errors, and an action is never replayed after dispatch.
 
 ```rust
-let page = page.with_action_options(ActionOptions::expecting(
-    Expectation::Text { target: LocatorSpec::css("#status"), value: "Done".into(), contains: false },
-));
-page.click("#button").await?;                   // actionability + verification
+let receipt = page.click("#button").await?;     // dispatched; outcome unknown
 page.human_click("#button").await?;             // with mouse movement
 page.click_by_text("Submit").await?;
 page.human_click_by_text("Submit").await?;
-page.try_click("#optional").await?;             // Ok(false) if missing
+
+// Proven: VerifiedComplete, or Err with a receipt. Applies to this call only.
+page.click("#button")
+    .expecting(Expectation::Text {
+        target: LocatorSpec::css("#status"),
+        value: "Done".into(),
+        contains: false,
+    })
+    .timeout_ms(5_000)
+    .await?;
+
+// Skip instead of waiting. Ok(false) means nothing was dispatched;
+// Ok(true) means dispatched, unless `.expecting(...)` also proved the result.
+page.try_click("#optional").await?;
 page.try_click_by_text("Accept").await?;
 
 // Closed shadow roots (including widgets inside cross-origin frames): the
@@ -278,7 +293,7 @@ page.mouse_up(300.0, 100.0, eoka::MouseButton::Left).await?;
 page.fill("#email", "user@example.com").await?;     // clear + type + verify
 page.fill("#volume", "50").await?;                    // range: validates, sets, input/change
 page.human_fill("#email", "user@example.com").await?; // human-like
-page.type_into("#search", "query").await?;           // append (no clear)
+page.type_into("#search", "query").await?;           // append; proves dispatch only
 page.human_type("#search", "query").await?;
 ```
 

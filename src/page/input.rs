@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::{sleep_ms, MouseButton, Page, INTERACTION_DELAY_MS};
+use crate::action::ActionCall;
 use crate::cdp::{MouseButton as CdpMouseButton, MouseEventType, Session};
 use crate::error::{Error, Result};
 use crate::keyboard::{key_for_modifiers, key_text, key_to_codes, parse_key_combo};
@@ -516,14 +517,9 @@ impl Page {
             .await
     }
 
-    /// Type text into focused element
-    pub async fn type_text(&self, text: &str) -> Result<()> {
-        self.act(
-            crate::Action::InsertText { text: text.into() },
-            self.action_options.clone(),
-        )
-        .await
-        .map(|_| ())
+    /// Type text into the focused element. Awaiting proves dispatch only; see [`ActionCall`].
+    pub fn type_text(&self, text: &str) -> ActionCall {
+        ActionCall::new(self, crate::Action::InsertText { text: text.into() })
     }
 
     /// Get a Human helper for human-like interactions.
@@ -540,13 +536,9 @@ impl Page {
     /// Shift uses US-keyboard ASCII mappings; other single Unicode characters are
     /// sent literally. Control, Alt and Meta suppress text. For complete strings
     /// or composed text, use [`Page::type_text`] rather than a key combination.
-    pub async fn press_key(&self, key: &str) -> Result<()> {
-        self.act(
-            crate::Action::PressKey { key: key.into() },
-            self.action_options.clone(),
-        )
-        .await
-        .map(|_| ())
+    /// Awaiting proves dispatch only; see [`ActionCall`].
+    pub fn press_key(&self, key: &str) -> ActionCall {
+        ActionCall::new(self, crate::Action::PressKey { key: key.into() })
     }
 
     /// Dispatch a key-down/up sequence without verifying an application outcome.
@@ -576,33 +568,30 @@ impl Page {
     }
 
     /// Platform-aware select all (Cmd+A on Mac, Ctrl+A elsewhere)
-    pub async fn select_all(&self) -> Result<()> {
+    pub fn select_all(&self) -> ActionCall {
         self.press_key(if cfg!(target_os = "macos") {
             "Cmd+A"
         } else {
             "Ctrl+A"
         })
-        .await
     }
 
     /// Platform-aware copy (Cmd+C on Mac, Ctrl+C elsewhere)
-    pub async fn copy(&self) -> Result<()> {
+    pub fn copy(&self) -> ActionCall {
         self.press_key(if cfg!(target_os = "macos") {
             "Cmd+C"
         } else {
             "Ctrl+C"
         })
-        .await
     }
 
     /// Platform-aware paste (Cmd+V on Mac, Ctrl+V elsewhere)
-    pub async fn paste(&self) -> Result<()> {
+    pub fn paste(&self) -> ActionCall {
         self.press_key(if cfg!(target_os = "macos") {
             "Cmd+V"
         } else {
             "Ctrl+V"
         })
-        .await
     }
 }
 

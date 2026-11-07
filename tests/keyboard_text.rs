@@ -1,9 +1,9 @@
-use eoka::{ActionOptions, Browser, Expectation, LocatorSpec, Page};
-fn value(target: &str, value: &str) -> ActionOptions {
-    ActionOptions::expecting(Expectation::Value {
+use eoka::{Browser, Expectation, LocatorSpec, Page};
+fn value(target: &str, value: &str) -> Expectation {
+    Expectation::Value {
         target: LocatorSpec::css(target),
         value: value.into(),
-    })
+    }
 }
 use serde_json::Value;
 
@@ -42,8 +42,8 @@ async fn printable_keys_emit_native_text_once() {
         page.execute_sync("document.querySelector('#field').value='';events=[]")
             .await
             .unwrap();
-        page.with_action_options(value("#field", expected))
-            .press_key(key)
+        page.press_key(key)
+            .expecting(value("#field", expected))
             .await
             .unwrap();
         let value: String = page
@@ -67,8 +67,8 @@ async fn printable_keys_emit_native_text_once() {
     page.execute_sync("document.querySelector('#area').focus();events=[]")
         .await
         .unwrap();
-    page.with_action_options(value("#area", "\n"))
-        .press_key("Enter")
+    page.press_key("Enter")
+        .expecting(value("#area", "\n"))
         .await
         .unwrap();
     assert_eq!(
@@ -80,8 +80,8 @@ async fn printable_keys_emit_native_text_once() {
     page.execute_sync("document.querySelector('#editor').focus();events=[]")
         .await
         .unwrap();
-    page.with_action_options(value("#editor", "o"))
-        .press_key("o")
+    page.press_key("o")
+        .expecting(value("#editor", "o"))
         .await
         .unwrap();
     assert_eq!(

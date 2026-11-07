@@ -68,14 +68,16 @@ async fn main() -> Result<()> {
     page.goto(r#"data:text/html,<a href="https://example.com">Sign In</a><button onclick="this.textContent='Submitted'">Submit</button>"#)
         .await?;
     page.wait(500).await;
-    let configured = page.with_action_options(ActionOptions::expecting(Expectation::Text {
-        target: LocatorSpec::css("button"),
-        value: "Submitted".into(),
-        contains: false,
-    }));
-    let found = configured.try_click("#nonexistent").await?;
+    let found = page.try_click("#nonexistent").await?;
     assert!(!found);
-    let found = configured.try_click_by_text("Submit").await?;
+    let found = page
+        .try_click_by_text("Submit")
+        .expecting(Expectation::Text {
+            target: LocatorSpec::css("button"),
+            value: "Submitted".into(),
+            contains: false,
+        })
+        .await?;
     assert!(found);
     println!("5. Try-click: ok");
 
@@ -94,12 +96,12 @@ async fn main() -> Result<()> {
     page.goto(r#"data:text/html,<input id="inp" type="text">"#)
         .await?;
     page.wait_for("#inp", 5000).await?;
-    page.with_action_options(ActionOptions::expecting(Expectation::Value {
-        target: LocatorSpec::css("#inp"),
-        value: "hello".into(),
-    }))
-    .type_into("#inp", "hello")
-    .await?;
+    page.type_into("#inp", "hello")
+        .expecting(Expectation::Value {
+            target: LocatorSpec::css("#inp"),
+            value: "hello".into(),
+        })
+        .await?;
     let val: String = page
         .evaluate("document.getElementById('inp').value")
         .await?;

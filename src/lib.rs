@@ -72,8 +72,9 @@ pub mod cdp;
 pub mod download;
 pub mod element;
 pub use action::{
-    Action, ActionOptions, ActionOutcome, ActionReceipt, ControlState, Destination,
-    DispatchObserver, DispatchState, Expectation, InputMode, Locator, LocatorQuery, LocatorSpec,
+    Action, ActionCall, ActionDefaults, ActionOptions, ActionOutcome, ActionReceipt, ControlState,
+    Destination, DispatchObserver, DispatchState, Expectation, InputMode, Locator, LocatorQuery,
+    LocatorSpec, TryActionCall,
 };
 pub mod error;
 pub mod fetch;
@@ -91,6 +92,8 @@ const _: () = {
     fn _assertions() {
         assert_send_sync::<browser::Browser>();
         assert_send_sync::<page::Page>();
+        assert_send_sync::<ActionCall>();
+        assert_send_sync::<TryActionCall>();
     }
 };
 

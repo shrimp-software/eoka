@@ -431,6 +431,62 @@ pub struct ActionOptions {
     pub observer: Option<Arc<dyn DispatchObserver>>,
 }
 
+/// Settings shared by every action started from one page handle.
+///
+/// Deliberately has no expectation: an expectation describes one operation, so
+/// set it per call with [`ActionCall::expecting`](crate::ActionCall::expecting).
+#[derive(Clone)]
+pub struct ActionDefaults {
+    /// Scope of a per-call expectation. Does not change the input target.
+    pub destination: Destination,
+    /// Wait for target actionability; `try_*` calls always skip immediately.
+    pub wait_for_target: bool,
+    /// Total action deadline in milliseconds, including queueing.
+    pub timeout_ms: u64,
+    /// Optional durable intent hook, invoked before mutation.
+    pub observer: Option<Arc<dyn DispatchObserver>>,
+}
+
+impl Default for ActionDefaults {
+    fn default() -> Self {
+        let ActionOptions {
+            destination,
+            wait_for_target,
+            timeout_ms,
+            observer,
+            ..
+        } = ActionOptions::default();
+        Self {
+            destination,
+            wait_for_target,
+            timeout_ms,
+            observer,
+        }
+    }
+}
+
+impl std::fmt::Debug for ActionDefaults {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ActionDefaults")
+            .field("destination", &self.destination)
+            .field("wait_for_target", &self.wait_for_target)
+            .field("timeout_ms", &self.timeout_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ActionDefaults {
+    pub(crate) fn options(&self) -> ActionOptions {
+        ActionOptions {
+            destination: self.destination,
+            wait_for_target: self.wait_for_target,
+            timeout_ms: self.timeout_ms,
+            expect: None,
+            observer: self.observer.clone(),
+        }
+    }
+}
+
 fn wait_for_target() -> bool {
     true
 }
