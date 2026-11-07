@@ -115,8 +115,10 @@ impl Page {
 
     /// Capture cookies and origin storage needed to restore an authenticated session.
     ///
-    /// Cookies cover every site in the browser context, so the result is a
-    /// credential for all of them. Storage covers only the current origin.
+    /// Like Playwright's `storageState`, cookies cover every site in this page's
+    /// browser context, so the result is a credential for all of them. This includes
+    /// a browser you attached to, such as a personal Chrome. Unlike `storageState`,
+    /// storage covers only the current origin, and includes `sessionStorage`.
     pub async fn capture_state(&self) -> Result<BrowserState> {
         let cookies = self.all_cookies().await?;
         let local_storage = self
@@ -140,11 +142,15 @@ impl Page {
     /// Restore a captured browser state and reload its saved URL.
     ///
     /// Replaces the browser context's whole cookie jar with the saved cookies, so
-    /// cookies added after the capture are removed.
+    /// cookies added after the capture are removed. A live session is never wiped,
+    /// because the browser isn't ours: saved cookies are added or overwritten, and
+    /// its other cookies stay.
     pub async fn restore_state(&self, state: &BrowserState) -> Result<()> {
         self.set_user_agent(&state.user_agent).await?;
         self.goto(&state.url).await?;
-        self.clear_all_cookies().await?;
+        if !self.config.live_session {
+            self.clear_all_cookies().await?;
+        }
         self.set_cookies_bulk(state.cookies.clone()).await?;
 
         let storage = serde_json::to_string(&serde_json::json!({

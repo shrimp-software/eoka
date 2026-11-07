@@ -83,9 +83,10 @@ impl LocatorSpec {
     }
 }
 
-/// An observable completion condition. Values are not copied into receipts.
+/// An observable completion condition. Values are not copied into receipts, and
+/// `Debug` prints only the kind.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Expectation {
     /// Wait for the document to be interactive or complete, without claiming application readiness.
@@ -160,6 +161,23 @@ pub enum Expectation {
     },
 }
 
+impl std::fmt::Debug for Expectation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Expectation")
+            .field("kind", &self.kind())
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Action")
+            .field("kind", &self.kind())
+            .field("target", &self.target())
+            .finish_non_exhaustive()
+    }
+}
+
 impl Expectation {
     /// Return the stable kind name without sensitive values.
     pub fn kind(&self) -> &'static str {
@@ -206,9 +224,10 @@ pub enum Destination {
     CurrentOrNew,
 }
 
-/// Native input or document action to perform once.
+/// Native input or document action to perform once. `Debug` prints only the kind
+/// and target, because values and headers can hold secrets.
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Action {
     /// Navigate by a relative history offset; zero reloads the current document.

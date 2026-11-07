@@ -439,6 +439,59 @@ mod tests {
     }
 
     #[test]
+    fn debug_output_omits_values_from_actions_and_network_types() {
+        use crate::{Action, BrowserFetchRequest, CapturedRequest, Expectation, LocatorSpec};
+        let headers = std::collections::HashMap::from([("Cookie".into(), "header-secret".into())]);
+        let printed = format!(
+            "{:?} {:?} {:?} {:?} {:?} {:?} {:?}",
+            Action::Fill {
+                target: LocatorSpec::css("#pw"),
+                value: "value-secret".into(),
+                input_mode: Default::default(),
+            },
+            Action::NavigateWithHeaders {
+                url: "https://x.test/?t=url-secret".into(),
+                headers: headers.clone(),
+            },
+            Expectation::Value {
+                target: LocatorSpec::css("#pw"),
+                value: "value-secret".into(),
+            },
+            CapturedRequest {
+                request_id: "1".into(),
+                url: "https://x.test/?t=url-secret".into(),
+                method: "POST".into(),
+                headers: headers.clone(),
+                post_data: Some("body-secret".into()),
+                resource_type: None,
+                status: None,
+                status_text: None,
+                response_headers: Some(headers.clone()),
+                mime_type: None,
+                timestamp: 0.0,
+                complete: false,
+            },
+            crate::NetworkEvent::ResponseReceived {
+                request_id: "1".into(),
+                status: 200,
+                status_text: "OK".into(),
+                headers: headers.clone(),
+                mime_type: None,
+            },
+            BrowserFetchRequest {
+                headers,
+                body: Some("body-secret".into()),
+                ..BrowserFetchRequest::get("https://x.test/?t=url-secret")
+            },
+            crate::ResponseBody::Text("body-secret".into()),
+        );
+        for secret in ["value-secret", "url-secret", "header-secret", "body-secret"] {
+            assert!(!printed.contains(secret), "{secret} leaked: {printed}");
+        }
+        assert!(printed.contains("Cookie"), "header names stay useful");
+    }
+
+    #[test]
     fn default_config_is_headless() {
         assert!(StealthConfig::default().headless);
     }

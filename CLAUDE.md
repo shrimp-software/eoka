@@ -105,7 +105,8 @@ cleanup. Through `act` and `Locator`, click/type/key/submit/drag require an expl
 expectation. Page and Element shorthand for those actions returns `ActionCall`
 (`src/action/call.rs`), which runs through `explore`: a plain `.await` proves dispatch
 only (`OutcomeUnknown`), and `.expecting(..)` proves one call. `try_*` returns
-`TryActionCall`, where `Ok(false)` means nothing was dispatched. Page handles carry
+`TryActionCall`, where `Ok(false)` means no input was sent (preparation may have
+scrolled). `type_text` requires an editable focus. Page handles carry
 `ActionDefaults` (`with_action_defaults`) and never an expectation. Element handles
 stay pinned and never retarget replacements. Fill/select/upload/focus/hover/scroll
 and navigation verify intrinsic results. `with_retry` never replays action errors.
@@ -145,7 +146,7 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 - `page.click_at(x, y)` - Click at coordinates
 - `page.click_by_text(text)` / `page.human_click_by_text(text)` - By text
 - `page.click_shadow(selector)` / `page.click_shadow_in_frame(frame_id, selector)` - Click through closed shadow roots (top frame or any child frame); maps frame-local coordinates and uses human-like movement
-- `page.try_click(selector)` - Returns `TryActionCall`: `Ok(false)` if not found/actionable and nothing was dispatched
+- `page.try_click(selector)` - Returns `TryActionCall`: `Ok(false)` if not found/actionable and no input was sent
 - `page.try_click_by_text(text)` / `page.try_human_click(selector)` / `page.try_human_click_by_text(text)`
 
 ### Page - Form Filling
@@ -203,7 +204,8 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 ### Page - Network & Cookies
 - `page.fetch_bounded(&BoundedFetchRequest)` - Credentialed streaming text inspection, default 8192 raw bytes, maximum 16 MiB; binary MIME bodies skipped, zero means headers only. Original `Page::fetch` is unchanged.
 - `browser.watch_downloads(staging_directory)` - Owned-browser exclusive native GUID events, popup ancestry and cancellation. Subscribe before triggering, await `stop()` to restore download settings while keeping shared target discovery active; failed restoration blocks reuse. File/job policy belongs to eoka-tools. `page.navigate_for_download(url, referrer)` tolerates attachment navigation, but completion requires native events and file verification. Regression: `cargo test --lib download::`.
-- `page.cookies()` (current URL) / `page.all_cookies()` (all sites) / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
+- `page.capture_state()` / `page.restore_state(state)` - Like `storageState`: all sites' cookies in the page's browser context, current origin's storage; restore replaces the jar except on live sessions, which merge
+- `page.cookies()` (current URL) / `page.all_cookies()` (all sites in the page's browser context) / `page.set_cookie(name, value, domain, path)` / `page.delete_cookie(name, domain)`
 - `BrowserSession::cookies_for_url(url)` / `cookie_header_for(url)` - RFC 6265 scoped, exact values, fails closed on ambiguous URLs; `save` writes `0600` atomically
 - `page.clear_all_cookies()` / `page.set_cookies_bulk(cookies)` - Bulk operations
 - `page.set_extra_headers(headers)` / `page.clear_extra_headers()` - Custom HTTP headers

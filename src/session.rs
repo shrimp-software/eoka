@@ -105,7 +105,7 @@ impl fmt::Debug for BrowserState {
 }
 
 /// Query strings and fragments often carry tokens.
-fn without_query(url: &str) -> &str {
+pub(crate) fn without_query(url: &str) -> &str {
     &url[..url.find(['?', '#']).unwrap_or(url.len())]
 }
 

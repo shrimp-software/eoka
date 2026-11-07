@@ -14,6 +14,10 @@ type ActionFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 /// [`OutcomeUnknown`](crate::ActionOutcome::OutcomeUnknown). Use
 /// [`expecting`](Self::expecting) to prove the page reacted, or
 /// [`Page::act`] to require that proof. Actions are never replayed after dispatch.
+///
+/// `press_key` has no target, so it succeeds even if nothing handles the key.
+/// `type_text` fails unless an editable element has focus. Input that opens a
+/// JavaScript dialog blocks until the deadline, and is then reported as an error.
 #[must_use = "actions do nothing until awaited"]
 pub struct ActionCall {
     page: Page,
@@ -62,8 +66,10 @@ impl IntoFuture for ActionCall {
 /// An [`ActionCall`] that skips an unavailable target instead of waiting for it.
 ///
 /// Resolves to `Ok(false)` only when the target is missing or not actionable and
-/// nothing was dispatched. `Ok(true)` means the input was dispatched; it proves
-/// the page reacted only when combined with [`expecting`](Self::expecting).
+/// no input was sent to it. Preparation may still have changed the page: an
+/// off-screen target is scrolled into view before its actionability is checked.
+/// `Ok(true)` means the input was dispatched; it proves the page reacted only when
+/// combined with [`expecting`](Self::expecting).
 #[must_use = "actions do nothing until awaited"]
 pub struct TryActionCall(ActionCall);
 

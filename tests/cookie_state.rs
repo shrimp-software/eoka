@@ -2,7 +2,8 @@
 
 mod support;
 
-use eoka::{BrowserSession, Page};
+use eoka::{BrowserSession, Page, SessionCookie};
+use serde_json::{json, Value};
 
 async fn names(page: &Page) -> Vec<String> {
     let mut names: Vec<_> = page
@@ -107,5 +108,97 @@ async fn exported_header_matches_what_the_browser_sends() {
         session.cookie_header_for(&format!("http://localhost:{port}/")),
         ""
     );
+    browser.close().await.unwrap();
+}
+
+fn cookie(name: &str, domain: &str) -> SessionCookie {
+    SessionCookie {
+        name: name.into(),
+        value: "1".into(),
+        domain: domain.into(),
+        path: "/".into(),
+        secure: false,
+        http_only: false,
+        same_site: None,
+        expires: None,
+    }
+}
+
+async fn jar(page: &Page) -> Vec<String> {
+    let mut names: Vec<_> = page
+        .all_cookies()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|c| c.name)
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn all_cookies_reads_the_pages_own_browser_context() {
+    let browser = support::browser().await;
+    let default_page = browser.new_blank_page().await.unwrap();
+    default_page
+        .set_cookies_bulk(vec![cookie("default_context", "a.test")])
+        .await
+        .unwrap();
+
+    let transport = default_page.session().transport();
+    let context: Value = transport
+        .send("Target.createBrowserContext", &json!({}))
+        .await
+        .unwrap();
+    let target: Value = transport
+        .send(
+            "Target.createTarget",
+            &json!({"url": "about:blank", "browserContextId": context["browserContextId"]}),
+        )
+        .await
+        .unwrap();
+    let other_page = browser
+        .attach_page(target["targetId"].as_str().unwrap())
+        .await
+        .unwrap();
+    other_page
+        .set_cookies_bulk(vec![cookie("other_context", "b.test")])
+        .await
+        .unwrap();
+
+    assert_eq!(jar(&default_page).await, ["default_context"]);
+    assert_eq!(jar(&other_page).await, ["other_context"]);
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; local HTTP fixture"]
+async fn restoring_into_a_live_session_deletes_nothing() {
+    let server = support::HttpFixture::start(|_| async {
+        support::Response::html("<!doctype html><title>t</title>")
+    })
+    .await;
+    let browser = eoka::Browser::launch_with(|config| {
+        config.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
+        config.patch_binary = false;
+        config.live_session = true;
+    })
+    .await
+    .unwrap();
+    let page = browser.new_page(&server.url).await.unwrap();
+    page.set_cookies_bulk(vec![
+        cookie("bank", "bank.test"),
+        cookie("mail", "mail.test"),
+    ])
+    .await
+    .unwrap();
+    page.set_cookie("app", "1", None, None).await.unwrap();
+
+    let mut state = page.capture_state().await.unwrap();
+    state.cookies.retain(|c| c.name == "app");
+    page.restore_state(&state).await.unwrap();
+
+    assert_eq!(jar(&page).await, ["app", "bank", "mail"]);
     browser.close().await.unwrap();
 }

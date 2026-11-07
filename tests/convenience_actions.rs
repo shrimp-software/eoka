@@ -182,3 +182,68 @@ async fn handle_defaults_apply_to_shorthand_and_found_elements() {
     assert_eq!(hits(&page).await, 1);
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome; local action fixture"]
+async fn type_text_requires_an_editable_focus() {
+    let server = support::HttpFixture::start(|_| async {
+        support::Response::html(
+            "<!doctype html><input id=field><input id=locked readonly><button id=go>Go</button>",
+        )
+    })
+    .await;
+    let browser = support::browser().await;
+    let page = browser.new_page(&server.url).await.unwrap();
+    page.wait_for("#go", 2000).await.unwrap();
+
+    for focus in [
+        "document.activeElement.blur()",
+        "document.getElementById('locked').focus()",
+        "document.getElementById('go').focus()",
+    ] {
+        page.execute(focus).await.unwrap();
+        let error = page.type_text("lost").await.unwrap_err();
+        assert!(
+            matches!(&error, Error::Action { code, receipt, .. }
+                if code == "input_state" && receipt.outcome == ActionOutcome::NotDispatched),
+            "{focus}: {error}"
+        );
+    }
+
+    page.execute("document.getElementById('field').focus()")
+        .await
+        .unwrap();
+    let receipt = page.type_text("kept").await.unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::OutcomeUnknown);
+    let value: String = page
+        .evaluate("document.getElementById('field').value")
+        .await
+        .unwrap();
+    assert_eq!(value, "kept");
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome; local action fixture"]
+async fn try_click_on_a_covered_target_sends_no_input_but_may_scroll() {
+    let server = support::HttpFixture::start(|_| async {
+        support::Response::html(
+            "<!doctype html><body style=\"height:6000px\">\
+             <button id=go style=\"position:absolute;top:3000px;left:10px\" onclick=\"window.hits=1\">Go</button>\
+             <div style=\"position:absolute;top:2990px;left:0;width:500px;height:80px;z-index:9;background:black\"></div>",
+        )
+    })
+    .await;
+    let browser = support::browser().await;
+    let page = browser.new_page(&server.url).await.unwrap();
+    page.wait_for("#go", 2000).await.unwrap();
+    assert!(!page.try_click("#go").await.unwrap());
+    assert_eq!(
+        page.evaluate::<Option<u8>>("window.hits ?? null")
+            .await
+            .unwrap(),
+        None
+    );
+    assert!(page.evaluate::<f64>("scrollY").await.unwrap() > 0.0);
+    browser.close().await.unwrap();
+}

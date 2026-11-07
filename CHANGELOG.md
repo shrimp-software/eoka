@@ -20,8 +20,11 @@ All notable changes to this project will be documented in this file.
 
 - **Breaking:** `BrowserSession::cookie_header()` is replaced by
   `cookie_header_for(url)`, which only includes cookies that apply to that URL.
-- `Page::capture_state` captures cookies for every site in the browser context,
-  so a saved state is a credential for all of them. Added `Page::all_cookies`.
+- `Page::capture_state` works like Playwright's `storageState`: it captures cookies
+  for every site in the page's browser context, so a saved state is a credential for
+  all of them. Added `Page::all_cookies`.
+- `type_text` fails with `Error::InputState` unless an editable element has focus,
+  instead of reporting success for text that was lost.
 
 ### Security
 
@@ -30,10 +33,14 @@ All notable changes to this project will be documented in this file.
   credentials for all of them.
 - `BrowserSession::save` wrote cookies to a file readable by other local users.
   It now writes owner-only (`0600`) on Unix, atomically.
-- `Debug` output of `StealthConfig`, `SessionCookie`, `BrowserSession` and
-  `BrowserState` printed proxy credentials, cookie values, header values and
-  storage contents, which could reach logs. These are now omitted, along with URL
-  queries and `extra_args` values.
+- `Debug` output of `StealthConfig`, `SessionCookie`, `BrowserSession`,
+  `BrowserState`, `Action`, `Expectation`, `CapturedRequest`, `NetworkEvent`,
+  `ResponseBody`, `BrowserFetchRequest` and `BrowserFetchResponse` printed
+  credentials, form values, cookie and header values, bodies or storage contents,
+  which could reach logs. These are now omitted, along with most URL queries and
+  `extra_args` values. Raw `CdpMessage` events are unchanged.
+- `Page::restore_state` deleted every cookie in an attached browser, such as a
+  personal Chrome. Live sessions now only add or overwrite the saved cookies.
 
 ### Fixed
 

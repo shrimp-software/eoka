@@ -32,8 +32,13 @@ These are now plain functions returning `ActionCall`, which runs when awaited:
 
 `try_click`, `try_click_by_text`, `try_human_click` and `try_human_click_by_text`
 return `TryActionCall`, which awaits to `Result<bool>`. They now return `Ok(false)`
-for an unavailable target on any handle. `Ok(true)` means dispatched, and proves the
-result only with `.expecting(..)`.
+for an unavailable target on any handle, meaning no input was sent, though an
+off-screen target may have been scrolled to. `Ok(true)` means dispatched, and proves
+the result only with `.expecting(..)`.
+
+`type_text` now fails with `Error::InputState` unless an editable element has focus,
+because the text would otherwise be lost. `press_key` still succeeds with no focus,
+since keys can drive page shortcuts.
 
 Most `.await?` call sites compile unchanged. Two cases need an edit:
 
@@ -92,19 +97,25 @@ you called, and percent-encoded the values.
 // Before: credentials for every site, with altered values
 let header = session.cookie_header();
 
-// After: only what a browser would send to this URL, byte for byte
+// After: only cookies matching this URL, byte for byte
 let header = session.cookie_header_for("https://api.example.com/v1/items");
 ```
 
 The result is empty when no cookie applies, or when the URL can't be parsed safely.
+Paths aren't normalized, so resolve `..` segments first. Domains aren't checked against
+the public suffix list, so only load session files you trust.
 `Secure` cookies require https or wss. If you relied on the encoding, encode values
 yourself; a server that set `tok%3Dabc` expects to receive exactly that.
 
-`Page::capture_state` now saves cookies for every site in the browser context, not
-just the current URL, so protect saved states accordingly. `Page::cookies` still
+`Page::capture_state` now works like Playwright's `storageState`: it saves cookies for
+every site in the page's browser context, not just the current URL. That includes a
+browser you attached to, so protect saved states accordingly. Storage remains limited
+to the current origin. `Page::cookies` still
 returns the current URL's cookies, and `Page::all_cookies` returns every site's.
 `Page::restore_state` still replaces the whole jar, and restoring a state saved by an
-earlier version leaves only that one site's cookies.
+earlier version leaves only that one site's cookies. The exception is a live session
+(`StealthConfig::live`, `Browser::connect`, or a reused running profile): it no longer
+deletes anything, and only adds or overwrites the saved cookies.
 
 `BrowserSession::save` now creates owner-only files on Unix and replaces the target
 atomically, so a symlink at that path is replaced rather than followed.

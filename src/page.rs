@@ -254,8 +254,9 @@ impl Page {
     }
 }
 
-/// A captured HTTP request with its response
-#[derive(Debug, Clone)]
+/// A captured HTTP request with its response. `Debug` omits header values, the
+/// request body and URL queries.
+#[derive(Clone)]
 pub struct CapturedRequest {
     /// CDP request ID (use with `get_response_body`).
     pub request_id: String,
@@ -283,13 +284,47 @@ pub struct CapturedRequest {
     pub complete: bool,
 }
 
-/// Response body - either text or binary
-#[derive(Debug)]
+impl std::fmt::Debug for CapturedRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CapturedRequest")
+            .field("request_id", &self.request_id)
+            .field("url", &crate::session::without_query(&self.url))
+            .field("method", &self.method)
+            .field("header_names", &self.headers.keys())
+            .field("post_data_bytes", &self.post_data.as_ref().map(String::len))
+            .field("resource_type", &self.resource_type)
+            .field("status", &self.status)
+            .field("status_text", &self.status_text)
+            .field(
+                "response_header_names",
+                &self.response_headers.as_ref().map(HashMap::keys),
+            )
+            .field("mime_type", &self.mime_type)
+            .field("timestamp", &self.timestamp)
+            .field("complete", &self.complete)
+            .finish()
+    }
+}
+
+/// Response body - either text or binary. `Debug` prints only the length.
 pub enum ResponseBody {
     /// Textual response body.
     Text(String),
     /// Binary response body.
     Binary(Vec<u8>),
+}
+
+impl std::fmt::Debug for ResponseBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, bytes) = match self {
+            Self::Text(text) => ("Text", text.len()),
+            Self::Binary(bytes) => ("Binary", bytes.len()),
+        };
+        f.debug_struct("ResponseBody")
+            .field("kind", &kind)
+            .field("bytes", &bytes)
+            .finish()
+    }
 }
 
 impl ResponseBody {

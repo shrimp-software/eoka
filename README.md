@@ -267,8 +267,9 @@ page.click("#button")
     .timeout_ms(5_000)
     .await?;
 
-// Skip instead of waiting. Ok(false) means nothing was dispatched;
-// Ok(true) means dispatched, unless `.expecting(...)` also proved the result.
+// Skip instead of waiting. Ok(false) means no click was sent, though an off-screen
+// target may have been scrolled to. Ok(true) means dispatched, and proves the
+// result only with `.expecting(...)`.
 page.try_click("#optional").await?;
 page.try_click_by_text("Accept").await?;
 
@@ -536,6 +537,14 @@ Raw transport commands bypass this coordination.
 ```rust
 let cookies = page.cookies().await?;        // for the current URL
 let every_site = page.all_cookies().await?; // whole browser context
+
+// Like Playwright's storageState: cookies for every site in this page's browser
+// context, so protect it like a password. This includes a browser you attached to.
+// Storage covers the current origin only. Restoring replaces all cookies, except
+// on a live session, where saved cookies are merged in and nothing is deleted.
+let state = page.capture_state().await?;
+page.restore_state(&state).await?;
+
 page.set_cookie("name", "value", Some("example.com"), None).await?;
 page.delete_cookie("name", None).await?;
 page.clear_all_cookies().await?;
