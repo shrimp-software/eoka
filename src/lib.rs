@@ -120,8 +120,8 @@ pub use recording::{NativeRecording, NativeRecordingOptions, RecordingChunk, Rec
 pub use session::{BrowserSession, BrowserState, SessionCookie};
 pub use stealth::{Fingerprint, HumanSpeed};
 
-/// Configuration for stealth features
-#[derive(Debug, Clone)]
+/// Configuration for stealth features. `Debug` omits proxy credentials.
+#[derive(Clone)]
 pub struct StealthConfig {
     /// Spoof WebGL renderer/vendor
     pub webgl_spoof: bool,
@@ -225,6 +225,92 @@ pub struct StealthConfig {
     pub geo_align: bool,
 }
 
+/// Prints in place of a secret in `Debug` output.
+pub(crate) struct Redacted;
+
+impl std::fmt::Debug for Redacted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+impl std::fmt::Debug for StealthConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Exhaustive, so that adding a field forces a decision about printing it.
+        let Self {
+            webgl_spoof,
+            canvas_spoof,
+            audio_spoof,
+            human_mouse,
+            human_typing,
+            user_agent,
+            headless,
+            chrome_path,
+            runtime_dir,
+            sandbox,
+            patch_binary,
+            viewport_width,
+            viewport_height,
+            device_scale_factor,
+            debug,
+            debug_dir,
+            proxy,
+            user_data_dir,
+            profile_dir,
+            proxy_username,
+            proxy_password,
+            cdp_timeout,
+            timezone,
+            extra_args,
+            aggressive_cdp_evasion,
+            live_session,
+            filter_cdp,
+            ignore_cert_errors,
+            strip_x_client_data,
+            geo_align,
+        } = self;
+        let mut output = f.debug_struct("StealthConfig");
+        output
+            .field("webgl_spoof", webgl_spoof)
+            .field("canvas_spoof", canvas_spoof)
+            .field("audio_spoof", audio_spoof)
+            .field("human_mouse", human_mouse)
+            .field("human_typing", human_typing)
+            .field("user_agent", user_agent)
+            .field("headless", headless)
+            .field("chrome_path", chrome_path)
+            .field("runtime_dir", runtime_dir)
+            .field("sandbox", sandbox)
+            .field("patch_binary", patch_binary)
+            .field("viewport_width", viewport_width)
+            .field("viewport_height", viewport_height)
+            .field("device_scale_factor", device_scale_factor)
+            .field("debug", debug)
+            .field("debug_dir", debug_dir);
+        // A proxy URL can embed credentials.
+        match proxy {
+            Some(proxy) if proxy.contains('@') => output.field("proxy", &Some(Redacted)),
+            proxy => output.field("proxy", proxy),
+        };
+        output
+            .field("user_data_dir", user_data_dir)
+            .field("profile_dir", profile_dir)
+            .field("proxy_username", &proxy_username.as_ref().map(|_| Redacted))
+            .field("proxy_password", &proxy_password.as_ref().map(|_| Redacted))
+            .field("cdp_timeout", cdp_timeout)
+            .field("timezone", timezone)
+            // Arguments can embed credentials, such as --proxy-server=user:pass@host.
+            .field("extra_args", &extra_args.len())
+            .field("aggressive_cdp_evasion", aggressive_cdp_evasion)
+            .field("live_session", live_session)
+            .field("filter_cdp", filter_cdp)
+            .field("ignore_cert_errors", ignore_cert_errors)
+            .field("strip_x_client_data", strip_x_client_data)
+            .field("geo_align", geo_align)
+            .finish()
+    }
+}
+
 impl Default for StealthConfig {
     fn default() -> Self {
         Self {
@@ -319,6 +405,38 @@ impl StealthConfig {
 #[cfg(test)]
 mod tests {
     use super::StealthConfig;
+
+    #[test]
+    fn debug_output_omits_proxy_credentials() {
+        let printed = format!(
+            "{:?}",
+            StealthConfig {
+                proxy: Some("http://embedded-user:embedded-pass@proxy.test:8080".into()),
+                proxy_username: Some("named-user".into()),
+                proxy_password: Some("named-pass".into()),
+                extra_args: vec!["--proxy-server=arg-user:arg-pass@proxy.test".into()],
+                ..Default::default()
+            }
+        );
+        for secret in [
+            "embedded-user",
+            "embedded-pass",
+            "named-user",
+            "named-pass",
+            "arg-user",
+            "arg-pass",
+        ] {
+            assert!(!printed.contains(secret), "{secret} leaked: {printed}");
+        }
+        assert!(printed.contains("proxy_password: Some(<redacted>)"));
+
+        let plain = StealthConfig {
+            proxy: Some("http://proxy.test:8080".into()),
+            ..Default::default()
+        };
+        assert!(format!("{plain:?}").contains("http://proxy.test:8080"));
+        assert!(format!("{:?}", StealthConfig::default()).contains("proxy_password: None"));
+    }
 
     #[test]
     fn default_config_is_headless() {

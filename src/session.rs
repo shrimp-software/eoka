@@ -5,12 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 
 use crate::error::Result;
+use crate::Redacted;
 
-/// Browser cookie (simplified, serializable)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Browser cookie (simplified, serializable). `Debug` omits the value.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SessionCookie {
     /// Cookie name.
     pub name: String,
@@ -30,8 +32,8 @@ pub struct SessionCookie {
     pub expires: Option<f64>,
 }
 
-/// Exported browser session
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Exported browser session. `Debug` omits cookie values, header values and URL queries.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct BrowserSession {
     /// All cookies from the browser
     pub cookies: Vec<SessionCookie>,
@@ -45,7 +47,8 @@ pub struct BrowserSession {
 }
 
 /// Complete browser state for restoring an authenticated browser session.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `Debug` omits cookie values, storage contents and URL queries.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserState {
     /// Every cookie in the browser context, for all sites, including HttpOnly
@@ -61,6 +64,49 @@ pub struct BrowserState {
     pub user_agent: String,
     /// URL whose origin owns the captured storage.
     pub url: String,
+}
+
+impl fmt::Debug for SessionCookie {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SessionCookie")
+            .field("name", &self.name)
+            .field("value", &Redacted)
+            .field("domain", &self.domain)
+            .field("path", &self.path)
+            .field("secure", &self.secure)
+            .field("http_only", &self.http_only)
+            .field("same_site", &self.same_site)
+            .field("expires", &self.expires)
+            .finish()
+    }
+}
+
+impl fmt::Debug for BrowserSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserSession")
+            .field("cookies", &self.cookies)
+            .field("user_agent", &self.user_agent)
+            .field("url", &without_query(&self.url))
+            .field("extra_header_names", &self.extra_headers.keys())
+            .finish()
+    }
+}
+
+impl fmt::Debug for BrowserState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserState")
+            .field("cookies", &self.cookies)
+            .field("local_storage_entries", &self.local_storage.len())
+            .field("session_storage_entries", &self.session_storage.len())
+            .field("user_agent", &self.user_agent)
+            .field("url", &without_query(&self.url))
+            .finish()
+    }
+}
+
+/// Query strings and fragments often carry tokens.
+fn without_query(url: &str) -> &str {
+    &url[..url.find(['?', '#']).unwrap_or(url.len())]
 }
 
 impl BrowserSession {
@@ -520,6 +566,37 @@ mod tests {
             session.cookie_header_for("https://bank.test@evil.test/"),
             "evil=1"
         );
+    }
+
+    #[test]
+    fn test_debug_output_omits_secrets() {
+        let mut session = session(vec![cookie("sid", "cookie-secret", "x.test", "/")]);
+        session.url = "https://x.test/cb?token=url-secret#frag-secret".into();
+        session
+            .extra_headers
+            .insert("Authorization".into(), "header-secret".into());
+        let printed = format!("{session:?}");
+        assert!(printed.contains("sid") && printed.contains("Authorization"));
+        assert!(printed.contains("https://x.test/cb"));
+
+        let state = BrowserState {
+            cookies: session.cookies.clone(),
+            local_storage: HashMap::from([("key".into(), "local-secret".into())]),
+            session_storage: HashMap::from([("key".into(), "session-secret".into())]),
+            user_agent: String::new(),
+            url: session.url.clone(),
+        };
+        let printed = format!("{printed}{state:?}{:?}", session.cookies[0]);
+        for secret in [
+            "cookie-secret",
+            "url-secret",
+            "frag-secret",
+            "header-secret",
+            "local-secret",
+            "session-secret",
+        ] {
+            assert!(!printed.contains(secret), "{secret} leaked: {printed}");
+        }
     }
 
     #[test]

@@ -30,6 +30,10 @@ All notable changes to this project will be documented in this file.
   credentials for all of them.
 - `BrowserSession::save` wrote cookies to a file readable by other local users.
   It now writes owner-only (`0600`) on Unix, atomically.
+- `Debug` output of `StealthConfig`, `SessionCookie`, `BrowserSession` and
+  `BrowserState` printed proxy credentials, cookie values, header values and
+  storage contents, which could reach logs. These are now omitted, along with URL
+  queries and `extra_args` values.
 
 ### Fixed
 
