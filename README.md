@@ -15,7 +15,7 @@ the browser via CDP.
 
 ```toml
 [dependencies]
-eoka = "0.8"
+eoka = "0.10"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
 
