@@ -24,6 +24,11 @@ All notable changes to this project will be documented in this file.
   enable Fetch interception of every request in the user's tabs for
   `X-Client-Data` stripping, which live sessions already skip.
 
+- Reusing a browser on a profile no longer trusts an empty process command
+  line, which Linux reports while a process is still starting. The sandbox and
+  headless checks treat it as unreadable, so the reuse is refused rather than
+  allowed unchecked.
+
 ### Changed
 
 - `back()`, `forward()` and `History` with no entry at the requested offset
