@@ -245,6 +245,17 @@ async fn sandboxed_default_borrows_only_verifiably_sandboxed_profiles() {
         })
     };
     let lock = |pid: u32| {
+        // /proc/<pid>/cmdline is empty until execve sets up the new argv.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::fs::read(format!("/proc/{pid}/cmdline"))
+            .map_or(true, |raw| !raw.windows(10).any(|w| w == b"--headless"))
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture argv never appeared"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         let _ = std::fs::remove_file(profile.join("SingletonLock"));
         std::os::unix::fs::symlink(format!("fixture-{pid}"), profile.join("SingletonLock"))
             .unwrap();

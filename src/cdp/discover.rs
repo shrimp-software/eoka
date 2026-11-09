@@ -71,7 +71,10 @@ pub(crate) fn read_process_argv(pid: u32) -> Option<Vec<String>> {
     #[cfg(target_os = "linux")]
     {
         let raw = std::fs::read(format!("/proc/{}/cmdline", pid)).ok()?;
-        Some(parse_proc_cmdline(&raw))
+        // Reads as empty for zombies, kernel threads, and a process still in
+        // execve. An empty argv proves nothing about its flags.
+        let argv = parse_proc_cmdline(&raw);
+        (!argv.is_empty()).then_some(argv)
     }
     #[cfg(target_os = "macos")]
     {
@@ -545,5 +548,24 @@ mod singleton_tests {
     fn read_process_argv_reads_own_cmdline() {
         let argv = read_process_argv(std::process::id()).expect("own /proc entry must exist");
         assert!(!argv.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_cmdline_is_unverified_not_an_empty_argv() {
+        // An unreaped zombie keeps its /proc entry with an empty cmdline.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let stat = format!("/proc/{}/stat", child.id());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !std::fs::read_to_string(&stat)
+            .unwrap()
+            .rsplit_once(')')
+            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+        {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(read_process_argv(child.id()), None);
+        child.wait().unwrap();
     }
 }
