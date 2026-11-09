@@ -46,7 +46,8 @@ impl Page {
         .await
     }
 
-    /// Wait for an element to be visible and clickable
+    /// Wait for a rendered element with a nonzero box and visible CSS visibility.
+    /// Actions separately wait for enabled state, stability and hit testing.
     pub async fn wait_for_visible(&self, selector: &str, timeout_ms: u64) -> Result<Element> {
         Self::poll_until(
             timeout_ms,
@@ -55,8 +56,9 @@ impl Page {
                 let Some(element) = retry_if_not_found(self.find(selector).await)? else {
                     return Ok(None);
                 };
-                match element.center().await {
-                    Ok(_) => Ok(Some(element)),
+                match element.is_visible().await {
+                    Ok(true) => Ok(Some(element)),
+                    Ok(false) => Ok(None),
                     Err(error) if is_element_cdp_error(&error) => Ok(None),
                     Err(error) => Err(error),
                 }
