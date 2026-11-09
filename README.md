@@ -288,6 +288,11 @@ page.mouse_move(300.0, 100.0).await?;
 page.mouse_up(300.0, 100.0, eoka::MouseButton::Left).await?;
 ```
 
+High-level clicks scroll a clipped target into view through its scroll
+containers before checking stability and interception. `is_visible` and
+`wait_for_visible` use the action engine's rendered-box and CSS visibility
+rules. Visible does not mean enabled or clickable.
+
 ### Typing
 
 ```rust
@@ -298,11 +303,17 @@ page.type_into("#search", "query").await?;           // append; proves dispatch 
 page.human_type("#search", "query").await?;
 ```
 
+`fill` supports native `date`, `time`, `datetime-local`, `month` and `week`
+inputs, including clearing required fields. It verifies the value as Chrome
+normalizes it and emits input and change events. An invalid native value fails
+with `invalid_input_value` before anything changes, and typing into a native
+date/time input fails with `unsupported_input`: use `fill` for those.
+
 ### Waiting
 
 ```rust
 page.wait_for("#results", 10_000).await?;           // in DOM
-page.wait_for_visible("#email", 10_000).await?;     // visible + clickable
+page.wait_for_visible("#email", 10_000).await?;     // visible CSS + nonzero box
 page.wait_for_hidden(".loading", 5_000).await?;
 page.wait_for_any(&["#ok", ".error"], 10_000).await?;
 page.wait_for_text("Success", 10_000).await?;

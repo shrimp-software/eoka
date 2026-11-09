@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.10.1] - 2026-11-08
+
+### Fixed
+
+- Clicks, hovers and drags on a target clipped by a scroll container no longer
+  wait until timeout. Preparation scrolls the target into view when it is in
+  the viewport but does not receive the pointer. Overlays still block dispatch.
+- `fill` supports native `date`, `time`, `datetime-local`, `month` and `week`
+  inputs, verifies the browser-normalized value, and can clear required fields.
+  An invalid value fails with `invalid_input_value` before any change. `type`
+  into these inputs or `range`, and `fill`/`type` into other non-text inputs
+  such as checkboxes, now fail at once with `unsupported_input` instead of
+  waiting until timeout.
+- `Element::is_visible`, `wait_for_visible` and `wait_for_hidden` use the action
+  engine's visibility rules, so `visibility:hidden` elements, including ones
+  hidden by a parent, are no longer reported as visible.
+
 ## [0.10.0] - 2026-11-07
 
 ### Changed

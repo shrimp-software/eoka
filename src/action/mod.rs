@@ -8,6 +8,7 @@ mod runner;
 mod types;
 
 pub use call::{ActionCall, TryActionCall};
+pub(crate) use locator::is_visible;
 pub use locator::{ControlState, Locator};
 pub use types::*;
 

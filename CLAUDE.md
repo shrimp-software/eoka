@@ -114,6 +114,13 @@ and navigation verify intrinsic results. `with_retry` never replays action error
 and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 `src/action/` owns this engine; persistence and file policy remain in eoka-tools.
 
+Pointer preparation scrolls clipped targets through scroll containers. Fill
+supports native date/time/month/week values with browser normalization; invalid
+native values and unsupported input actions fail before dispatch.
+`Element::is_visible` and visibility waits share the action visibility rules and
+do not imply enabled state or hit testing. Browser regressions for these cases
+live in `tests/page_coverage.rs`.
+
 ## Public API Overview
 
 ### Browser
@@ -158,7 +165,7 @@ and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 
 ### Page - Waiting
 - `page.wait_for(selector, timeout)` - Wait for element in DOM
-- `page.wait_for_visible(selector, timeout)` - Wait for element to be clickable
+- `page.wait_for_visible(selector, timeout)` - Wait for a rendered element with visible CSS and a nonzero box
 - `page.wait_for_hidden(selector, timeout)` - Wait for element to disappear
 - `page.wait_for_any(&[selectors], timeout)` - Wait for any selector
 - `page.wait_for_text(text, timeout)` - Wait for text to appear
