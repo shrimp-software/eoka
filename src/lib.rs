@@ -349,6 +349,16 @@ impl Default for StealthConfig {
 }
 
 impl StealthConfig {
+    /// Proxy credentials the transport answers `Proxy` challenges with.
+    pub(crate) fn proxy_credentials(&self) -> Option<(String, String)> {
+        self.proxy_username.clone().zip(self.proxy_password.clone())
+    }
+
+    /// Live sessions never strip headers: their tabs belong to the user.
+    pub(crate) fn strips_x_client_data(&self) -> bool {
+        self.strip_x_client_data && !self.live_session
+    }
+
     /// Create a minimal config (no spoofing, no patching)
     pub fn minimal() -> Self {
         Self {

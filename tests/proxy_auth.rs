@@ -89,3 +89,59 @@ async fn explicit_proxy_challenge_receives_credentials() {
     assert!(authorized.load(Ordering::SeqCst));
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome; local proxy only"]
+async fn connected_browser_answers_proxy_challenges() {
+    let proxy = HttpFixture::start(move |request| async move {
+        let expected = format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode("fixture-user:fixture-password")
+        );
+        if request.headers.get("proxy-authorization") == Some(&expected) {
+            Response::html("<title>proxy success</title>")
+        } else {
+            let mut response = Response::html("authenticate proxy");
+            response.status = "407 Proxy Authentication Required";
+            response
+                .headers
+                .push(("Proxy-Authenticate".into(), "Basic realm=\"proxy\"".into()));
+            response
+        }
+    })
+    .await;
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    // The owner routes through the proxy but holds no credentials.
+    let owner = eoka::Browser::launch_with(|c| {
+        c.patch_binary = false;
+        c.live_session = true;
+        c.proxy = Some(proxy.url.trim_end_matches('/').into());
+        c.extra_args.push(format!("--remote-debugging-port={port}"));
+    })
+    .await
+    .unwrap();
+    let connected = eoka::Browser::connect_port_with_config(
+        port,
+        eoka::StealthConfig {
+            proxy_username: Some("fixture-user".into()),
+            proxy_password: Some("fixture-password".into()),
+            cdp_timeout: 5,
+            ..eoka::StealthConfig::live()
+        },
+    )
+    .await
+    .unwrap();
+    let page = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        connected.new_page("http://eoka-fixture.invalid/"),
+    )
+    .await
+    .expect("connected sessions must answer proxy challenges")
+    .unwrap();
+    assert_eq!(page.title().await.unwrap(), "proxy success");
+    owner.close().await.unwrap();
+}

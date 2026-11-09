@@ -4,7 +4,7 @@ use std::{
 };
 
 use serde_json::Value;
-use tokio::sync::OwnedMutexGuard;
+use tokio::sync::{broadcast, OwnedMutexGuard};
 
 use super::{
     dispatch::Dispatch,
@@ -141,7 +141,8 @@ impl Page {
             } else {
                 Vec::new()
             };
-            let main_frame = self.session().get_frame_tree().await?.frame.id;
+            let main = self.session().get_frame_tree().await?.frame;
+            let (main_frame, previous_loader) = (main.id, main.loader_id);
             let mut events = self.session().transport().subscribe();
             let (node, verification) = loop {
                 let attempt = async {
@@ -208,12 +209,35 @@ impl Page {
                     if matches!(options.expect, Some(Expectation::DownloadStarted)) => {}
                 Verification::Navigation { loader } => {
                     loop {
-                        let event = events.recv().await.map_err(|error| {
-                            Error::transport_io(
-                                "Navigation event stream lost",
-                                std::io::Error::other(error),
-                            )
-                        })?;
+                        let event = match events.recv().await {
+                            Ok(event) => event,
+                            // Busy pages can outrun the shared event buffer.
+                            // The commit may be among the dropped events, so
+                            // check the main frame's loader instead of failing.
+                            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::debug!(skipped, "navigation events lagged");
+                                let current = self.session().get_frame_tree().await?.frame;
+                                match committed_after_lag(
+                                    loader.as_deref(),
+                                    previous_loader.as_deref(),
+                                    current.loader_id.as_deref(),
+                                ) {
+                                    Some(true) => break,
+                                    Some(false) => continue,
+                                    None => {
+                                        return Err(Error::transport(format!(
+                                            "Navigation events lagged by {skipped}; commit unknown"
+                                        )))
+                                    }
+                                }
+                            }
+                            Err(error @ broadcast::error::RecvError::Closed) => {
+                                return Err(Error::transport_io(
+                                    "Navigation event stream lost",
+                                    std::io::Error::other(error),
+                                ));
+                            }
+                        };
                         if let CdpMessage::Event {
                             method,
                             params,
@@ -338,6 +362,9 @@ impl Page {
                     }
                     Error::ElementNotFound(_) | Error::ElementNotVisible { .. } => {
                         "target_unavailable"
+                    }
+                    Error::Cdp { message, .. } if message.starts_with("history_unavailable:") => {
+                        "history_unavailable"
                     }
                     Error::Cdp { message, .. } if message.starts_with("ambiguous_target:") => {
                         "ambiguous_target"
@@ -491,4 +518,51 @@ fn timestamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|t| u64::try_from(t.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or_default()
+}
+
+/// Decide from the main frame's loader whether a navigation committed after
+/// its events were dropped. `None` means the commit cannot be determined.
+fn committed_after_lag(
+    expected: Option<&str>,
+    previous: Option<&str>,
+    current: Option<&str>,
+) -> Option<bool> {
+    match (expected, current) {
+        // Page.navigate reported its loader; wait until it is current.
+        (Some(expected), current) => Some(current == Some(expected)),
+        // History and reload report no loader, but a new document replaces it.
+        (None, Some(current)) if previous != Some(current) => Some(true),
+        // A same-document entry keeps the loader: its commit is not visible.
+        (None, _) => None,
+    }
+}
+
+#[cfg(test)]
+mod lag_tests {
+    use super::committed_after_lag;
+
+    #[test]
+    fn lagged_navigation_commit_follows_the_main_frame_loader() {
+        // Page.navigate: done only once its own loader is current.
+        assert_eq!(
+            committed_after_lag(Some("new"), Some("old"), Some("new")),
+            Some(true)
+        );
+        assert_eq!(
+            committed_after_lag(Some("new"), Some("old"), Some("old")),
+            Some(false)
+        );
+        assert_eq!(
+            committed_after_lag(Some("new"), Some("old"), None),
+            Some(false)
+        );
+        // History/reload: a replaced document proves the commit.
+        assert_eq!(
+            committed_after_lag(None, Some("old"), Some("new")),
+            Some(true)
+        );
+        // Same loader: same-document entry or not yet committed; unknown.
+        assert_eq!(committed_after_lag(None, Some("old"), Some("old")), None);
+        assert_eq!(committed_after_lag(None, Some("old"), None), None);
+    }
 }

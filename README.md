@@ -535,6 +535,9 @@ page.back().await?;
 page.forward().await?;
 ```
 
+`back` and `forward` fail with `history_unavailable` when there is no entry to
+go to; nothing is dispatched.
+
 `goto_with_headers` clears extra headers to an empty map after navigation, error,
 or cancellation; it does not restore earlier persistent headers. Navigation and
 header changes through handles for the same target are serialized. After

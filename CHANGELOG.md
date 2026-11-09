@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- `Error::Cdp` from a failed command now names that command in `method`.
+  Previously it was always `"unknown"`, so actions never retried after an
+  execution context was destroyed during preparation.
+- Navigation verification no longer fails a successful navigation when a busy
+  page outruns the event buffer. After lost events, the main frame's loader
+  decides: `Page.navigate` completes once its loader is current, and history
+  or reload once a new document has replaced the old one. A lagged
+  same-document history navigation still fails as uncertain.
+- CDP messages up to 256 MiB (was 64 MiB) are accepted, so large full-page
+  screenshots and response bodies no longer close the connection. A larger
+  message now reports the limit as the reason the connection closed.
+- `Browser::connect_with_config` and launches that reuse a running browser now
+  answer proxy challenges with the configured credentials. Previously proxy
+  authentication was enabled without credentials and proxied requests hung.
+- Live sessions (`StealthConfig::live()`, or an attached browser) no longer
+  enable Fetch interception of every request in the user's tabs for
+  `X-Client-Data` stripping, which live sessions already skip.
+
+### Changed
+
+- `back()`, `forward()` and `History` with no entry at the requested offset
+  fail before dispatch with `history_unavailable`, instead of reporting
+  `VerifiedComplete` for a navigation that did not happen.
+
 ## [0.10.1] - 2026-11-08
 
 ### Fixed

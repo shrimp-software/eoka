@@ -47,6 +47,14 @@ impl Transport {
                     tracing::debug!("{}", exit_reason);
                     break;
                 }
+                Some(Err(tokio_tungstenite::tungstenite::Error::Capacity(e))) => {
+                    exit_reason = format!(
+                        "CDP message exceeded the {} MiB limit ({e})",
+                        MAX_CDP_MESSAGE_BYTES / (1024 * 1024)
+                    );
+                    tracing::error!("{}", exit_reason);
+                    break;
+                }
                 Some(Err(e)) => {
                     exit_reason = format!("WebSocket read error: {}", e);
                     tracing::debug!("{}", exit_reason);
@@ -97,16 +105,16 @@ impl Transport {
                     continue;
                 };
                 let result = if let Some(error) = msg.get("error") {
-                    Err(Error::cdp(
-                        msg.get("method")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("unknown"),
-                        error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1),
-                        error
+                    // CDP replies omit the method; `CommandResponse::wait` adds it.
+                    Err(Error::Cdp {
+                        method: None,
+                        code: Some(error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1)),
+                        message: error
                             .get("message")
                             .and_then(|m| m.as_str())
-                            .unwrap_or("unknown"),
-                    ))
+                            .unwrap_or("unknown")
+                            .to_owned(),
+                    })
                 } else {
                     Ok(msg
                         .get_mut("result")

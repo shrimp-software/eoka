@@ -146,7 +146,7 @@ live in `tests/page_coverage.rs`.
 - `page.goto_with_referrer(url, referrer)` - Navigate with custom Referer
 - `page.goto_with_headers(url, headers)` - Target-serialized temporary headers; clears to empty after success/error/cancellation. Cleanup survives cancellation for up to five seconds. Later commands wait and retain failures until successful `clear_extra_headers()` recovery on the original session. Raw transport calls bypass this coordination.
 - `page.reload()` - Reload the page
-- `page.back()` / `page.forward()` - History navigation
+- `page.back()` / `page.forward()` - History navigation; no entry fails before dispatch with `history_unavailable`
 
 ### Page - Clicking
 - `page.click(selector)` / `page.human_click(selector)` - Returns `ActionCall`: `.await` proves dispatch only, `.expecting(..)` proves the result
@@ -263,7 +263,8 @@ interception auto-continued in the transport reader
 stay within int32 — DevTools silently drops commands with larger ids.
 
 ### Proxy Authentication
-Configured proxy credentials answer only explicit `Proxy` challenges.
+Configured proxy credentials answer only explicit `Proxy` challenges, on both
+launched and connected browsers.
 `Server`, missing, and unknown sources receive `CancelAuth` without credentials.
 Without configured proxy credentials, auth events remain available to the caller.
 
