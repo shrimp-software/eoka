@@ -206,3 +206,27 @@ async fn visibility_helpers_agree_with_rendering_and_preserve_transport_errors()
     browser.close().await.unwrap();
     assert!(element.is_visible().await.is_err());
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome; history fixture"]
+async fn history_without_an_entry_fails_before_dispatch() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    for action in [Action::Forward, Action::History { delta: -5 }] {
+        let error = page.act(action, options()).await.unwrap_err();
+        assert!(
+            matches!(&error, Error::Action { code, receipt, .. } if code == "history_unavailable"
+                && receipt.dispatch == DispatchState::NotSent
+                && receipt.outcome == ActionOutcome::NotDispatched),
+            "{error:?}"
+        );
+    }
+    assert!(page.forward().await.is_err());
+
+    // A real entry still navigates and verifies.
+    page.goto("data:text/html,<p>second</p>").await.unwrap();
+    let receipt = page.act(Action::Back, options()).await.unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    assert_eq!(receipt.verification.as_deref(), Some("document_ready"));
+    browser.close().await.unwrap();
+}

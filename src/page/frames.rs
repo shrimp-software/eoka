@@ -244,6 +244,7 @@ impl Snapshot {
                             id: target.target_id.clone(),
                             name: None,
                             url: target.url.clone(),
+                            loader_id: None,
                         },
                         child_frames: Vec::new(),
                     });

@@ -423,7 +423,13 @@ mod repaired_adjacent_messages {
                     .expect("repaired replies must complete before the command deadline");
                     if error {
                         match result.unwrap_err() {
-                            Error::Cdp { code, message, .. } => {
+                            Error::Cdp {
+                                method,
+                                code,
+                                message,
+                            } => {
+                                // Retry policy keys on the method; replies omit it.
+                                assert_eq!(method.as_deref(), Some("Fixture.repaired"));
                                 assert_eq!(code, Some(-32000));
                                 assert_eq!(message, "failed \u{fffd}");
                             }
@@ -875,4 +881,48 @@ async fn binary_frames_preserve_event_payloads_and_command_replies() {
     );
     assert_eq!(result.unwrap(), params);
     transport.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn replies_larger_than_64_mib_complete_without_closing_the_connection() {
+    // Full-page screenshots and response bodies arrive as base64 JSON.
+    let (transport, mut peer) = pending_test_peer().await;
+    let body = "A".repeat(96 * 1024 * 1024);
+    let reply = async {
+        for _ in 0..2 {
+            let command = peer.next().await.unwrap().unwrap();
+            let command: Value = serde_json::from_str(command.to_text().unwrap()).unwrap();
+            let result = if command["method"] == "Fixture.large" {
+                json!({"data": body})
+            } else {
+                json!({})
+            };
+            peer.send(Message::Text(
+                serde_json::to_string(&json!({"id": command["id"], "result": result}))
+                    .unwrap()
+                    .into(),
+            ))
+            .await
+            .unwrap();
+        }
+    };
+    let params = json!({});
+    let ((large, small), ()) = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(
+            async {
+                let large = transport.send::<_, Value>("Fixture.large", &params).await;
+                let small = transport.send::<_, Value>("Fixture.after", &params).await;
+                (large, small)
+            },
+            reply
+        )
+    })
+    .await
+    .expect("large replies must not stall the reader");
+    assert_eq!(
+        large.unwrap()["data"].as_str().map(str::len),
+        Some(body.len())
+    );
+    assert_eq!(small.unwrap(), json!({}));
+    assert!(!transport.is_closed());
 }

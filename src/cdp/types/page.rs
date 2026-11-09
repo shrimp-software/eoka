@@ -158,6 +158,9 @@ pub struct Frame {
     pub name: Option<String>,
     #[serde(default)]
     pub url: String,
+    /// Identifies the committed document; changes when a new one replaces it.
+    #[serde(default)]
+    pub loader_id: Option<String>,
 }
 
 /// Page.setBypassCSP — disable CSP enforcement for the current page

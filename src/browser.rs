@@ -142,14 +142,10 @@ impl Browser {
         }
         let transport = match prepared.child.take() {
             Some(child) => {
-                let proxy_auth = match (&config.proxy_username, &config.proxy_password) {
-                    (Some(username), Some(password)) => Some((username.clone(), password.clone())),
-                    _ => None,
-                };
                 Transport::new_with_runtime_options(
                     child,
                     &prepared.ws_url,
-                    proxy_auth,
+                    config.proxy_credentials(),
                     config.cdp_timeout,
                     config.strip_x_client_data,
                     prepared.runtime.take(),
@@ -157,8 +153,9 @@ impl Browser {
                 .await?
             }
             None => {
-                Transport::connect_with_options(
+                Transport::connect_with_proxy_auth(
                     &prepared.ws_url,
+                    config.proxy_credentials(),
                     config.cdp_timeout,
                     config.filter_cdp,
                     config.strip_x_client_data,
@@ -236,11 +233,14 @@ impl Browser {
     /// Allows customizing CDP timeout, evasion scripts, proxy auth, etc.
     pub async fn connect_with_config(ws_url: &str, config: StealthConfig) -> Result<Self> {
         let config = Arc::new(config);
-        let transport = crate::cdp::transport::Transport::connect_with_options(
+        // Without these credentials, setup_session would enable auth
+        // interception that nothing answers, stalling proxied requests.
+        let transport = crate::cdp::transport::Transport::connect_with_proxy_auth(
             ws_url,
+            config.proxy_credentials(),
             config.cdp_timeout,
             config.filter_cdp,
-            config.strip_x_client_data && !config.live_session,
+            config.strips_x_client_data(),
         )
         .await?;
         let connection = Connection::new(transport);
@@ -284,9 +284,9 @@ impl Browser {
         session.monitor_network(fresh).await?;
         session.page_enable().await?;
 
-        let proxy_auth =
-            self.config.proxy_username.is_some() && self.config.proxy_password.is_some();
-        if proxy_auth || self.config.strip_x_client_data {
+        // Live tabs are the user's own: only intercept for configured proxy auth.
+        let proxy_auth = self.config.proxy_credentials().is_some();
+        if proxy_auth || self.config.strips_x_client_data() {
             session
                 .fetch_enable_interception(vec![], proxy_auth)
                 .await?;

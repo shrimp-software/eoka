@@ -182,6 +182,8 @@ impl Drop for PendingRegistration {
 pub(crate) struct CommandResponse {
     registration: PendingRegistration,
     receiver: oneshot::Receiver<Result<Value>>,
+    /// Replies carry only the command id; protocol errors get their method here.
+    method: Box<str>,
 }
 
 impl CommandResponse {
@@ -191,7 +193,18 @@ impl CommandResponse {
             .await
             .map_err(|error| Error::transport(format!("Response channel closed: {error}")))?;
         drop(self.registration);
-        result
+        result.map_err(|error| match error {
+            Error::Cdp {
+                method: None,
+                code: code @ Some(_),
+                message,
+            } => Error::Cdp {
+                method: Some(self.method.into()),
+                code,
+                message,
+            },
+            other => other,
+        })
     }
 }
 
@@ -204,6 +217,11 @@ fn fail_pending(pending: &PendingMap, context: &str) -> usize {
     }
     count
 }
+
+/// Largest CDP message accepted, matching Puppeteer. Full-page screenshots and
+/// response bodies are base64 JSON and routinely exceed tens of MiB. tungstenite
+/// cannot skip an oversized message, so exceeding this closes the connection.
+const MAX_CDP_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Broadcast capacity for CDP events (multi-consumer, lag observable).
 const EVENT_CHANNEL_CAP: usize = 1024;
@@ -337,10 +355,9 @@ impl Transport {
                 ws_url
             )));
         }
-        let max_message_bytes = 64 * 1024 * 1024;
         let config = WebSocketConfig::default()
-            .max_message_size(Some(max_message_bytes))
-            .max_frame_size(Some(max_message_bytes));
+            .max_message_size(Some(MAX_CDP_MESSAGE_BYTES))
+            .max_frame_size(Some(MAX_CDP_MESSAGE_BYTES));
         let (stream, _resp) = tokio::time::timeout(
             timeout,
             connect_async_with_config(ws_url, Some(config), false),
@@ -500,11 +517,29 @@ impl Transport {
         filter_cdp: bool,
         strip_x_client_data: bool,
     ) -> Result<Self> {
+        Self::connect_with_proxy_auth(
+            ws_url,
+            None,
+            cdp_timeout_secs,
+            filter_cdp,
+            strip_x_client_data,
+        )
+        .await
+    }
+
+    /// Connect with proxy credentials answered by the reader, as on launch.
+    pub(crate) async fn connect_with_proxy_auth(
+        ws_url: &str,
+        proxy_auth: Option<(String, String)>,
+        cdp_timeout_secs: u64,
+        filter_cdp: bool,
+        strip_x_client_data: bool,
+    ) -> Result<Self> {
         let stream = Self::ws_connect(ws_url, Duration::from_secs(cdp_timeout_secs)).await?;
         let mut transport = Self::build(
             None,
             stream,
-            None,
+            proxy_auth,
             cdp_timeout_secs,
             filter_cdp,
             strip_x_client_data,
@@ -619,6 +654,7 @@ impl Transport {
                     id,
                 },
                 receiver,
+                method: method.into(),
             },
         ))
     }

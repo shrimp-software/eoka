@@ -549,8 +549,11 @@ async fn navigate_history(page: &Page, dispatch: &Dispatch, offset: i64) -> Resu
     let entry = usize::try_from(index)
         .ok()
         .and_then(|i| history["entries"].get(i));
+    // Nothing to navigate to: fail before dispatch rather than claim success.
     let Some(entry) = entry else {
-        return Ok(Verification::Noop);
+        return Err(Error::cdp_msg(format!(
+            "history_unavailable: no history entry at offset {offset}"
+        )));
     };
     dispatch
         .send(
