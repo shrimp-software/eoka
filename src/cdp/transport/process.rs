@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use std::{
     io::{BufRead, BufReader},
     path::Path,
-    process::{Child, Stdio},
+    process::{Child, Command, Stdio},
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
@@ -25,6 +25,37 @@ pub(crate) fn stop_child(child: &mut Child) -> std::io::Result<()> {
 
     child.wait()?;
     Ok(())
+}
+
+/// How long to retry an exec that fails with `ETXTBSY`.
+const EXECUTABLE_BUSY_RETRY: Duration = Duration::from_secs(2);
+
+/// Spawn `command`, retrying briefly while its executable is busy.
+///
+/// Linux refuses to exec a file that any process holds open for writing. A
+/// file this process just wrote (the patched Chrome copy, or a script) can
+/// still be open in a child that another thread forked before the write
+/// descriptor was closed; that copy closes at the child's own exec. Retry
+/// until then instead of reporting a launch failure.
+fn spawn_executable(
+    command: &mut Command,
+    cancelled: Option<&AtomicBool>,
+) -> std::io::Result<Child> {
+    let deadline = Instant::now() + EXECUTABLE_BUSY_RETRY;
+    let mut delay = Duration::from_millis(5);
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline
+                    && !cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) =>
+            {
+                std::thread::sleep(delay);
+                delay = (delay * 2).min(Duration::from_millis(100));
+            }
+            result => return result,
+        }
+    }
 }
 
 /// Own a Chrome child until it is handed to `Transport`. If the async
@@ -150,7 +181,7 @@ fn launch_chrome_impl(
         }
     }
     let mut guard = ChildCleanupGuard::new(
-        cmd.spawn()
+        spawn_executable(&mut cmd, cancelled)
             .map_err(|e| Error::Launch(format!("Failed to launch Chrome: {}", e)))?,
     );
     let child = guard
@@ -324,16 +355,16 @@ fn probe_version_output(
     if cancelled.load(Ordering::Acquire) {
         return None;
     }
-    let child = std::process::Command::new(path)
+    let mut command = Command::new(path);
+    command
         .env("TMPDIR", runtime)
         .env("TMP", runtime)
         .env("TEMP", runtime)
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    let child = spawn_executable(&mut command, Some(cancelled)).ok()?;
     let mut guard = ChildCleanupGuard::new(child);
     let mut stdout = guard.child.as_mut()?.stdout.take()?;
     // A descendant may inherit stdout after the probe child exits. Never hand
@@ -637,6 +668,48 @@ wait
                 .unwrap(),
             Some(b"0123456789abcdef".repeat(256))
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn spawn_waits_for_a_busy_executable_instead_of_failing() {
+        use std::os::unix::fs::OpenOptionsExt;
+        let runtime = crate::cdp::transport::RuntimeDirectory::create(None).unwrap();
+        let script = runtime.path().join("busy-fixture");
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o700)
+            .open(&script)
+            .unwrap();
+        std::io::Write::write_all(&mut writer, b"#!/bin/sh\nexit 0\n").unwrap();
+        // An open write descriptor makes exec fail with ETXTBSY, as when a
+        // concurrently forked child still holds a just-written file.
+        assert_eq!(
+            Command::new(&script).spawn().unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(writer);
+        });
+        let mut child = spawn_executable(&mut Command::new(&script), None).unwrap();
+        assert!(child.wait().unwrap().success());
+        release.join().unwrap();
+
+        let cancelled = AtomicBool::new(true);
+        let _writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&script)
+            .unwrap();
+        let started = Instant::now();
+        assert_eq!(
+            spawn_executable(&mut Command::new(&script), Some(&cancelled))
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
 
     #[test]

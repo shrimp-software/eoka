@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- Launching Chrome, and probing its version, now retry for up to two seconds
+  when Linux reports the executable busy (`ETXTBSY`). A just-written patched
+  Chrome copy could stay open for writing in a child that another thread had
+  forked, which failed the launch or silently dropped the version probe.
+
 ## [0.10.2] - 2026-11-08
 
 ### Fixed

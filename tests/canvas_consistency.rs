@@ -15,9 +15,10 @@ async fn pixel_readback_matches_both_png_exports_without_mutating_the_source() {
         .await
         .unwrap();
         let page = browser
-            .new_page("data:text/html,<body>canvas fixture</body>")
+            .new_page("data:text/html,<body><p id=ready>canvas fixture</p></body>")
             .await
             .unwrap();
+        page.wait_for("#ready", 10_000).await.unwrap();
         let tree: Value = page
             .session()
             .send("Page.getFrameTree", &json!({}))
