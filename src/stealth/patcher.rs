@@ -457,18 +457,14 @@ impl ChromePatcher {
 
         match (orig_modified, patched_modified) {
             (Some(orig), Some(patched)) if patched > orig => {
-                if !self.verify_patched_sample() {
-                    return false;
-                }
+                let verified = self.verify_patched_sample();
                 #[cfg(target_os = "macos")]
-                if self
-                    .verify_owned_bundle()
-                    .and_then(|()| self.verify_signature())
-                    .is_err()
-                {
-                    return false;
-                }
-                true
+                let verified = verified
+                    && self
+                        .verify_owned_bundle()
+                        .and_then(|()| self.verify_signature())
+                        .is_ok();
+                verified
             }
             _ => false,
         }
