@@ -191,13 +191,7 @@ impl Page {
                             if properties["connected"] != true {
                                 return Err(Error::cdp_msg("Target detached after dispatch"));
                             }
-                            let mut actual = properties[field].clone();
-                            if field == "selected" {
-                                if let Some(values) = actual.as_array_mut() {
-                                    values.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-                                }
-                            }
-                            if actual == expected {
+                            if super::locator::Node::property(&properties, field) == expected {
                                 break;
                             }
                         }
@@ -449,12 +443,7 @@ impl Page {
         if matches!(expect, Expectation::Enabled { .. }) && properties["visible"] != true {
             return Ok(false);
         }
-        let mut actual = properties[field].clone();
-        if field == "selected" {
-            if let Some(values) = actual.as_array_mut() {
-                values.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
-            }
-        }
+        let actual = super::locator::Node::property(&properties, field);
         Ok(if contains {
             actual
                 .as_str()

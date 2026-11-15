@@ -147,6 +147,15 @@ impl Page {
     }
 }
 
+pub(super) fn call_value(result: Value) -> Result<Value> {
+    if let Some(exception) = result.get("exceptionDetails").filter(|v| !v.is_null()) {
+        let exception: crate::cdp::types::ExceptionDetails =
+            serde_json::from_value(exception.clone())?;
+        return Err(Error::cdp_msg(exception.message()));
+    }
+    Ok(result["result"]["value"].clone())
+}
+
 pub(super) struct Node {
     pub session: Session,
     pub object: String,
@@ -157,18 +166,30 @@ pub(super) struct Node {
 }
 
 impl Node {
-    pub async fn call(&self, body: &str, args: Vec<Value>) -> Result<Value> {
-        let result: Value = self.session.send("Runtime.callFunctionOn", &json!({
+    pub fn call_params(&self, body: &str, args: Vec<Value>) -> Value {
+        json!({
             "objectId":self.object, "functionDeclaration":body,
             "arguments":args.into_iter().map(|value| json!({"value":value})).collect::<Vec<_>>(),
             "returnByValue":true, "awaitPromise":true,
-        })).await?;
-        if let Some(exception) = result.get("exceptionDetails").filter(|v| !v.is_null()) {
-            let exception: crate::cdp::types::ExceptionDetails =
-                serde_json::from_value(exception.clone())?;
-            return Err(Error::cdp_msg(exception.message()));
+        })
+    }
+
+    pub async fn call(&self, body: &str, args: Vec<Value>) -> Result<Value> {
+        let result: Value = self
+            .session
+            .send("Runtime.callFunctionOn", &self.call_params(body, args))
+            .await?;
+        call_value(result)
+    }
+
+    pub fn property(properties: &Value, field: &str) -> Value {
+        let mut actual = properties[field].clone();
+        if field == "selected" {
+            if let Some(values) = actual.as_array_mut() {
+                values.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+            }
         }
-        Ok(result["result"]["value"].clone())
+        actual
     }
 
     pub async fn properties(&self) -> Result<Value> {
