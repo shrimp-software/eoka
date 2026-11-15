@@ -10,6 +10,16 @@ All notable changes to this project will be documented in this file.
   when Linux reports the executable busy (`ETXTBSY`). A just-written patched
   Chrome copy could stay open for writing in a child that another thread had
   forked, which failed the launch or silently dropped the version probe.
+- A drag whose mouse press fails to dispatch no longer leaves the left button
+  recorded as held, which made the next press fail with "mouse button is
+  already held". Drag input now shares its mouse handling with the coordinated
+  input path, which already freed the button.
+
+### Changed
+
+- Internal cleanup with no public API change: unused CDP protocol types are
+  removed, and node calls and expectation comparisons in the action engine have
+  one definition each.
 
 ## [0.10.2] - 2026-11-08
 

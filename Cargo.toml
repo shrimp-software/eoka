@@ -8,7 +8,6 @@ description = "Stealth browser automation for Rust. Puppeteer/Playwright alterna
 keywords = ["puppeteer", "playwright", "headless", "selenium", "web-scraping"]
 categories = ["web-programming", "development-tools::testing", "api-bindings"]
 repository = "https://github.com/shrimp-software/eoka"
-homepage = "https://github.com/shrimp-software/eoka"
 documentation = "https://docs.rs/eoka"
 readme = "README.md"
 authors = ["cbxss"]
