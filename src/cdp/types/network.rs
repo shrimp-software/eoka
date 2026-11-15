@@ -152,13 +152,6 @@ pub struct NetworkLoadingFailedEvent {
     pub canceled: Option<bool>,
 }
 
-/// Network.setExtraHTTPHeaders — inject extra headers into every request on this session
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NetworkSetExtraHTTPHeaders {
-    pub headers: HashMap<String, String>,
-}
-
 /// Network.clearBrowserCookies — wipe all cookies for this browser context
 pub type NetworkClearBrowserCookies = Empty;
 
