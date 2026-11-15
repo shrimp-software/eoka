@@ -48,18 +48,6 @@ pub enum MouseButton {
     Forward,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct InputDispatchKeyEvent {
-    pub r#type: KeyEventType,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub code: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum KeyEventType {
@@ -68,11 +56,6 @@ pub enum KeyEventType {
     KeyUp,
     RawKeyDown,
     Char,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct InputInsertText {
-    pub text: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

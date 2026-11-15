@@ -121,13 +121,6 @@ pub struct DOMRequestNodeResult {
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DOMFocus {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<i32>,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct DOMResolveNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<i32>,
@@ -140,16 +133,4 @@ pub struct DOMResolveNode {
 pub struct DOMResolveNodeResult {
     #[serde(default)]
     pub object: RemoteObject,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DOMSetFileInputFiles {
-    pub files: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub backend_node_id: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_id: Option<String>,
 }

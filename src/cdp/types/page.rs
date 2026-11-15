@@ -30,37 +30,7 @@ pub struct PageNavigateResult {
 
 pub type PageEnable = Empty;
 
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PageReload {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ignore_cache: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub script_to_evaluate_on_load: Option<String>,
-}
-
 pub type PageGetNavigationHistory = Empty;
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PageGetNavigationHistoryResult {
-    pub current_index: i32,
-    pub entries: Vec<NavigationEntry>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct NavigationEntry {
-    pub id: i32,
-    pub url: String,
-    pub title: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PageNavigateToHistoryEntry {
-    pub entry_id: i32,
-}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

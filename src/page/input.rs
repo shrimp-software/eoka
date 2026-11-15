@@ -163,14 +163,12 @@ impl HeldInputState {
     }
 }
 
-pub(crate) async fn coordinated_mouse_move(
+pub(crate) async fn held_mouse_move(
     session: &Session,
-    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    state: &mut HeldInputState,
     x: f64,
     y: f64,
 ) -> Result<()> {
-    let mut state = held_input.lock().await;
-    let buttons = state.mouse_button_mask();
     dispatch_coordinated_mouse_event(
         session,
         MouseEventType::MouseMoved,
@@ -178,7 +176,7 @@ pub(crate) async fn coordinated_mouse_move(
         y,
         None,
         None,
-        buttons,
+        state.mouse_button_mask(),
     )
     .await?;
     for position in state.mouse_buttons.values_mut() {
@@ -187,14 +185,13 @@ pub(crate) async fn coordinated_mouse_move(
     Ok(())
 }
 
-pub(crate) async fn coordinated_mouse_down(
+pub(crate) async fn held_mouse_down(
     session: &Session,
-    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    state: &mut HeldInputState,
     x: f64,
     y: f64,
     button: MouseButton,
 ) -> Result<()> {
-    let mut state = held_input.lock().await;
     let buttons = state
         .reserve_mouse_down(button, (x, y))
         .map_err(input_state_error)?;
@@ -214,14 +211,13 @@ pub(crate) async fn coordinated_mouse_down(
     result
 }
 
-pub(crate) async fn coordinated_mouse_up(
+pub(crate) async fn held_mouse_up(
     session: &Session,
-    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    state: &mut HeldInputState,
     x: f64,
     y: f64,
     button: MouseButton,
 ) -> Result<()> {
-    let mut state = held_input.lock().await;
     let buttons = state.mouse_up_mask(button).map_err(input_state_error)?;
     let result = dispatch_coordinated_mouse_event(
         session,
@@ -235,6 +231,35 @@ pub(crate) async fn coordinated_mouse_up(
     .await;
     state.finish_mouse_up(button);
     result
+}
+
+pub(crate) async fn coordinated_mouse_move(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    x: f64,
+    y: f64,
+) -> Result<()> {
+    held_mouse_move(session, &mut *held_input.lock().await, x, y).await
+}
+
+pub(crate) async fn coordinated_mouse_down(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    x: f64,
+    y: f64,
+    button: MouseButton,
+) -> Result<()> {
+    held_mouse_down(session, &mut *held_input.lock().await, x, y, button).await
+}
+
+pub(crate) async fn coordinated_mouse_up(
+    session: &Session,
+    held_input: &Arc<tokio::sync::Mutex<HeldInputState>>,
+    x: f64,
+    y: f64,
+    button: MouseButton,
+) -> Result<()> {
+    held_mouse_up(session, &mut *held_input.lock().await, x, y, button).await
 }
 
 pub(crate) async fn coordinated_mouse_wheel(

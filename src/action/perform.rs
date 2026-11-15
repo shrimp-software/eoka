@@ -25,16 +25,11 @@ pub(super) async fn mutation(
     args: Vec<Value>,
     preparation: bool,
 ) -> Result<Value> {
-    let result = dispatch.send(&node.session, "Runtime.callFunctionOn", json!({
-        "objectId":node.object,"functionDeclaration":function,"returnByValue":true,"awaitPromise":true,
-        "arguments":args.into_iter().map(|value|json!({"value":value})).collect::<Vec<_>>(),
-    }), preparation).await?;
-    if let Some(exception) = result.get("exceptionDetails").filter(|v| !v.is_null()) {
-        let exception: crate::cdp::types::ExceptionDetails =
-            serde_json::from_value(exception.clone())?;
-        return Err(Error::cdp_msg(exception.message()));
-    }
-    Ok(result["result"]["value"].clone())
+    let params = node.call_params(function, args);
+    let result = dispatch
+        .send(&node.session, "Runtime.callFunctionOn", params, preparation)
+        .await?;
+    super::locator::call_value(result)
 }
 
 pub(super) async fn prepare(
