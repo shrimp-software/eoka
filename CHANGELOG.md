@@ -14,6 +14,15 @@ All notable changes to this project will be documented in this file.
   recorded as held, which made the next press fail with "mouse button is
   already held". Drag input now shares its mouse handling with the coordinated
   input path, which already freed the button.
+- Text lookups and waits now survive a navigation the page starts itself, such
+  as a link click, an accepted `beforeunload` or a `location` assignment.
+  `find_by_text`, `find_by_text_match` and `wait_for_text` used the old
+  document's cached node and reported the destination's text as not found, and
+  `find_all_by_text` returned no elements. `wait_for`, `wait_for_any`,
+  `wait_for_text`, `wait_for_visible` and `wait_for_hidden` now treat a
+  destroyed execution context or navigated target as a missed poll instead of
+  failing at once. `find_all_by_text` now returns `DOM.requestNode` errors
+  instead of dropping those elements.
 
 ### Changed
 

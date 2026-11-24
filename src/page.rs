@@ -80,6 +80,18 @@ fn is_stale_node_error(e: &Error) -> bool {
     matches!(e, Error::Cdp { message, .. } if is_missing_node_message(message))
 }
 
+/// Whether a CDP error means a navigation replaced the document, execution
+/// context or target that the command used.
+fn is_navigation_race(e: &Error) -> bool {
+    matches!(e, Error::Cdp { message, .. } if [
+        "Cannot find context with specified id",
+        "Execution context was destroyed",
+        "Inspected target navigated or closed",
+    ]
+    .iter()
+    .any(|text| message.contains(text)))
+}
+
 /// Check if a CDP error is an element-related error (not found, not visible, etc.)
 fn is_element_cdp_error(e: &Error) -> bool {
     match e {
@@ -459,6 +471,29 @@ mod tests {
         let not_found = Error::ElementNotFound("x".into());
         assert!(is_element_cdp_error(&not_found));
         assert!(!is_stale_node_error(&not_found));
+    }
+
+    #[test]
+    fn test_navigation_race_detection() {
+        for message in [
+            "Cannot find context with specified id",
+            "Execution context was destroyed.",
+            "Inspected target navigated or closed",
+        ] {
+            assert!(is_navigation_race(&Error::cdp(
+                "Runtime.evaluate",
+                -32000,
+                message
+            )));
+        }
+        let stale = Error::cdp(
+            "DOM.resolveNode",
+            -32000,
+            "Could not find node with given id",
+        );
+        assert!(!is_navigation_race(&stale));
+        assert!(!is_navigation_race(&Error::ElementNotFound("x".into())));
+        assert!(!is_navigation_race(&Error::transport("disconnected")));
     }
 
     #[test]
