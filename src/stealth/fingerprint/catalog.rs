@@ -45,11 +45,16 @@ pub(super) const WEBGL_RENDERERS_WINDOWS: &[&str] = &[
     "ANGLE (Intel, Intel(R) UHD Graphics 770 Direct3D11 vs_5_0 ps_5_0, D3D11)",
 ];
 
-/// Common Chromium-on-Linux software renderer. Native Linux profiles leave
-/// WebGL untouched; this is only used when callers explicitly request a
-/// synthetic Linux profile.
+/// WebGL renderers for Linux, as Chrome reports them on Mesa and NVIDIA
+/// drivers. Software renderers (SwiftShader, llvmpipe) must not appear here:
+/// they mark a headless host or VM.
 pub(super) const WEBGL_RENDERERS_LINUX: &[&str] = &[
-    "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 16.0.0) (0x0000C0DE)), SwiftShader driver)",
+    "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)",
+    "ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)",
+    "ANGLE (Intel, Mesa Intel(R) Xe Graphics (TGL GT2), OpenGL 4.6)",
+    "ANGLE (AMD, AMD Radeon RX 580 Series (radeonsi, polaris10, LLVM 15.0.7, DRM 3.54, 6.5.0-41-generic), OpenGL 4.6)",
+    "ANGLE (NVIDIA Corporation, NVIDIA GeForce GTX 1660 SUPER/PCIe/SSE2, OpenGL 4.5.0)",
+    "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.5.0)",
 ];
 
 /// Platform-specific screen resolutions.
@@ -214,25 +219,34 @@ pub(super) const US_LAYOUT_ENTRIES: &[(&str, &str)] = &[
     ("Space", " "),
 ];
 
-/// WebGL vendor, WebGL renderer and client-hint platform version for a platform.
-pub(super) fn platform_surfaces(platform: Platform) -> (&'static str, String, String) {
-    match platform {
-        Platform::MacOS => (
-            "Google Inc. (Apple)",
-            choose(WEBGL_RENDERERS_MAC).to_string(),
-            choose(MACOS_CH_VERSIONS).to_string(),
-        ),
-        Platform::Windows => (
-            "Google Inc. (NVIDIA)",
-            choose(WEBGL_RENDERERS_WINDOWS).to_string(),
-            choose(WINDOWS_CH_VERSIONS).to_string(),
-        ),
-        Platform::Linux => (
-            "Google Inc. (Google)",
-            choose(WEBGL_RENDERERS_LINUX).to_string(),
-            choose(LINUX_CH_VERSIONS).to_string(),
-        ),
-    }
+/// The unmasked vendor Chrome reports alongside an ANGLE renderer string:
+/// `ANGLE (Intel, ...)` pairs with `Google Inc. (Intel)`.
+pub(super) fn webgl_vendor_for(renderer: &str) -> String {
+    let vendor = renderer
+        .strip_prefix("ANGLE (")
+        .and_then(|rest| rest.split(',').next())
+        .unwrap_or("Google");
+    format!("Google Inc. ({vendor})")
+}
+
+/// A WebGL (vendor, renderer) pair for a platform.
+pub(super) fn platform_webgl(platform: Platform) -> (String, String) {
+    let renderer = *choose(match platform {
+        Platform::MacOS => WEBGL_RENDERERS_MAC,
+        Platform::Windows => WEBGL_RENDERERS_WINDOWS,
+        Platform::Linux => WEBGL_RENDERERS_LINUX,
+    });
+    (webgl_vendor_for(renderer), renderer.to_string())
+}
+
+/// Client-hint platform version for a platform.
+pub(super) fn platform_version(platform: Platform) -> String {
+    choose(match platform {
+        Platform::MacOS => MACOS_CH_VERSIONS,
+        Platform::Windows => WINDOWS_CH_VERSIONS,
+        Platform::Linux => LINUX_CH_VERSIONS,
+    })
+    .to_string()
 }
 
 /// A plausible screen resolution for the platform.

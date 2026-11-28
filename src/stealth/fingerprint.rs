@@ -16,8 +16,8 @@ use serde_json::json;
 mod catalog;
 pub(crate) use catalog::GENERIC_FONTS;
 use catalog::{
-    base_fonts_for, default_voices_for, platform_screen, platform_surfaces, CHROME_VERSIONS,
-    US_LAYOUT_ENTRIES,
+    base_fonts_for, default_voices_for, platform_screen, platform_version, platform_webgl,
+    CHROME_VERSIONS, US_LAYOUT_ENTRIES,
 };
 
 const PERSISTED_FINGERPRINT_FILE: &str = ".eoka-fingerprint.json";
@@ -185,7 +185,8 @@ impl Fingerprint {
 
     /// Build a fully coherent identity for a platform + Chrome version.
     fn build(platform: Platform, chrome_major: String, chrome_full_version: String) -> Self {
-        let (webgl_vendor, webgl_renderer, platform_version) = platform_surfaces(platform);
+        let (webgl_vendor, webgl_renderer) = platform_webgl(platform);
+        let platform_version = platform_version(platform);
         let (screen_width, screen_height) = platform_screen(platform);
         Self {
             user_agent: ua_for(platform, &chrome_full_version),
@@ -202,7 +203,7 @@ impl Fingerprint {
             device_memory: *choose(&[4, 8, 8]),
             timezone: choose(super::evasions::COMMON_TIMEZONES).to_string(),
             languages: vec!["en-US".to_string(), "en".to_string()],
-            webgl_vendor: webgl_vendor.to_string(),
+            webgl_vendor,
             webgl_renderer,
             noise_seed: random_noise_seed(),
             voices: default_voices_for(platform),
@@ -286,7 +287,7 @@ impl Fingerprint {
         let path = profile_dir.join(PERSISTED_FINGERPRINT_FILE);
         if path.exists() {
             let contents = fs::read(&path)?;
-            let fingerprint: Self = serde_json::from_slice(&contents).map_err(|error| {
+            let mut fingerprint: Self = serde_json::from_slice(&contents).map_err(|error| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!(
@@ -311,18 +312,30 @@ impl Fingerprint {
                     ));
                 }
             }
+            // Identities stored before 0.10.3 could claim a software
+            // renderer, which marks a headless host. Replace it once.
+            if is_software_renderer(&fingerprint.webgl_renderer) {
+                (fingerprint.webgl_vendor, fingerprint.webgl_renderer) =
+                    platform_webgl(fingerprint.platform);
+                fingerprint.persist(profile_dir)?;
+            }
             return Ok(fingerprint);
         }
 
         let fingerprint = Self::resolve(user_agent, timezone);
+        fingerprint.persist(profile_dir)?;
+        Ok(fingerprint)
+    }
+
+    /// Atomically stores this identity beside the profile.
+    fn persist(&self, profile_dir: &Path) -> io::Result<()> {
         let temporary = profile_dir.join(format!(
             "{PERSISTED_FINGERPRINT_FILE}.tmp-{}",
             std::process::id()
         ));
-        let encoded = serde_json::to_vec_pretty(&fingerprint).map_err(io::Error::other)?;
+        let encoded = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         fs::write(&temporary, encoded)?;
-        fs::rename(temporary, path)?;
-        Ok(fingerprint)
+        fs::rename(temporary, profile_dir.join(PERSISTED_FINGERPRINT_FILE))
     }
 
     /// `navigator.platform` value consistent with this fingerprint.
@@ -334,7 +347,7 @@ impl Fingerprint {
         }
     }
 
-    /// Client-hint `architecture` for the claimed platform. `platform_surfaces`
+    /// Client-hint `architecture` for the claimed platform. `platform_webgl`
     /// picks Apple-silicon renderers for macOS, so macOS claims are ARM.
     pub fn ch_architecture(&self) -> &'static str {
         match self.platform {
@@ -438,6 +451,11 @@ impl Fingerprint {
             ("Not?A_Brand".to_string(), "24.0.0.0".to_string()),
         ]
     }
+}
+
+/// Whether a WebGL renderer string names a CPU rasterizer.
+fn is_software_renderer(renderer: &str) -> bool {
+    renderer.contains("SwiftShader") || renderer.contains("llvmpipe")
 }
 
 fn random_noise_seed() -> u32 {

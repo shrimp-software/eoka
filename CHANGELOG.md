@@ -14,6 +14,21 @@ All notable changes to this project will be documented in this file.
   recorded as held, which made the next press fail with "mouse button is
   already held". Drag input now shares its mouse handling with the coordinated
   input path, which already freed the button.
+- `window.outerHeight` is now larger than `innerHeight` in headless launches,
+  as in a real browser window. The window is sized to the viewport plus
+  Chrome's 87px toolbar area instead of to the viewport itself, so the value
+  is native. The headless screen is the smallest common resolution that
+  contains the window (1920x1200 for the default 1920x1080 viewport) and the
+  window sits at the screen origin. Viewport dimensions are unchanged. (#50)
+- Linux identities no longer report a SwiftShader WebGL renderer. They now
+  claim a Mesa Intel, AMD or NVIDIA renderer, and identities already stored
+  beside a profile with a software renderer are replaced on next launch.
+  Rendering still runs in software on hosts without a GPU, so WebGL
+  capability or pixel probes can disagree with the claimed GPU, as they
+  already can for macOS and Windows identities. (#51)
+- The WebGL vendor now always matches the renderer. Windows AMD and Intel
+  renderers were paired with the NVIDIA vendor, and macOS Intel renderers with
+  the Apple vendor.
 
 ### Changed
 

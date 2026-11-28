@@ -1,8 +1,5 @@
 //! Stealth regression checks: launch with the default (shipping) config and
 //! read the signals common bot detectors look at from a local page.
-//!
-//! Gaps eoka does not close yet are named `known_gap_*`. CI skips them, and
-//! they turn into regular tests once fixed.
 
 mod support;
 
@@ -32,6 +29,8 @@ const PROBE: &str = r#"(async () => {
     webglRenderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null,
     outer: [window.outerWidth, window.outerHeight],
     inner: [window.innerWidth, window.innerHeight],
+    screen: [screen.width, screen.height],
+    position: [window.screenX, window.screenY],
     hardwareConcurrency: navigator.hardwareConcurrency,
   };
 })()"#;
@@ -132,21 +131,36 @@ async fn default_launch_hides_automation_signals() {
 }
 
 #[tokio::test]
-#[ignore = "known gap: outer size equals inner size (shrimp-software/eoka#50)"]
-async fn known_gap_outer_window_is_larger_than_viewport() {
+#[ignore = "requires Chrome"]
+async fn outer_window_is_larger_than_viewport() {
     let (s, _) = probe().await;
+    let (outer, inner, screen) = (&s["outer"], &s["inner"], &s["screen"]);
+    assert_eq!(inner, &serde_json::json!([1920, 1080]), "viewport");
     assert!(
-        s["outer"][1].as_u64() > s["inner"][1].as_u64(),
-        "outer {} vs inner {}",
-        s["outer"],
-        s["inner"]
+        outer[0].as_u64() >= inner[0].as_u64() && outer[1].as_u64() > inner[1].as_u64(),
+        "outer {outer} vs inner {inner}"
+    );
+    // A window cannot be larger than the screen it is on.
+    assert!(
+        screen[0].as_u64() >= outer[0].as_u64() && screen[1].as_u64() >= outer[1].as_u64(),
+        "screen {screen} vs outer {outer}"
+    );
+    let position = &s["position"];
+    assert!(
+        position[0].as_u64().unwrap() + outer[0].as_u64().unwrap() <= screen[0].as_u64().unwrap()
+            && position[1].as_u64().unwrap() + outer[1].as_u64().unwrap()
+                <= screen[1].as_u64().unwrap(),
+        "window at {position} sized {outer} leaves screen {screen}"
     );
 }
 
 #[tokio::test]
-#[ignore = "known gap: WebGL renderer is SwiftShader (shrimp-software/eoka#51)"]
-async fn known_gap_webgl_renderer_is_not_software() {
+#[ignore = "requires Chrome"]
+async fn webgl_renderer_is_not_software() {
     let (s, _) = probe().await;
     let renderer = s["webglRenderer"].as_str().unwrap_or_default();
-    assert!(!renderer.contains("SwiftShader"), "{renderer}");
+    assert!(!renderer.is_empty(), "WebGL renderer missing");
+    for software in ["SwiftShader", "llvmpipe"] {
+        assert!(!renderer.contains(software), "{renderer}");
+    }
 }

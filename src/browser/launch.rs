@@ -36,8 +36,43 @@ pub(super) async fn discover_browser_ws(port: u16) -> Result<String> {
     .map_err(|error| Error::transport(format!("Browser discovery worker failed: {}", error)))?
 }
 
+/// Height of Chrome's tab strip and toolbar in CSS pixels. Measured on
+/// `--headless=new` (Chrome 155 and 157): a 1920x1080 window has a 1920x993
+/// viewport, the same as a headed window without a bookmarks bar.
+const BROWSER_CHROME_HEIGHT: u32 = 87;
+
+/// Common desktop resolutions, smallest first.
+const SCREEN_SIZES: &[(u32, u32)] = &[
+    (1366, 768),
+    (1440, 900),
+    (1536, 864),
+    (1920, 1080),
+    (1920, 1200),
+    (2560, 1440),
+    (2560, 1600),
+    (3840, 2160),
+];
+
+/// Outer window size whose native viewport is `width` x `height`.
+fn window_size_for_viewport(width: u32, height: u32) -> (u32, u32) {
+    (width, height.saturating_add(BROWSER_CHROME_HEIGHT))
+}
+
+/// Smallest common screen that contains the window, or the window itself
+/// when it is larger than every listed screen.
+fn screen_for_window(width: u32, height: u32) -> (u32, u32) {
+    SCREEN_SIZES
+        .iter()
+        .copied()
+        .find(|&(screen_width, screen_height)| screen_width >= width && screen_height >= height)
+        .unwrap_or((width, height))
+}
+
 /// Stealth browser arguments (pre-built for zero allocation).
 fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String> {
+    let (window_width, window_height) =
+        window_size_for_viewport(config.viewport_width, config.viewport_height);
+    let (screen_width, screen_height) = screen_for_window(window_width, window_height);
     let mut args = vec![
         // Core automation hiding
         "--disable-blink-features=AutomationControlled".into(),
@@ -71,17 +106,12 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
         // header Google properties use to profile installs (see
         // `strip_x_client_data`).
         "--disable-field-trial-config".into(),
-        // Window size
-        format!(
-            "--window-size={},{}",
-            config.viewport_width, config.viewport_height
-        ),
-        // Keep Chromium's virtual screen aligned with the viewport in new
-        // headless mode; otherwise it reports a fixed 800x600 screen.
-        format!(
-            "--ozone-override-screen-size={},{}",
-            config.viewport_width, config.viewport_height
-        ),
+        // The window is the viewport plus Chrome's own toolbar area, so
+        // `outerHeight` exceeds `innerHeight` as it does in a real browser.
+        format!("--window-size={window_width},{window_height}"),
+        // New headless mode otherwise reports a fixed 800x600 screen. The
+        // screen must contain the window, so it cannot equal the viewport.
+        format!("--ozone-override-screen-size={screen_width},{screen_height}"),
         // Xvfb and headless sessions have no pointing device, so Blink
         // reports `(pointer: none)` and `(hover: none)`. Desktop bot checks
         // (Cloudflare Turnstile included) cross-check the pointer/hover media
@@ -100,6 +130,9 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
     // Headless mode
     if config.headless {
         args.push("--headless=new".into());
+        // Headless places the window at (10,10), which pushes a full-width
+        // window past the right edge of the screen.
+        args.push("--window-position=0,0".into());
     }
 
     // Named profile within user_data_dir
@@ -663,5 +696,51 @@ mod try_attach_existing_tests {
                 .contains("if (navigator.keyboard && navigator.keyboard.getLayoutMap && null)"),
             "Linux keyboard spoof must be inert"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn window_is_taller_than_the_viewport() {
+        assert_eq!(window_size_for_viewport(1920, 1080), (1920, 1167));
+        assert_eq!(
+            window_size_for_viewport(800, u32::MAX),
+            (800, u32::MAX),
+            "height must not overflow"
+        );
+    }
+
+    #[test]
+    fn screen_contains_the_window() {
+        assert_eq!(screen_for_window(1920, 1167), (1920, 1200));
+        assert_eq!(screen_for_window(1280, 807), (1440, 900));
+        for &(width, height) in &[(1, 1), (1366, 768), (1920, 1167), (2560, 1527)] {
+            let (screen_width, screen_height) = screen_for_window(width, height);
+            assert!(screen_width >= width && screen_height >= height);
+        }
+    }
+
+    #[test]
+    fn oversized_window_becomes_the_screen() {
+        assert_eq!(screen_for_window(5000, 3000), (5000, 3000));
+        assert_eq!(screen_for_window(1000, 4000), (1000, 4000));
+    }
+
+    #[test]
+    fn default_launch_arguments_size_window_and_screen() {
+        let config = StealthConfig::default();
+        let fingerprint = Fingerprint::resolve(None, None);
+        let args = stealth_args(&config, &fingerprint);
+        assert!(args.contains(&"--window-size=1920,1167".to_string()));
+        assert!(args.contains(&"--ozone-override-screen-size=1920,1200".to_string()));
+        assert!(args.contains(&"--window-position=0,0".to_string()));
+
+        let visible = stealth_args(&StealthConfig::visible(), &fingerprint);
+        assert!(!visible
+            .iter()
+            .any(|arg| arg.starts_with("--window-position")));
     }
 }

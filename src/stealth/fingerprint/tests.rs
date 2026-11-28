@@ -407,3 +407,72 @@ fn test_ch_full_version_brands_shape() {
         brands
     );
 }
+
+#[test]
+fn test_webgl_catalog_has_no_software_renderers() {
+    for renderer in WEBGL_RENDERERS_MAC
+        .iter()
+        .chain(WEBGL_RENDERERS_WINDOWS)
+        .chain(WEBGL_RENDERERS_LINUX)
+    {
+        assert!(!is_software_renderer(renderer), "{renderer}");
+        assert!(renderer.starts_with("ANGLE ("), "{renderer}");
+    }
+}
+
+#[test]
+fn test_webgl_vendor_matches_renderer() {
+    assert_eq!(
+        webgl_vendor_for("ANGLE (Intel, Mesa Intel(R) UHD Graphics 630 (CFL GT2), OpenGL 4.6)"),
+        "Google Inc. (Intel)"
+    );
+    assert_eq!(
+        webgl_vendor_for(
+            "ANGLE (NVIDIA Corporation, NVIDIA GeForce RTX 3060/PCIe/SSE2, OpenGL 4.5.0)"
+        ),
+        "Google Inc. (NVIDIA Corporation)"
+    );
+    for platform in [Platform::MacOS, Platform::Windows, Platform::Linux] {
+        for _ in 0..50 {
+            let fp = Fingerprint::build(platform, "140".into(), "140.0.7312.86".into());
+            let vendor = fp
+                .webgl_vendor
+                .strip_prefix("Google Inc. (")
+                .and_then(|vendor| vendor.strip_suffix(')'))
+                .unwrap();
+            assert!(
+                fp.webgl_renderer.starts_with(&format!("ANGLE ({vendor},")),
+                "{} vs {}",
+                fp.webgl_vendor,
+                fp.webgl_renderer
+            );
+        }
+    }
+}
+
+#[test]
+fn test_persisted_software_renderer_is_replaced_once() {
+    let dir = std::env::temp_dir().join(format!(
+        "eoka-fingerprint-test-{}-{}",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.182 Safari/537.36";
+    let mut stored = Fingerprint::resolve(Some(ua), None);
+    stored.webgl_vendor = "Google Inc. (Google)".into();
+    stored.webgl_renderer =
+        "ANGLE (Google, Vulkan 1.3.0 (SwiftShader Device (LLVM 16.0.0) (0x0000C0DE)), SwiftShader driver)".into();
+    stored.persist(&dir).unwrap();
+
+    let first = Fingerprint::resolve_for_profile(Some(ua), None, Some(&dir)).unwrap();
+    assert!(WEBGL_RENDERERS_LINUX.contains(&first.webgl_renderer.as_str()));
+    assert_eq!(first.webgl_vendor, webgl_vendor_for(&first.webgl_renderer));
+    // Everything else about the identity is kept.
+    assert_eq!(first.noise_seed, stored.noise_seed);
+    assert_eq!(first.timezone, stored.timezone);
+
+    let second = Fingerprint::resolve_for_profile(Some(ua), None, Some(&dir)).unwrap();
+    assert_eq!(first.webgl_renderer, second.webgl_renderer);
+    std::fs::remove_dir_all(dir).unwrap();
+}
