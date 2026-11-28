@@ -26,8 +26,7 @@ async fn test_cookies() {
         .await
         .expect("Failed to create page");
 
-    let fixture =
-        support::HttpFixture::start(|_| async { support::Response::html("cookie fixture") }).await;
+    let fixture = support::HttpFixture::html("cookie fixture").await;
     page.goto(&fixture.url).await.expect("Failed to navigate");
 
     // Set a cookie
@@ -123,9 +122,7 @@ async fn test_failed_new_page_closes_its_tab() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn test_new_page_waits_for_navigation() {
-    let fixture =
-        support::HttpFixture::start(|_| async { support::Response::html("<title>ready</title>") })
-            .await;
+    let fixture = support::HttpFixture::html("<title>ready</title>").await;
     let browser = support::browser().await;
     let page = browser.new_page(&fixture.url).await.unwrap();
     // No sleep: the URL is committed when new_page returns.

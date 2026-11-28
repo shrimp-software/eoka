@@ -85,19 +85,45 @@ impl HttpFixture {
     }
 }
 
+impl HttpFixture {
+    pub fn port(&self) -> &str {
+        self.url.rsplit(':').next().unwrap().trim_end_matches('/')
+    }
+
+    /// Serves `body` as HTML for every request.
+    pub async fn html(body: &'static str) -> Self {
+        Self::start(move |_| async move { Response::html(body) }).await
+    }
+}
+
 impl Drop for HttpFixture {
     fn drop(&mut self) {
         self.task.abort();
     }
 }
 
-pub async fn browser() -> eoka::Browser {
+/// Default (shipping) config, on the pinned test Chrome when one is configured.
+pub async fn launch(configure: impl FnOnce(&mut eoka::StealthConfig)) -> eoka::Browser {
     eoka::Browser::launch_with(|c| {
         c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
-        c.patch_binary = false;
-        c.strip_x_client_data = false;
-        c.cdp_timeout = 5;
+        configure(c);
     })
     .await
     .unwrap()
+}
+
+/// [`browser`] with extra configuration.
+pub async fn browser_with(configure: impl FnOnce(&mut eoka::StealthConfig)) -> eoka::Browser {
+    launch(|c| {
+        c.patch_binary = false;
+        c.strip_x_client_data = false;
+        c.cdp_timeout = 5;
+        configure(c);
+    })
+    .await
+}
+
+/// Fixture config: no X-Client-Data interception and a short CDP timeout.
+pub async fn browser() -> eoka::Browser {
+    browser_with(|_| {}).await
 }

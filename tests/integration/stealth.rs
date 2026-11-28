@@ -4,7 +4,7 @@
 use crate::support;
 
 use serde_json::Value;
-use support::{HttpFixture, Response};
+use support::{launch, HttpFixture, Response};
 
 const PROBE: &str = r#"(async () => {
   const gl = document.createElement('canvas').getContext('webgl');
@@ -35,18 +35,8 @@ const PROBE: &str = r#"(async () => {
   };
 })()"#;
 
-/// Default (shipping) launch, on the pinned test Chrome when one is configured.
-async fn launch(configure: impl FnOnce(&mut eoka::StealthConfig)) -> eoka::Browser {
-    eoka::Browser::launch_with(|c| {
-        c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
-        configure(c);
-    })
-    .await
-    .unwrap()
-}
-
 async fn blank_fixture() -> HttpFixture {
-    HttpFixture::start(|_| async { Response::html("<!doctype html><title>blank</title>") }).await
+    HttpFixture::html("<!doctype html><title>blank</title>").await
 }
 
 async fn probe() -> (Value, String) {
@@ -504,10 +494,7 @@ async fn user_feature_flags_merge_with_stealth_flags() {
 #[tokio::test]
 #[ignore = "requires Chrome"]
 async fn human_paths_start_at_the_pointer() {
-    let fixture = HttpFixture::start(|_| async {
-        Response::html("<!doctype html><body style='height:5000px;margin:0'><script>window.events = []; addEventListener('mousemove', e => events.push(['move', e.clientX, e.clientY])); addEventListener('wheel', e => events.push(['wheel', e.clientX, e.clientY]));</script>")
-    })
-    .await;
+    let fixture = HttpFixture::html("<!doctype html><body style='height:5000px;margin:0'><script>window.events = []; addEventListener('mousemove', e => events.push(['move', e.clientX, e.clientY])); addEventListener('wheel', e => events.push(['wheel', e.clientX, e.clientY]));</script>").await;
     let browser = launch(|_| {}).await;
     let page = browser.new_page(&fixture.url).await.unwrap();
     let human = page.human().with_speed(eoka::HumanSpeed::Fast);

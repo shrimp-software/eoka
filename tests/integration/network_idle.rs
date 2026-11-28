@@ -87,7 +87,7 @@ async fn native_idle_tracks_bodies_xhr_redirects_and_concurrent_waiters() {
 #[tokio::test]
 #[ignore = "requires Chrome; local attachment fixture"]
 async fn attached_documents_require_navigation_and_managed_reattach_reuses_tracking() {
-    let fixture = HttpFixture::start(|_| async { Response::html("<div>ready</div>") }).await;
+    let fixture = HttpFixture::html("<div>ready</div>").await;
     let browser = support::browser().await;
     let managed = browser.new_page(&fixture.url).await.unwrap();
     let duplicate = browser.attach_page(managed.target_id()).await.unwrap();
