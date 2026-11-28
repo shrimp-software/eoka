@@ -338,15 +338,20 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
         attached: false,
         hover_observer: None,
     };
-    let mut context = None;
-    if let Some(frame_id) = &spec.frame_id {
-        let target = page.frame_target_id(frame_id).await?;
-        if target != page.target_id() {
-            node.session = page.session().attach_frame_target(&target).await?;
-            node.attached = true;
+    // Locators always run in an isolated world, so page scripts can neither
+    // observe them nor patch the DOM APIs they use. A page target's main
+    // frame id is its target id.
+    let frame_id = match &spec.frame_id {
+        Some(frame_id) => {
+            let target = page.frame_target_id(frame_id).await?;
+            if target != page.target_id() {
+                node.session = page.session().attach_frame_target(&target).await?;
+                node.attached = true;
+            }
+            frame_id.clone()
         }
-        context = Some(node.session.create_isolated_world(frame_id).await?);
-    }
+        None => page.target_id().to_owned(),
+    };
     let pinned = match spec.query {
         LocatorQuery::BackendNode { id } => Some(json!({"backendNodeId": id})),
         LocatorQuery::Node { id } => Some(json!({"nodeId": id})),
@@ -388,12 +393,33 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
             include_str!("../page/text_candidates.js")
         )
     );
-    let mut params =
-        json!({"expression":expression,"objectGroup":node.group,"returnByValue":false});
-    if let Some(context) = context {
-        params["contextId"] = json!(context);
-    }
-    let result: Value = node.session.send("Runtime.evaluate", &params).await?;
+    let mut attempt = 0;
+    let result: Value = loop {
+        attempt += 1;
+        let world = isolated_world(&node.session, &frame_id).await?;
+        let guarded = format!(
+            "(()=>{{if(globalThis.__eoka_world!=={}){{throw new Error('{WORLD_MISMATCH}')}}return {expression}}})()",
+            world.token
+        );
+        let params = json!({"expression":guarded,"objectGroup":node.group,"returnByValue":false,"contextId":world.context});
+        let result = node
+            .session
+            .send::<_, Value>("Runtime.evaluate", &params)
+            .await;
+        let stale = match &result {
+            Err(error) => {
+                crate::error::classify::is(error, crate::error::classify::CdpFailure::ContextLost)
+            }
+            Ok(value) => value["exceptionDetails"]["exception"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains(WORLD_MISMATCH)),
+        };
+        if stale && attempt < 3 {
+            forget_isolated_world(&node.session, &frame_id);
+            continue;
+        }
+        break result?;
+    };
     if result.get("exceptionDetails").is_some() {
         return Err(Error::cdp_msg("Invalid locator query"));
     }
@@ -431,4 +457,61 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
         .ok_or_else(|| Error::cdp_msg("Locator element disappeared"))?
         .into();
     Ok(Some(node))
+}
+
+const WORLD_MISMATCH: &str = "eoka: stale isolated world";
+
+#[derive(Clone, Copy)]
+struct World {
+    context: i64,
+    token: u64,
+}
+
+type WorldKey = (String, String);
+
+fn worlds() -> &'static std::sync::Mutex<std::collections::HashMap<WorldKey, World>> {
+    static WORLDS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<WorldKey, World>>,
+    > = std::sync::OnceLock::new();
+    WORLDS.get_or_init(Default::default)
+}
+
+/// The cached eoka isolated world for a frame, created on first use.
+///
+/// Creating a world per poll grew Chrome's world list on every 25ms retry.
+/// A navigation destroys the world; callers detect that through the token
+/// check or a lost-context error and call [`forget_isolated_world`]. The
+/// token, set inside the world, also catches a reused context id.
+async fn isolated_world(session: &Session, frame_id: &str) -> Result<World> {
+    let key = (session.session_id().to_owned(), frame_id.to_owned());
+    if let Some(world) = worlds()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&key)
+        .copied()
+    {
+        return Ok(world);
+    }
+    let context = session.create_isolated_world(frame_id).await?;
+    let token = fastrand::u64(1..u64::MAX >> 11);
+    session
+        .send::<_, Value>(
+            "Runtime.evaluate",
+            &json!({"expression":format!("globalThis.__eoka_world={token}"),"contextId":context}),
+        )
+        .await?;
+    let world = World { context, token };
+    let mut cache = worlds().lock().unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= 512 {
+        cache.clear();
+    }
+    cache.insert(key, world);
+    Ok(world)
+}
+
+fn forget_isolated_world(session: &Session, frame_id: &str) {
+    worlds()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(session.session_id().to_owned(), frame_id.to_owned()));
 }

@@ -435,3 +435,34 @@ async fn locator_covers_hover_focus_type_and_submit() {
         .unwrap();
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn locators_run_outside_the_page_world() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    // A page that watches or sabotages the DOM APIs locators use.
+    page.execute("document.body.innerHTML='<button id=go onclick=\"this.textContent=\\'done\\'\">Go</button>';window.calls=0;for(const name of ['querySelectorAll','elementFromPoint']){const original=Document.prototype[name];Document.prototype[name]=function(...args){window.calls++;return name==='querySelectorAll'?[]:original.apply(this,args)}}").await.unwrap();
+    let receipt = page
+        .locator("#go")
+        .click(ActionOptions {
+            expect: Some(Expectation::Text {
+                target: LocatorSpec::css("#go"),
+                value: "done".into(),
+                contains: false,
+            }),
+            ..options()
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    assert_eq!(page.evaluate::<u32>("window.calls").await.unwrap(), 0);
+    // After a navigation the cached world is gone; the next locator recovers.
+    page.execute("location.reload()").await.unwrap();
+    page.wait(300).await;
+    page.execute("document.body.innerHTML='<p id=again>x</p>'")
+        .await
+        .unwrap();
+    assert!(page.locator("#again").state().await.unwrap().is_some());
+    browser.close().await.unwrap();
+}
