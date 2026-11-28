@@ -128,14 +128,19 @@ impl ActionInput {
         if mode == crate::InputMode::Human && !text.is_empty() {
             for ch in text.chars() {
                 before_insert().await?;
-                let key = ch.to_string();
+                // A newline is the Enter key, which Chrome only inserts as "\r".
+                let (key, typed) = if ch == '\n' {
+                    ("Enter".to_string(), "\r".to_string())
+                } else {
+                    (ch.to_string(), ch.to_string())
+                };
                 let (code, virtual_key, shift) = us_key(ch);
                 let modifiers = if shift { 8 } else { 0 };
                 dispatch
                     .send(
                         &self.session,
                         "Input.dispatchKeyEvent",
-                        json!({"type":"keyDown","key":key,"code":code,"text":key,"unmodifiedText":key,
+                        json!({"type":"keyDown","key":key,"code":code,"text":typed,"unmodifiedText":typed,
                             "windowsVirtualKeyCode":virtual_key,"nativeVirtualKeyCode":virtual_key,"modifiers":modifiers}),
                         false,
                     )
@@ -283,6 +288,9 @@ fn us_key(ch: char) -> (String, u32, bool) {
     }
     if ch == ' ' {
         return ("Space".into(), 32, false);
+    }
+    if ch == '\n' {
+        return ("Enter".into(), 13, false);
     }
     for &(plain, shifted, code, virtual_key) in PUNCTUATION {
         if ch == plain || ch == shifted {

@@ -341,8 +341,12 @@ and text locators:
 Arguments reach page scripts as JSON, never spliced into source.
 
 ### Error Handling
-Chrome reports lifecycle conditions only as message text; all such matching
-lives in `src/error/classify.rs` (`CdpFailure`). CDP "box model" errors become
+Chrome reports lifecycle conditions only as message text. The shared
+classification (session gone, context lost, node gone, not rendered) lives in
+`src/error/classify.rs` (`CdpFailure`); use it instead of new string matches.
+Frame discovery and shadow retries (`page/frames`), preparation retries
+(`action/perform.rs`) and recording support detection still match their own
+messages. CDP "box model" errors become
 `ElementNotVisible`. `try_*` returns `Ok(false)` for missing, invisible,
 moved, covered and stale targets when no input was sent.
 
@@ -358,7 +362,7 @@ Error::InvalidUrl(message)            // Unusable URL; message omits it
 Error::InvalidScreenshotOptions(message) // Invalid format/quality/crop combination
 Error::ValueMismatch { selector, expected_chars, actual_chars } // never the values
 Error::RetryExhausted { attempts, last_error, source }
-Error::Cdp { method, code, message }  // Chrome's own protocol errors only
+Error::Cdp { method, code, message }  // Chrome protocol errors, plus remaining internal invariant failures
 ```
 
 Raise new eoka-side failures with `Error::coded(ErrorCode::X, msg)`, never with a
@@ -381,7 +385,7 @@ at compile time, so no runtime file reads are needed.
 | `NAVIGATOR_PROPS_EVASION` | languages (one cached frozen array), platform, hardware |
 | `HEADLESS_EVASION` | PerformanceObserver entry types on old headless builds |
 | `BATTERY_EVASION` | navigator.getBattery() |
-| `NAVIGATOR_EXTRA_EVASION` | connection, only if missing |
+| `NAVIGATOR_EXTRA_EVASION` | connection, only where legacy headless reports all zeros |
 | `WEBGL_EVASION` / `CANVAS_EVASION` / `AUDIO_EVASION` | Gated by `webgl_spoof`/`canvas_spoof`/`audio_spoof` |
 | `SPEECH_EVASION` | speechSynthesis.getVoices() |
 | `MEDIA_DEVICES_EVASION` | mediaDevices.enumerateDevices() |

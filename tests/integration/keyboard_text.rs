@@ -190,3 +190,38 @@ async fn human_typing_sends_key_events_and_verifies_the_value() {
     assert!(keys.contains(&("keydown".into(), "!".into(), "Digit1".into(), true, true)));
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn human_typing_handles_newlines_and_non_ascii() {
+    let browser = eoka::Browser::launch_with(|c| {
+        c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
+    })
+    .await
+    .unwrap();
+    let page = browser.new_blank_page().await.unwrap();
+    page.execute("document.body.innerHTML='<textarea id=t></textarea>'")
+        .await
+        .unwrap();
+    page.human_fill("#t", "café\nnaïve").await.unwrap();
+    assert_eq!(
+        page.evaluate::<String>("document.querySelector('#t').value")
+            .await
+            .unwrap(),
+        "café\nnaïve"
+    );
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn an_invalid_timezone_fails_instead_of_leaking_the_host_zone() {
+    let browser = eoka::Browser::launch_with(|c| {
+        c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
+        c.timezone = Some("Not/AZone".into());
+    })
+    .await
+    .unwrap();
+    assert!(browser.new_blank_page().await.is_err());
+    browser.close().await.unwrap();
+}

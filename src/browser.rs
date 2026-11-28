@@ -312,9 +312,9 @@ impl Browser {
                 // Native ICU override: makes `Date.toString()`, `getHours()` and
                 // friends consistent with the claimed timezone (a JS shim alone
                 // leaves them reporting the host timezone).
-                if let Err(error) = session.set_timezone_override(&fp.timezone).await {
-                    tracing::warn!("Timezone override failed for {}: {}", fp.timezone, error);
-                }
+                // There is no script fallback: a page that kept the host
+                // timezone would contradict the identity, so failing is safer.
+                session.set_timezone_override(&fp.timezone).await?;
             }
             session
                 .add_script_to_evaluate_on_new_document(&self.evasion_script)

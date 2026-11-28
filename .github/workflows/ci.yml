@@ -59,7 +59,9 @@ jobs:
       - if: runner.os == 'Linux'
         run: cargo test --all-features --locked
       - if: runner.os != 'Linux'
-        run: cargo test --all-features --locked --lib --doc
+        run: cargo test --all-features --locked --lib
+      - if: runner.os != 'Linux'
+        run: cargo test --all-features --locked --doc
 
   # Compile the browser tests once; the shards only run them.
   browser-build:
@@ -108,7 +110,7 @@ jobs:
           set -euo pipefail
           apt=(sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30)
           "${apt[@]}" update
-          "${apt[@]}" install -y xvfb xauth libnss3 libatk-bridge2.0-0 libgbm1 libasound2t64
+          "${apt[@]}" install -y xvfb xauth libnss3 libatk-bridge2.0-0 libgbm1 libasound2t64 fonts-dejavu-core
           dir="$RUNNER_TEMP/eoka-chrome"
           if [ ! -x "$dir/chrome-linux64/chrome" ]; then
             mkdir -p "$dir"
@@ -128,6 +130,10 @@ jobs:
           # the default (sandboxed) launch policy, so lift the restriction.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run browser tests
+        # Tests that take an explicit Chrome use the pinned ELF; the rest go
+        # through discovery and the /usr/bin/google-chrome wrapper.
+        env:
+          EOKA_TEST_CHROME_PATH: ${{ runner.temp }}/eoka-chrome/chrome-linux64/chrome
         run: |
           xvfb-run -a cargo nextest run --profile ci --archive-file nextest.tar.zst \
             --workspace-remap . --run-ignored only --partition "hash:${{ matrix.shard }}/2"
