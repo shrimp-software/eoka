@@ -9,7 +9,7 @@ use crate::{cdp::transport::CdpMessage, Destination, Error, Expectation, Page, R
 pub(super) struct DestinationWatch {
     origin: Page,
     scope: Destination,
-    events: broadcast::Receiver<CdpMessage>,
+    events: broadcast::Receiver<std::sync::Arc<CdpMessage>>,
     existing: HashSet<String>,
     candidates: HashMap<String, Option<Page>>,
     origin_closed: bool,
@@ -84,7 +84,7 @@ impl DestinationWatch {
 
     pub async fn check(&mut self, expect: &Expectation) -> Result<Option<String>> {
         loop {
-            match self.events.try_recv() {
+            match self.events.try_recv().as_deref() {
                 Ok(CdpMessage::Event { method, params, .. })
                     if method == "Target.targetCreated" || method == "Target.targetInfoChanged" =>
                 {
@@ -123,10 +123,10 @@ impl DestinationWatch {
                     tracing::debug!(skipped, "destination events lagged; rescanning targets");
                     self.rescan().await?;
                 }
-                Err(error @ broadcast::error::TryRecvError::Closed) => {
+                Err(broadcast::error::TryRecvError::Closed) => {
                     return Err(Error::transport_io(
                         "Destination event stream lost",
-                        std::io::Error::other(error),
+                        std::io::Error::other(broadcast::error::TryRecvError::Closed),
                     ))
                 }
             }
@@ -183,7 +183,7 @@ async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
     let mut events = page.session().transport().subscribe();
     let destroyed = async {
         loop {
-            match events.recv().await {
+            match events.recv().await.as_deref() {
                 Ok(CdpMessage::Event { method, params, .. })
                     if method == "Target.targetDestroyed"
                         && params["targetId"] == page.target_id() =>
@@ -191,10 +191,10 @@ async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
                     return Ok(Observation::Closed);
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(error @ broadcast::error::RecvError::Closed) => {
+                Err(broadcast::error::RecvError::Closed) => {
                     return Err(Error::transport_io(
                         "Destination event stream lost",
-                        std::io::Error::other(error),
+                        std::io::Error::other(broadcast::error::RecvError::Closed),
                     ))
                 }
             }

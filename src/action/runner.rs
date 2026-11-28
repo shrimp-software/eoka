@@ -277,7 +277,7 @@ impl Page {
                             method,
                             params,
                             session_id,
-                        } = event
+                        } = &*event
                         {
                             if session_id.as_deref() != Some(self.session().session_id()) {
                                 continue;
@@ -308,7 +308,7 @@ impl Page {
             }
             if let Some(Expectation::DownloadStarted) = &options.expect {
                 loop {
-                    match events.recv().await.map_err(|error| {
+                    match &*events.recv().await.map_err(|error| {
                         Error::transport_io(
                             "Download event stream lost",
                             std::io::Error::other(error),

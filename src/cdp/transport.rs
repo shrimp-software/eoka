@@ -23,6 +23,7 @@ mod interception;
 mod process;
 mod reader;
 mod runtime;
+mod writer;
 
 use super::network_idle::{self, IdleRoutes, IdleState};
 use crate::error::{Error, Result};
@@ -41,9 +42,66 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type WsSink = SplitSink<WsStream, Message>;
 type WsSource = SplitStream<WsStream>;
 
-/// Shared write half — used by both `send_impl` and the reader task
-/// (proxy-auth replies, pong frames).
+/// Write half, owned by the writer task. `close` also locks it for the
+/// best-effort close frame; nothing else writes to the socket.
 type SharedSink = Arc<Mutex<WsSink>>;
+
+/// Why the connection stopped, recorded by whichever task saw it first.
+type CloseReason = Arc<std::sync::Mutex<Option<String>>>;
+
+fn record_close_reason(reason: &CloseReason, text: &str) {
+    reason
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(|| text.to_owned());
+}
+
+/// One frame for the writer task. Commands carry their dispatch state so a
+/// sender cancelled while queued is skipped instead of written later.
+struct WriteItem {
+    message: Message,
+    claim: Option<Arc<AtomicU8>>,
+    ack: Option<oneshot::Sender<Result<()>>>,
+}
+
+type WriteQueue = mpsc::UnboundedSender<WriteItem>;
+
+/// Dispatch states shared by [`CommandDispatch`] and queued writes.
+const DISPATCH_UNUSED: u8 = 0;
+const DISPATCH_CLAIMED: u8 = 1;
+const DISPATCH_SENT: u8 = 2;
+const DISPATCH_WITHDRAWN: u8 = 3;
+
+/// Withdraw a queued command when its sender stops waiting before the
+/// writer claims it. After the writer claims it, this does nothing.
+struct WithdrawOnDrop(Arc<AtomicU8>);
+
+impl Drop for WithdrawOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.compare_exchange(
+            DISPATCH_CLAIMED,
+            DISPATCH_WITHDRAWN,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+/// Command ids stay below the automatic-reply range; both stay within int32,
+/// because DevTools silently drops commands whose ids fall outside it.
+const COMMAND_ID_MIN: u64 = 1;
+const COMMAND_ID_MAX: u64 = 999_999_999;
+pub(super) const AUTO_ID_MIN: u64 = 1_000_000_000;
+pub(super) const AUTO_ID_MAX: u64 = i32::MAX as u64;
+
+/// The id after `current` in `min..=max`, wrapping to `min`.
+fn wrapping_next(current: u64, min: u64, max: u64) -> u64 {
+    if current >= max || current < min {
+        min
+    } else {
+        current + 1
+    }
+}
 
 /// Shuts down the shared TCP connection without acquiring the WebSocket writer.
 /// Each guard must shut down independently of other retained socket owners.
@@ -83,8 +141,12 @@ fn duplicate_socket(stream: &WsStream) -> Result<Arc<std::net::TcpStream>> {
 /// `send_impl`; the lock is held very briefly so a std Mutex is fine.
 type PendingMap = std::sync::Mutex<HashMap<u64, PendingRequest>>;
 
-/// A pending request waiting for a response
-type PendingRequest = oneshot::Sender<Result<Value>>;
+/// A pending request waiting for a response, with the session it was sent to
+/// so a detached or crashed session can fail it at once.
+struct PendingRequest {
+    sender: oneshot::Sender<Result<Value>>,
+    session: Option<Arc<str>>,
+}
 
 type CompletionRoutes = std::sync::Mutex<HashMap<Arc<str>, u64>>;
 
@@ -99,10 +161,22 @@ struct CdpCommand<'a> {
 
 struct ReaderCompletionState {
     closed: Arc<AtomicBool>,
-    routes: Arc<CompletionRoutes>,
-    write_timeout: Duration,
+    reason: CloseReason,
     shutdown: SocketShutdownGuard,
+    lifecycle: LifecycleSink,
 }
+
+/// Target lifecycle notifications for the connection's per-target state.
+/// Delivered on a dedicated channel so a lagging event subscriber cannot lose them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TargetLifecycle {
+    /// A session was detached; the target may or may not still exist.
+    Detached { target_id: String },
+    /// The target no longer exists (sent only while target discovery is on).
+    Destroyed { target_id: String },
+}
+
+type LifecycleSink = Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<TargetLifecycle>>>>;
 
 /// Recover a poisoned pending-request map. Its critical sections only mutate
 /// `HashMap` entries, whose memory invariants remain intact during unwinding.
@@ -135,7 +209,8 @@ fn lock_completions(
 /// It does not acknowledge delivery or retract an already dispatched command.
 #[derive(Default)]
 pub struct CommandDispatch {
-    state: AtomicU8,
+    // Shared with the writer task, which marks the command sent.
+    state: Arc<AtomicU8>,
 }
 
 impl CommandDispatch {
@@ -150,13 +225,18 @@ impl CommandDispatch {
     /// safe handoff only after the associated send future has terminated or been
     /// dropped; an active send can still progress and change this observation.
     pub fn may_have_been_sent(&self) -> bool {
-        self.state.load(Ordering::Acquire) == 2
+        self.state.load(Ordering::Acquire) == DISPATCH_SENT
     }
 
-    fn claim(&self) -> Result<()> {
+    fn claim(&self) -> Result<Arc<AtomicU8>> {
         self.state
-            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-            .map(|_| ())
+            .compare_exchange(
+                DISPATCH_UNUSED,
+                DISPATCH_CLAIMED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .map(|_| Arc::clone(&self.state))
             .map_err(|_| Error::transport("CommandDispatch token already used"))
     }
 }
@@ -212,8 +292,36 @@ impl CommandResponse {
 fn fail_pending(pending: &PendingMap, context: &str) -> usize {
     let requests = std::mem::take(&mut *lock_pending(pending));
     let count = requests.len();
-    for sender in requests.into_values() {
-        drop(sender.send(Err(Error::transport(context))));
+    for request in requests.into_values() {
+        drop(request.sender.send(Err(Error::transport(context))));
+    }
+    count
+}
+
+/// Chrome's reply to a command for a session that no longer exists. Pending
+/// commands of a detached session fail with the same error, so callers that
+/// already classify it as "target closed" keep working.
+const SESSION_GONE_CODE: i64 = -32001;
+const SESSION_GONE_MESSAGE: &str = "Session with given id not found.";
+
+/// Fail the pending requests sent to a detached session, returning the number drained.
+fn fail_session_pending(pending: &PendingMap, session: &str) -> usize {
+    let requests: Vec<PendingRequest> = {
+        let mut pending = lock_pending(pending);
+        let ids: Vec<u64> = pending
+            .iter()
+            .filter(|(_, request)| request.session.as_deref() == Some(session))
+            .map(|(id, _)| *id)
+            .collect();
+        ids.iter().filter_map(|id| pending.remove(id)).collect()
+    };
+    let count = requests.len();
+    for request in requests {
+        drop(request.sender.send(Err(Error::Cdp {
+            method: None,
+            code: Some(SESSION_GONE_CODE),
+            message: SESSION_GONE_MESSAGE.into(),
+        })));
     }
     count
 }
@@ -223,8 +331,10 @@ fn fail_pending(pending: &PendingMap, context: &str) -> usize {
 /// cannot skip an oversized message, so exceeding this closes the connection.
 const MAX_CDP_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Broadcast capacity for CDP events (multi-consumer, lag observable).
-const EVENT_CHANNEL_CAP: usize = 1024;
+/// Broadcast capacity for CDP events. Events are shared as `Arc`s, so a slot
+/// costs one pointer per subscriber; a subscriber that falls this far behind
+/// observes `RecvError::Lagged`.
+pub const EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 /// Check if a command should be blocked (highly detectable by anti-bot)
 fn is_blocked(method: &str) -> bool {
@@ -257,13 +367,18 @@ fn is_risky(method: &str) -> bool {
 /// CDP transport with owned request-pause routing and automatic continuation.
 pub struct Transport {
     target_discovery: tokio::sync::OnceCell<()>,
-    /// The Chrome child process (None when connecting to an existing instance)
-    child: Option<std::sync::Mutex<Child>>,
+    /// The Chrome child process (None when connecting to an existing instance
+    /// or once owned cleanup has reaped it).
+    child: std::sync::Mutex<Option<Child>>,
     runtime: std::sync::Mutex<Option<RuntimeDirectory>>,
     browser_endpoint: Option<String>,
     closed: Arc<AtomicBool>,
-    /// WebSocket write half (shared with the reader task for auth/pong).
+    /// WebSocket write half, owned by the writer task.
     writer: SharedSink,
+    /// Normal-priority lane to the writer task (automatic replies use their own).
+    commands: WriteQueue,
+    writer_handle: Option<tokio::task::JoinHandle<()>>,
+    lifecycle: LifecycleSink,
     /// Duplicated socket for lock-independent shutdown, even under backpressure.
     shutdown_socket: Arc<std::net::TcpStream>,
     /// Next message ID
@@ -272,21 +387,19 @@ pub struct Transport {
     pending: Arc<PendingMap>,
     completion_routes: Arc<CompletionRoutes>,
     /// Weak reference: only the reader keeps the event stream open.
-    event_tx: broadcast::WeakSender<CdpMessage>,
+    event_tx: broadcast::WeakSender<Arc<CdpMessage>>,
     response_routes: ResponseRoutes,
     request_routes: RequestRoutes,
     idle_routes: IdleRoutes,
     request_base_auth: bool,
     request_base_strip: bool,
-    /// Persistent receiver backing `recv_event`/`try_recv_event` (back-compat).
-    event_rx: Mutex<broadcast::Receiver<CdpMessage>>,
     /// Timeout for CDP commands
     cmd_timeout: std::time::Duration,
     /// Reader task handle — checked for exit before sending commands.
     reader_handle: Option<tokio::task::JoinHandle<()>>,
-    /// When true, drop "detectable" commands (`Runtime.enable`, etc.) silently.
-    /// Defaults to true. Disable when you own the browser session and need
-    /// full DevTools-equivalent control.
+    /// When true, refuse "detectable" commands (`Runtime.enable`, etc.) with an
+    /// error instead of sending them. Defaults to true. Disable when you own the
+    /// browser session and need full DevTools-equivalent control.
     filter_cdp: bool,
 }
 
@@ -333,13 +446,38 @@ impl Transport {
         self.cmd_timeout
     }
 
-    /// Whether the WebSocket reader has exited.
+    /// Whether the WebSocket reader or writer has exited.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
             || self
                 .reader_handle
                 .as_ref()
                 .is_none_or(|reader| reader.is_finished())
+            || self
+                .writer_handle
+                .as_ref()
+                .is_none_or(|writer| writer.is_finished())
+    }
+
+    /// Attach to a target with a flattened session and return the session id.
+    pub(crate) async fn attach_to_target(&self, target_id: &str) -> Result<String> {
+        let attached: super::types::TargetAttachToTargetResult = self
+            .send(
+                "Target.attachToTarget",
+                &super::types::TargetAttachToTarget {
+                    target_id: target_id.to_owned(),
+                    flatten: Some(true),
+                },
+            )
+            .await?;
+        Ok(attached.session_id)
+    }
+
+    /// Receive target lifecycle notifications. Replaces any earlier receiver.
+    pub(crate) fn watch_target_lifecycle(&self) -> mpsc::UnboundedReceiver<TargetLifecycle> {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        *self.lifecycle.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
+        receiver
     }
 
     /// Create a new transport connecting to Chrome via WebSocket
@@ -389,14 +527,15 @@ impl Transport {
 
         let pending: Arc<PendingMap> = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let completion_routes = Arc::new(CompletionRoutes::default());
-        let reader_completions = Arc::clone(&completion_routes);
         let closed = Arc::new(AtomicBool::new(false));
-        let reader_closed = Arc::clone(&closed);
-        let (reader_events, event_rx) = broadcast::channel(EVENT_CHANNEL_CAP);
+        let reason = CloseReason::default();
+        let lifecycle = LifecycleSink::default();
+        let (reader_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let event_tx = reader_events.downgrade();
+        let (commands, command_queue) = mpsc::unbounded_channel();
+        let (replies, reply_queue) = mpsc::unbounded_channel();
 
         let pending_clone = Arc::clone(&pending);
-        let reader_writer = Arc::clone(&writer);
         let response_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let reader_responses = Arc::clone(&response_routes);
         let request_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
@@ -407,18 +546,30 @@ impl Transport {
         // Construct the guard before spawning: abort-before-first-poll must
         // still shut down the socket while Transport retains the writer.
         let completion_state = ReaderCompletionState {
-            closed: reader_closed,
-            routes: reader_completions,
+            closed: Arc::clone(&closed),
+            reason: Arc::clone(&reason),
+            shutdown: SocketShutdownGuard(Arc::clone(&shutdown_socket)),
+            lifecycle: Arc::clone(&lifecycle),
+        };
+        let writer_state = writer::WriterState {
+            closed: Arc::clone(&closed),
+            reason,
             write_timeout: cmd_timeout,
             shutdown: SocketShutdownGuard(Arc::clone(&shutdown_socket)),
         };
+        let writer_handle = tokio::spawn(writer::writer_loop(
+            Arc::clone(&writer),
+            reply_queue,
+            command_queue,
+            writer_state,
+        ));
         let reader_handle = tokio::spawn(async move {
             Self::reader_loop(
                 source,
                 pending_clone,
                 completion_state,
                 reader_events,
-                reader_writer,
+                replies,
                 reader_idle,
                 FetchInterceptor {
                     responses: reader_responses,
@@ -432,17 +583,19 @@ impl Transport {
 
         Ok(Self {
             target_discovery: tokio::sync::OnceCell::new(),
-            child: child.map(std::sync::Mutex::new),
+            child: std::sync::Mutex::new(child),
             runtime: std::sync::Mutex::new(None),
             browser_endpoint: None,
             closed,
             writer,
+            commands,
+            writer_handle: Some(writer_handle),
+            lifecycle,
             shutdown_socket,
-            next_id: AtomicU64::new(1),
+            next_id: AtomicU64::new(COMMAND_ID_MIN),
             pending,
             completion_routes,
             event_tx,
-            event_rx: Mutex::new(event_rx),
             request_routes,
             response_routes,
             idle_routes,
@@ -468,6 +621,7 @@ impl Transport {
             ws_url,
             proxy_auth,
             cdp_timeout_secs,
+            true,
             strip_x_client_data,
             None,
         )
@@ -479,6 +633,7 @@ impl Transport {
         ws_url: &str,
         proxy_auth: Option<(String, String)>,
         cdp_timeout_secs: u64,
+        filter_cdp: bool,
         strip_x_client_data: bool,
         runtime: Option<RuntimeDirectory>,
     ) -> Result<Self> {
@@ -489,7 +644,7 @@ impl Transport {
             stream,
             proxy_auth,
             cdp_timeout_secs,
-            true,
+            filter_cdp,
             strip_x_client_data,
         )?;
         transport.browser_endpoint = Some(ws_url.to_owned());
@@ -548,7 +703,25 @@ impl Transport {
         Ok(transport)
     }
 
-    /// Internal: send a CDP command with optional session ID
+    /// Refuse commands the stealth filter blocks. Callers see an error instead
+    /// of a fabricated empty result that would hide the missing domain.
+    fn check_filter(&self, method: &str) -> Result<()> {
+        if self.filter_cdp && is_blocked(method) {
+            tracing::debug!("Blocked CDP command: {}", method);
+            return Err(Error::Cdp {
+                method: Some(method.to_owned()),
+                code: None,
+                message: "blocked by the stealth command filter (StealthConfig::filter_cdp)".into(),
+            });
+        }
+        if is_risky(method) {
+            tracing::warn!("Risky CDP command (may be detectable): {}", method);
+        }
+        Ok(())
+    }
+
+    /// Internal: send a CDP command with optional session ID. One deadline
+    /// covers queueing, writing and the reply.
     async fn send_impl<C, R>(
         &self,
         session_id: Option<&str>,
@@ -560,120 +733,128 @@ impl Transport {
         C: Serialize,
         R: DeserializeOwned,
     {
-        tokio::time::timeout(
-            self.cmd_timeout,
-            self.send_inner(session_id, method, params, dispatch),
-        )
-        .await
-        .map_err(|_| Error::Timeout(format!("CDP command {method} exceeded its deadline")))?
-    }
-
-    async fn send_inner<C, R>(
-        &self,
-        session_id: Option<&str>,
-        method: &str,
-        params: &C,
-        dispatch: Option<&CommandDispatch>,
-    ) -> Result<R>
-    where
-        C: Serialize,
-        R: DeserializeOwned,
-    {
-        if let Some(dispatch) = dispatch {
-            dispatch.claim()?;
-        }
-        // STEALTH: Block detectable commands - return empty object (deserializes via #[serde(default)])
-        if self.filter_cdp && is_blocked(method) {
-            tracing::debug!("Blocked CDP command: {}", method);
-            return serde_json::from_value(json!({})).map_err(Into::into);
-        }
-
-        // STEALTH: Warn on risky commands
-        if is_risky(method) {
-            tracing::warn!("Risky CDP command (may be detectable): {}", method);
-        }
-
-        let (data, response) = self.prepare_command(session_id, method, params, None)?;
+        let claim = match dispatch {
+            Some(dispatch) => dispatch.claim()?,
+            None => Arc::new(AtomicU8::new(DISPATCH_CLAIMED)),
+        };
+        let _withdraw = WithdrawOnDrop(Arc::clone(&claim));
+        self.check_filter(method)?;
+        let session = session_id.map(Arc::<str>::from);
+        let (data, response) = self.prepare_command(session, method, params, false)?;
         let id = response.registration.id;
-        self.write_command(data, dispatch).await?;
-        tracing::trace!("Sent CDP command: {} (id={})", method, id);
-        let result = tokio::time::timeout(self.cmd_timeout, response.wait())
-            .await
-            .map_err(|elapsed| {
-                Error::transport(format!(
-                    "CDP command '{method}' timed out after {}s (id={id}): {elapsed}",
-                    self.cmd_timeout.as_secs(),
-                ))
-            })??;
+        let result = tokio::time::timeout(self.cmd_timeout, async {
+            self.write_command(data, claim).await?;
+            tracing::trace!("Sent CDP command: {} (id={})", method, id);
+            response.wait().await
+        })
+        .await
+        .map_err(|_| {
+            // Transport, as before: callers treat a dead command as a
+            // connection-level failure, not as an action or wait timeout.
+            Error::transport(format!(
+                "CDP command {method} (id={id}) exceeded its {:?} deadline",
+                self.cmd_timeout
+            ))
+        })??;
         serde_json::from_value(result).map_err(Into::into)
     }
 
+    /// Register a pending reply and serialize the command. Ids are unique among
+    /// pending commands and wrap within the command range.
     fn prepare_command<C: Serialize>(
         &self,
-        session_id: Option<&str>,
+        session: Option<Arc<str>>,
         method: &str,
         params: &C,
-        completion_session: Option<Arc<str>>,
+        completion: bool,
     ) -> Result<(String, CommandResponse)> {
         if self.is_closed() {
             return Err(Error::transport("CDP transport is closed"));
         }
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let params = serde_json::to_value(params)?;
-        let data = serde_json::to_string(&CdpCommand {
-            id,
-            method,
-            params: &params,
-            session_id,
-        })?;
         let mut pending = lock_pending(&self.pending);
         if self.is_closed() {
             return Err(Error::transport("CDP transport is closed"));
         }
-        let completion = if let Some(session) = completion_session {
-            let mut routes = lock_completions(&self.completion_routes);
-            if routes.contains_key(session.as_ref()) {
-                return Err(Error::cdp_msg(
-                    "Native command completion is already owned for this session",
-                ));
+        let mut id = self.next_command_id();
+        while pending.contains_key(&id) {
+            id = self.next_command_id();
+        }
+        let completion = match (&session, completion) {
+            (Some(session), true) => {
+                let mut routes = lock_completions(&self.completion_routes);
+                if routes.contains_key(session.as_ref()) {
+                    return Err(Error::cdp_msg(
+                        "Native command completion is already owned for this session",
+                    ));
+                }
+                routes.insert(Arc::clone(session), id);
+                Some((Arc::clone(&self.completion_routes), Arc::clone(session)))
             }
-            routes.insert(Arc::clone(&session), id);
-            Some((Arc::clone(&self.completion_routes), session))
-        } else {
-            None
+            _ => None,
         };
         let (sender, receiver) = oneshot::channel();
-        pending.insert(id, sender);
-        drop(pending);
-        Ok((
-            data,
-            CommandResponse {
-                registration: PendingRegistration {
-                    pending: Arc::clone(&self.pending),
-                    completion,
-                    id,
-                },
-                receiver,
-                method: method.into(),
+        pending.insert(
+            id,
+            PendingRequest {
+                sender,
+                session: session.clone(),
             },
-        ))
+        );
+        drop(pending);
+        let response = CommandResponse {
+            registration: PendingRegistration {
+                pending: Arc::clone(&self.pending),
+                completion,
+                id,
+            },
+            receiver,
+            method: method.into(),
+        };
+        let data = serde_json::to_string(&CdpCommand {
+            id,
+            method,
+            params: &params,
+            session_id: session.as_deref(),
+        })?;
+        Ok((data, response))
     }
 
-    async fn write_command(&self, data: String, dispatch: Option<&CommandDispatch>) -> Result<()> {
-        let mut writer = self.writer.lock().await;
+    fn next_command_id(&self) -> u64 {
+        let mut current = self.next_id.load(Ordering::Relaxed);
+        loop {
+            let next = wrapping_next(current, COMMAND_ID_MIN, COMMAND_ID_MAX);
+            match self.next_id.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                // Normalize a stored value outside the range (never expected).
+                Ok(_) if (COMMAND_ID_MIN..=COMMAND_ID_MAX).contains(&current) => return current,
+                Ok(_) => current = next,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Queue one command for the writer task and wait until it is written.
+    /// Dropping this future before the writer claims the command withdraws it.
+    async fn write_command(&self, data: String, claim: Arc<AtomicU8>) -> Result<()> {
         if self.is_closed() {
             return Err(Error::transport("CDP transport is closed"));
         }
-        async {
-            poll_fn(|cx| writer.poll_ready_unpin(cx)).await?;
-            if let Some(dispatch) = dispatch {
-                dispatch.state.store(2, Ordering::Release);
-            }
-            writer.start_send_unpin(Message::Text(data.into()))?;
-            writer.flush().await
-        }
-        .await
-        .map_err(|error| Error::transport(format!("WebSocket write failed: {error}")))
+        let (ack, acked) = oneshot::channel();
+        self.commands
+            .send(WriteItem {
+                message: Message::Text(data.into()),
+                claim: Some(claim),
+                ack: Some(ack),
+            })
+            .map_err(|_| Error::transport("CDP transport is closed"))?;
+        acked
+            .await
+            .map_err(|_| Error::transport("CDP writer stopped before writing the command"))?
     }
 
     pub(crate) async fn send_to_session_for_completion<C: Serialize>(
@@ -683,23 +864,22 @@ impl Transport {
         params: &C,
         dispatch: &CommandDispatch,
     ) -> Result<(Result<()>, CommandResponse)> {
-        dispatch.claim()?;
-        if is_risky(method) {
-            tracing::warn!("Risky CDP command (may be detectable): {}", method);
-        }
-        let (data, response) = self.prepare_command(
-            Some(session_id),
-            method,
-            params,
-            Some(Arc::clone(session_id)),
-        )?;
-        let written =
-            tokio::time::timeout(self.cmd_timeout, self.write_command(data, Some(dispatch)))
-                .await
-                .map_err(|_| {
-                    Error::Timeout(format!("CDP command {method} write exceeded its deadline"))
-                })
-                .and_then(|result| result);
+        let claim = dispatch.claim()?;
+        let withdraw = WithdrawOnDrop(Arc::clone(&claim));
+        self.check_filter(method)?;
+        let (data, response) =
+            self.prepare_command(Some(Arc::clone(session_id)), method, params, true)?;
+        let id = response.registration.id;
+        let written = tokio::time::timeout(self.cmd_timeout, self.write_command(data, claim))
+            .await
+            .map_err(|_| {
+                Error::Timeout(format!(
+                    "CDP command {method} (id={id}) write exceeded its deadline"
+                ))
+            })
+            .and_then(|result| result);
+        // Withdraw before deciding, so the writer cannot send it afterwards.
+        drop(withdraw);
         match written {
             Err(error) if !dispatch.may_have_been_sent() => Err(error),
             written => Ok((written, response)),
@@ -765,9 +945,14 @@ impl Transport {
     }
 
     /// Subscribe to CDP events. Each subscriber gets its own receiver; events
-    /// published after subscribing are delivered to all live receivers.
-    /// A subscription made after closure is already closed.
-    pub fn subscribe(&self) -> broadcast::Receiver<CdpMessage> {
+    /// published after subscribing are delivered to all live receivers as
+    /// shared `Arc`s, so subscribers do not copy payloads.
+    ///
+    /// A subscriber more than [`EVENT_CHANNEL_CAPACITY`] events behind receives
+    /// `RecvError::Lagged(n)` once, then resumes with the oldest retained event.
+    /// Treat a lag as possible loss of any event. A subscription made after
+    /// closure is already closed.
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<CdpMessage>> {
         if !self.is_closed() {
             if let Some(sender) = self.event_tx.upgrade() {
                 return sender.subscribe();
@@ -849,52 +1034,19 @@ impl Transport {
             .remove(session);
     }
 
-    /// Receive the next event from Chrome (single-consumer back-compat).
-    /// Skips over lagged notifications and returns the next available event.
-    pub async fn recv_event(&self) -> Option<CdpMessage> {
-        let mut rx = self.event_rx.lock().await;
-        loop {
-            match rx.recv().await {
-                Ok(msg) => return Some(msg),
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::warn!("Event receiver lagged, skipped {} event(s)", n);
-                    continue;
-                }
-                Err(broadcast::error::RecvError::Closed) => return None,
-            }
-        }
-    }
-
-    /// Try to receive an event without blocking (single-consumer back-compat).
-    /// Returns `None` if another consumer currently owns the persistent receiver.
-    pub async fn try_recv_event(&self) -> Option<CdpMessage> {
-        let Ok(mut rx) = self.event_rx.try_lock() else {
-            return None;
-        };
-        loop {
-            match rx.try_recv() {
-                Ok(msg) => return Some(msg),
-                Err(broadcast::error::TryRecvError::Lagged(n)) => {
-                    tracing::warn!("Event receiver lagged, skipped {} event(s)", n);
-                    continue;
-                }
-                Err(_) => return None,
-            }
-        }
-    }
-
     pub(crate) async fn wait_for_owned_exit(&self, timeout: Duration) -> Result<bool> {
-        let Some(child) = &self.child else {
-            return Ok(true);
-        };
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if child
+            let exited = match self
+                .child
                 .lock()
                 .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?
-                .try_wait()?
-                .is_some()
+                .as_mut()
             {
+                None => true,
+                Some(child) => child.try_wait()?.is_some(),
+            };
+            if exited {
                 return Ok(true);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -911,6 +1063,7 @@ impl Transport {
     /// independently of the writer lock, and also occurs if this future is
     /// cancelled. Pending requests are failed and owned cleanup is attempted
     /// even if the deadline expires. Borrowed Chrome processes are not terminated.
+    /// Reaping Chrome and removing its runtime directory run on a blocking thread.
     pub async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::Release);
         interception::close_routes(&self.request_routes, &self.response_routes);
@@ -937,28 +1090,76 @@ impl Transport {
         if let Some(handle) = &self.reader_handle {
             handle.abort();
         }
+        if let Some(handle) = &self.writer_handle {
+            handle.abort();
+        }
         network_idle::disconnect(&self.idle_routes);
         fail_pending(&self.pending, "CDP transport closed");
 
-        self.cleanup_owned()
+        self.cleanup_owned_blocking().await
     }
 
-    pub(crate) fn cleanup_owned(&self) -> Result<()> {
-        if let Some(child) = &self.child {
-            let mut child = child
-                .lock()
-                .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?;
-            stop_child(&mut child)?;
+    /// Move owned cleanup off the async runtime; leftovers are restored on failure
+    /// so a later attempt (including Drop) can retry.
+    async fn cleanup_owned_blocking(&self) -> Result<()> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?
+            .take();
+        let mut runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| Error::transport("Chrome runtime mutex poisoned"))?
+            .take();
+        if child.is_none() && runtime.is_none() {
+            return Ok(());
         }
+        let (result, child, runtime) = tokio::task::spawn_blocking(move || {
+            let result = cleanup_parts(&mut child, &mut runtime);
+            (result, child, runtime)
+        })
+        .await
+        .map_err(|error| Error::transport(format!("Owned Chrome cleanup task failed: {error}")))?;
+        if child.is_some() {
+            if let Ok(mut slot) = self.child.lock() {
+                *slot = child;
+            }
+        }
+        if runtime.is_some() {
+            if let Ok(mut slot) = self.runtime.lock() {
+                *slot = runtime;
+            }
+        }
+        result
+    }
+
+    /// Synchronous owned cleanup, for Drop where awaiting is impossible.
+    pub(crate) fn cleanup_owned(&self) -> Result<()> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?;
         let mut runtime = self
             .runtime
             .lock()
             .map_err(|_| Error::transport("Chrome runtime mutex poisoned"))?;
-        if let Some(runtime) = runtime.as_mut() {
-            runtime.cleanup()?;
-        }
-        Ok(())
+        cleanup_parts(&mut child, &mut runtime)
     }
+}
+
+/// Reap the child, then remove the runtime directory. Each part becomes `None`
+/// once cleaned, so a failed attempt keeps what still needs cleanup.
+fn cleanup_parts(child: &mut Option<Child>, runtime: &mut Option<RuntimeDirectory>) -> Result<()> {
+    if let Some(process) = child.as_mut() {
+        stop_child(process)?;
+        *child = None;
+    }
+    if let Some(directory) = runtime.as_mut() {
+        directory.cleanup()?;
+        *runtime = None;
+    }
+    Ok(())
 }
 
 impl Drop for Transport {
@@ -967,6 +1168,9 @@ impl Drop for Transport {
         interception::close_routes(&self.request_routes, &self.response_routes);
         let _ = self.shutdown_socket.shutdown(std::net::Shutdown::Both);
         if let Some(handle) = self.reader_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.writer_handle.take() {
             handle.abort();
         }
         network_idle::disconnect(&self.idle_routes);

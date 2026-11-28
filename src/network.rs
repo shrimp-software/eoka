@@ -448,13 +448,13 @@ impl RequestCapture {
         let worker = tokio::spawn(async move {
             let pump = async {
                 loop {
-                    match events.recv().await {
+                    match events.recv().await.as_deref() {
                         Ok(CdpMessage::Event {
                             method,
                             params,
                             session_id: Some(source),
-                        }) if source == session_id && method.starts_with("Network.") => {
-                            if worker_shared.store().apply(&method, &params).0 {
+                        }) if *source == session_id && method.starts_with("Network.") => {
+                            if worker_shared.store().apply(method, params).0 {
                                 worker_shared
                                     .changed
                                     .send_modify(|version| *version = version.wrapping_add(1));
@@ -462,7 +462,7 @@ impl RequestCapture {
                         }
                         Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                            worker_shared.lost.fetch_add(skipped, Ordering::Relaxed);
+                            worker_shared.lost.fetch_add(*skipped, Ordering::Relaxed);
                         }
                         Err(broadcast::error::RecvError::Closed) => break,
                     }

@@ -179,7 +179,16 @@ fn rewrite_ws_url_host(raw: &str, host: &str, port: u16) -> String {
         .find('/')
         .map(|i| &after_scheme[i..])
         .unwrap_or("");
-    format!("ws://{}:{}{}", host, port, path)
+    format!("ws://{}{}", host_port(host, port), path)
+}
+
+/// `host:port`, bracketing a bare IPv6 literal as URLs and socket addresses require.
+fn host_port(host: &str, port: u16) -> String {
+    if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
 }
 
 /// Probe `start..=end` on `127.0.0.1` and return the first port whose Chrome
@@ -202,7 +211,7 @@ pub fn auto_connect(start: u16, end: u16) -> Option<(u16, String)> {
 /// Response progress does not renew the deadline: a slow-drip peer must not
 /// keep discovery (or the blocking launch worker) alive indefinitely.
 fn http_get(host: &str, port: u16, path: &str) -> Result<String> {
-    let addr = format!("{}:{}", host, port);
+    let addr = host_port(host, port);
     let mut stream = TcpStream::connect(&addr)
         .map_err(|e| Error::transport_io(format!("Failed to connect to {}", addr), e))?;
     let deadline = Instant::now() + HTTP_TIMEOUT;
@@ -323,6 +332,38 @@ mod url_rewrite_tests {
             rewrite_ws_url_host(raw, "127.0.0.1", 9222),
             "ws://127.0.0.1:9222/devtools/browser/GUID"
         );
+    }
+
+    #[test]
+    fn brackets_ipv6_hosts_once() {
+        let raw = "ws://localhost/devtools/browser/GUID";
+        assert_eq!(
+            rewrite_ws_url_host(raw, "::1", 9222),
+            "ws://[::1]:9222/devtools/browser/GUID"
+        );
+        assert_eq!(
+            rewrite_ws_url_host(raw, "[::1]", 9222),
+            "ws://[::1]:9222/devtools/browser/GUID"
+        );
+    }
+
+    #[test]
+    fn http_get_connects_to_bare_ipv6_hosts() {
+        use std::io::{Read, Write};
+        let Ok(listener) = std::net::TcpListener::bind("[::1]:0") else {
+            return; // No IPv6 loopback on this machine.
+        };
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = socket.read(&mut request).unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+        assert_eq!(super::http_get("::1", port, "/json/version").unwrap(), "ok");
+        server.join().unwrap();
     }
 
     #[test]

@@ -147,14 +147,23 @@ impl HeaderState {
     }
 }
 
+/// Chrome applies extra headers only while the Network domain is enabled, so
+/// setting headers enables it. Clearing does not: the cleared value is stored
+/// either way, and re-enabling would undo a user's `disable_request_capture`.
 pub(crate) async fn set_headers(
     transport: &Transport,
     session: &str,
     headers: HashMap<String, String>,
 ) -> Result<()> {
-    transport
-        .send_to_session::<_, Value>(session, "Network.enable", &json!({"maxPostDataSize":65536}))
-        .await?;
+    if !headers.is_empty() {
+        transport
+            .send_to_session::<_, Value>(
+                session,
+                "Network.enable",
+                &json!({"maxPostDataSize":65536}),
+            )
+            .await?;
+    }
     transport
         .send_to_session::<_, Value>(
             session,
@@ -269,7 +278,7 @@ mod tests {
         // The command reached Chrome, but its reply is withheld when the caller aborts.
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
-        enable(&mut peer).await;
+        // Clearing stores empty headers without re-enabling the Network domain.
         let clear = next(&mut peer, "Network.setExtraHTTPHeaders").await;
         assert_eq!(clear["sessionId"], "original");
         assert_eq!(clear["params"]["headers"], json!({}));
@@ -301,7 +310,6 @@ mod tests {
             .await
             .unwrap();
         let finish = tokio::spawn(async move { guard.finish().await });
-        enable(&mut peer).await;
         let clear = next(&mut peer, "Network.setExtraHTTPHeaders").await;
         reply(&mut peer, &clear, true).await;
         assert!(finish.await.unwrap().is_err());
@@ -312,7 +320,6 @@ mod tests {
             async move { state.clear(transport, "other-attachment").await }
         });
         for expected in ["original", "other-attachment"] {
-            enable(&mut peer).await;
             let clear = next(&mut peer, "Network.setExtraHTTPHeaders").await;
             assert_eq!(clear["sessionId"], expected);
             reply(&mut peer, &clear, false).await;
@@ -327,7 +334,7 @@ mod tests {
         let state = Arc::new(HeaderState::default());
         drop(state.temporary(transport, "session").await.unwrap());
         // Withhold the first cleanup response past the five-second bound.
-        next(&mut peer, "Network.enable").await;
+        next(&mut peer, "Network.setExtraHTTPHeaders").await;
         tokio::time::pause();
         tokio::time::advance(CLEANUP_TIMEOUT + Duration::from_millis(1)).await;
         let error = state.wait().await.unwrap_err().to_string();

@@ -259,7 +259,7 @@ async fn cancellation_releases_paused_responses_and_sessions() {
     received(&page).await;
     let mut detached = false;
     while let Ok(event) = events.try_recv() {
-        if let eoka::cdp::transport::CdpMessage::Event { method, .. } = event {
+        if let eoka::cdp::transport::CdpMessage::Event { method, .. } = &*event {
             if method == "Target.detachedFromTarget" {
                 detached = true;
             }

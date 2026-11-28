@@ -3,6 +3,40 @@
 use super::Session;
 use crate::cdp::types::*;
 use crate::Result;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A per-call Runtime object group, released (best effort) on drop so remote
+/// objects do not accumulate in the page for the document's lifetime.
+pub(crate) struct ObjectGroup {
+    session: Session,
+    name: String,
+}
+
+impl ObjectGroup {
+    fn new(session: &Session) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            session: session.clone(),
+            name: format!("eoka-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+        }
+    }
+}
+
+impl Drop for ObjectGroup {
+    fn drop(&mut self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let session = self.session.clone();
+        let params = serde_json::json!({"objectGroup": std::mem::take(&mut self.name)});
+        runtime.spawn(async move {
+            // A navigated or closed page has already discarded the group.
+            let _ = session
+                .send::<_, serde_json::Value>("Runtime.releaseObjectGroup", &params)
+                .await;
+        });
+    }
+}
 
 impl Session {
     pub(crate) async fn create_isolated_world(&self, frame_id: &str) -> Result<i64> {
@@ -85,12 +119,17 @@ impl Session {
     }
 
     /// Evaluate JavaScript and return a remote object reference (not by value).
+    /// The result, and objects derived from it such as `Runtime.getProperties`
+    /// entries, live in a per-call group released when the guard drops.
     pub(crate) async fn evaluate_for_remote_object(
         &self,
         expression: &str,
-    ) -> Result<RuntimeEvaluateResult> {
-        self.evaluate_impl(expression, false, Some("eoka"), true)
-            .await
+    ) -> Result<(RuntimeEvaluateResult, ObjectGroup)> {
+        let group = ObjectGroup::new(self);
+        let result = self
+            .evaluate_impl(expression, false, Some(&group.name), true)
+            .await?;
+        Ok((result, group))
     }
 
     /// Convert a remote object ID to a DOM node_id via DOM.requestNode

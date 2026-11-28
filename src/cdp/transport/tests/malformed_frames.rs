@@ -135,7 +135,7 @@ async fn network_monitor(
 
 async fn reader_barrier(
     peer: &mut WebSocketStream<TcpStream>,
-    events: &mut broadcast::Receiver<CdpMessage>,
+    events: &mut broadcast::Receiver<Arc<CdpMessage>>,
 ) {
     peer.send(Message::Text(
         r#"{"method":"Fixture.barrier","params":{}}"#.into(),
@@ -146,7 +146,7 @@ async fn reader_barrier(
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(event, CdpMessage::Event { method, .. } if method == "Fixture.barrier"));
+    assert!(matches!(&*event, CdpMessage::Event { method, .. } if method == "Fixture.barrier"));
 }
 
 #[tokio::test]
