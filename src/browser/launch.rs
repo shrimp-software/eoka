@@ -76,8 +76,7 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
     let mut args = vec![
         // Core automation hiding
         "--disable-blink-features=AutomationControlled".into(),
-        "--disable-features=IsolateOrigins,site-per-process,AutomationControlled,EnableAutomation"
-            .into(),
+        "--disable-features=AutomationControlled,EnableAutomation".into(),
         "--enable-features=NetworkService,NetworkServiceInProcess".into(),
         // Additional flags to hide automation
         "--disable-infobars".into(),
@@ -140,17 +139,70 @@ fn stealth_args(config: &StealthConfig, fingerprint: &Fingerprint) -> Vec<String
         args.push(format!("--profile-directory={}", profile_dir));
     }
 
-    // Proxy
+    // Proxy. WebRTC sends UDP straight from the host (STUN reveals the real
+    // public IP); with a proxy, keep it to proxied transports only.
     if let Some(ref proxy) = config.proxy {
         args.push(format!("--proxy-server={}", proxy));
+        args.push("--webrtc-ip-handling-policy=disable_non_proxied_udp".into());
     }
 
     // Extra user-supplied args (e.g. --use-fake-ui-for-media-stream)
-    for arg in &config.extra_args {
-        args.push(arg.clone());
-    }
+    merge_extra_args(&mut args, &config.extra_args);
 
     args
+}
+
+/// Switches whose value is a list. Chromium keeps only the last occurrence of a
+/// switch, so a user's list is merged into eoka's instead of replacing it.
+const LIST_SWITCHES: &[&str] = &[
+    "--disable-features",
+    "--enable-features",
+    "--disable-blink-features",
+    "--enable-blink-features",
+    "--blink-settings",
+];
+
+/// Append `extra` to `args`, folding list switches into an existing occurrence.
+/// Features are deduplicated by name; `--blink-settings` keys take the user's
+/// value.
+fn merge_extra_args(args: &mut Vec<String>, extra: &[String]) {
+    // Feature entries may carry `:params` or `<trial`; blink settings are
+    // `key=value`. Either way the identity is the leading name.
+    fn key(item: &str) -> &str {
+        item.split([':', '<', '='])
+            .next()
+            .unwrap_or_default()
+            .trim()
+    }
+    for arg in extra {
+        let list = LIST_SWITCHES.iter().find_map(|switch| {
+            arg.strip_prefix(switch)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(|value| (*switch, value))
+        });
+        let Some((switch, value)) = list else {
+            args.push(arg.clone());
+            continue;
+        };
+        let prefix = format!("{switch}=");
+        let Some(existing) = args.iter_mut().find(|a| a.starts_with(&prefix)) else {
+            args.push(arg.clone());
+            continue;
+        };
+        let mut items: Vec<String> = existing[prefix.len()..]
+            .split(',')
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+            .collect();
+        for item in value.split(',').filter(|item| !item.is_empty()) {
+            match items.iter_mut().find(|current| key(current) == key(item)) {
+                Some(current) if switch == "--blink-settings" => *current = item.to_string(),
+                Some(_) => {}
+                None => items.push(item.to_string()),
+            }
+        }
+        *existing = format!("{prefix}{}", items.join(","));
+    }
 }
 
 /// Profile location; ephemeral profiles are owned by the runtime directory.
@@ -609,6 +661,79 @@ mod try_attach_existing_tests {
         assert!(args.iter().any(|arg| arg == "--disable-field-trial-config"));
     }
 
+    // Regression: Chromium keeps only the last occurrence of a switch, so a
+    // user's --disable-features/--blink-settings used to drop eoka's
+    // AutomationControlled and pointer/hover pinning. Lists are merged.
+    #[test]
+    fn stealth_args_merge_user_list_switches() {
+        let fp = Fingerprint::random();
+        let config = StealthConfig {
+            extra_args: vec![
+                "--disable-features=Translate,AutomationControlled".into(),
+                "--enable-features=Foo:param/1".into(),
+                "--disable-blink-features=Bar".into(),
+                "--blink-settings=imagesEnabled=false,primaryHoverType=1".into(),
+                "--use-fake-ui-for-media-stream".into(),
+            ],
+            ..StealthConfig::default()
+        };
+        let args = stealth_args(&config, &fp);
+        let only = |switch: &str| {
+            let prefix = format!("{switch}=");
+            let matching: Vec<_> = args.iter().filter(|a| a.starts_with(&prefix)).collect();
+            assert_eq!(matching.len(), 1, "{switch} must appear once: {args:?}");
+            matching[0].clone()
+        };
+        assert_eq!(
+            only("--disable-features"),
+            "--disable-features=AutomationControlled,EnableAutomation,Translate"
+        );
+        assert_eq!(
+            only("--enable-features"),
+            "--enable-features=NetworkService,NetworkServiceInProcess,Foo:param/1"
+        );
+        assert_eq!(
+            only("--disable-blink-features"),
+            "--disable-blink-features=AutomationControlled,Bar"
+        );
+        assert_eq!(
+            only("--blink-settings"),
+            "--blink-settings=primaryPointerType=4,availablePointerTypes=4,primaryHoverType=1,availableHoverTypes=2,imagesEnabled=false"
+        );
+        assert_eq!(args.last().unwrap(), "--use-fake-ui-for-media-stream");
+    }
+
+    // Regression: site isolation was "disabled" with names that are not
+    // features (`site-per-process` is a switch), which changed nothing.
+    #[test]
+    fn stealth_args_do_not_carry_noop_isolation_features() {
+        let args = stealth_args(&StealthConfig::default(), &Fingerprint::random());
+        assert!(!args
+            .iter()
+            .any(|a| a.contains("site-per-process") || a.contains("IsolateOrigins")));
+    }
+
+    // Regression: WebRTC UDP bypasses a configured proxy and reveals the host
+    // IP through STUN. Only proxied sessions restrict it, so WebRTC keeps
+    // working without one.
+    #[test]
+    fn stealth_args_keep_webrtc_behind_a_proxy() {
+        let fp = Fingerprint::random();
+        let policy = "--webrtc-ip-handling-policy=disable_non_proxied_udp";
+        let direct = stealth_args(&StealthConfig::default(), &fp);
+        assert!(!direct
+            .iter()
+            .any(|a| a.starts_with("--webrtc-ip-handling-policy")));
+        let proxied = stealth_args(
+            &StealthConfig {
+                proxy: Some("http://127.0.0.1:8080".into()),
+                ..StealthConfig::default()
+            },
+            &fp,
+        );
+        assert!(proxied.iter().any(|a| a == policy));
+    }
+
     // Regression: Xvfb/headless has no pointing device, so Blink reports
     // `(pointer: none)` / `(hover: none)`. Desktop bot checks cross-check those
     // against a desktop UA; the launch args must pin the desktop state.
@@ -677,7 +802,7 @@ mod try_attach_existing_tests {
             None,
         );
         let windows_script = build_evasion_script_for(&StealthConfig::default(), &windows_fp);
-        assert!(windows_script.contains("document.fonts.check"));
+        assert!(windows_script.contains("FontFaceSet.prototype, 'check'"));
         assert!(
             windows_script.contains(&serde_json::to_string(&windows_fp.fonts).unwrap()),
             "claimed font set must flow into the script"
@@ -690,8 +815,7 @@ mod try_attach_existing_tests {
         );
         let linux_script = build_evasion_script_for(&StealthConfig::default(), &linux_fp);
         assert!(
-            linux_script
-                .contains("if (navigator.keyboard && navigator.keyboard.getLayoutMap && null)"),
+            linux_script.contains("Keyboard.prototype.getLayoutMap && null)"),
             "Linux keyboard spoof must be inert"
         );
     }

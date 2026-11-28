@@ -40,14 +40,24 @@ impl ActionInput {
                 true,
             )
             .await?;
+        self.state.pointer = Some((x, y));
         Ok(())
     }
 
+    /// Record a pointer position dispatched outside this helper.
+    pub fn record_pointer(&mut self, x: f64, y: f64) {
+        self.state.pointer = Some((x, y));
+    }
+
     pub async fn human_move(&mut self, dispatch: &Dispatch, x: f64, y: f64) -> Result<()> {
-        let start = (
-            (x + fastrand::f64() * 400.0 - 200.0).max(0.0),
-            (y + fastrand::f64() * 200.0 - 100.0).max(0.0),
-        );
+        // Start where the pointer really is; only an untouched page has no
+        // position, and then the path comes in from a nearby point.
+        let start = self.state.pointer.unwrap_or_else(|| {
+            (
+                (x + fastrand::f64() * 400.0 - 200.0).max(0.0),
+                (y + fastrand::f64() * 200.0 - 100.0).max(0.0),
+            )
+        });
         for (px, py) in crate::stealth::human::bezier_curve(start, (x, y), 24) {
             self.move_to(dispatch, px, py).await?;
             sleep_ms(5 + fastrand::u64(0..8)).await;
@@ -68,6 +78,7 @@ impl ActionInput {
             .reserve_mouse_down(MouseButton::Left, (x, y))
             .map_err(input_state_error)?;
         dispatch.send(&self.session, "Input.dispatchMouseEvent", json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":buttons,"clickCount":count,"force":0.5}), false).await?;
+        self.state.pointer = Some((x, y));
         if human {
             sleep_ms(50 + fastrand::u64(0..70)).await;
         }
@@ -200,10 +211,12 @@ impl ActionInput {
                     false,
                 )
                 .await?;
+            self.state.pointer = Some((px, py));
             sleep_ms(8).await;
         }
         dispatch.send(&self.session,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x+dx,"y":y+dy,"button":"left","buttons":0,"clickCount":1,"force":0.0}),false).await?;
         self.state.finish_mouse_up(MouseButton::Left);
+        self.state.pointer = Some((x + dx, y + dy));
         Ok(())
     }
 

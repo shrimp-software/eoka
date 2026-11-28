@@ -18,10 +18,7 @@ try {
                 'interaction-contentful-paint', 'largest-contentful-paint', 'layout-shift',
                 'long-animation-frame', 'longtask', 'mark', 'measure', 'navigation', 'paint',
                 'resource', 'soft-navigation', 'visibility-state']);
-            Object.defineProperty(PerformanceObserver, 'supportedEntryTypes', {
-                get: _eoka_mark(() => desktop, 'get supportedEntryTypes'),
-                configurable: true
-            });
+            _eoka_patchGetter(PerformanceObserver, 'supportedEntryTypes', () => () => desktop);
         }
     }
 } catch(e) {}
@@ -35,10 +32,7 @@ try {
 try {
     if (window.isSecureContext === false && window.location.protocol === 'https:' &&
             window.top === window) {
-        Object.defineProperty(window, 'isSecureContext', {
-            get: _eoka_mark(() => true, 'get isSecureContext'),
-            configurable: true
-        });
+        _eoka_patchGetter(window, 'isSecureContext', () => () => true);
     }
 } catch(e) {}
 
@@ -54,9 +48,6 @@ try {
 // Ensure window.origin is correct
 try {
     if (!window.origin || window.origin === 'null') {
-        Object.defineProperty(window, 'origin', {
-            get: _eoka_mark(function() { return window.location.origin; }, 'get origin'),
-            configurable: true
-        });
+        _eoka_patchGetter(window, 'origin', () => () => window.location.origin);
     }
 } catch(e) {}

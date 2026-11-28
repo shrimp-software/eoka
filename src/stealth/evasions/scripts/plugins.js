@@ -1,4 +1,6 @@
 
+// Stock Chrome (headless/new included) ships the five PDF viewer plugins
+// natively; only an empty list is filled.
 const _eoka_buildPlugins = () => {
     const plugins = [
         { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
@@ -22,15 +24,16 @@ const _eoka_buildPlugins = () => {
     });
 
     Object.defineProperty(pluginArray, 'length', { value: plugins.length });
-    pluginArray.item = _eoka_mark((i) => pluginArray[i] || null, 'item');
-    pluginArray.namedItem = _eoka_mark((name) => pluginArray[name] || null, 'namedItem');
-    pluginArray.refresh = _eoka_mark(() => {}, 'refresh');
+    const methods = {
+        item(i) { return pluginArray[i] || null; },
+        namedItem(name) { return pluginArray[name] || null; },
+        refresh() {}
+    };
+    for (const [name, method] of Object.entries(methods)) pluginArray[name] = _eoka_mark(method);
     return pluginArray;
 };
 
-const _eoka_pluginArray = _eoka_buildPlugins();
-Object.defineProperty(Navigator.prototype, 'plugins', {
-    get: _eoka_mark(() => _eoka_pluginArray, 'get plugins'),
-    configurable: true,
-    enumerable: true
-});
+if (navigator.plugins.length === 0) {
+    const _eoka_pluginArray = _eoka_buildPlugins();
+    _eoka_patchGetter(Navigator.prototype, 'plugins', () => function() { return _eoka_pluginArray; });
+}
