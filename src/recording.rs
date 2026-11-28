@@ -640,24 +640,16 @@ fn decode_chunk(response: IoReadResult) -> Result<RecordingChunk, RecordingError
 }
 
 fn classify_start(error: Error) -> RecordingError {
-    if let Error::Cdp { code, message, .. } = &error {
-        let text = message.to_ascii_lowercase();
-        if *code == Some(-32601) || text.contains("not supported") || text.contains("wasn't found")
-        {
-            return RecordingError::Unsupported(message.clone());
-        }
-        if text.contains("already active") {
-            return RecordingError::AlreadyActive;
-        }
-        if text.contains("inactive")
-            || text.contains("top-level")
-            || text.contains("top target")
-            || text.contains("not attached")
-        {
-            return RecordingError::Precondition(message.clone());
-        }
+    use crate::error::classify::{recording_start_failure, RecordingStartFailure};
+    let Error::Cdp { message, .. } = &error else {
+        return RecordingError::Core(error);
+    };
+    match recording_start_failure(&error) {
+        Some(RecordingStartFailure::Unsupported) => RecordingError::Unsupported(message.clone()),
+        Some(RecordingStartFailure::AlreadyActive) => RecordingError::AlreadyActive,
+        Some(RecordingStartFailure::Precondition) => RecordingError::Precondition(message.clone()),
+        None => RecordingError::Core(error),
     }
-    RecordingError::Core(error)
 }
 
 impl Page {
