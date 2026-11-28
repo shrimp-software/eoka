@@ -138,7 +138,7 @@ impl ActionInput {
                 } else {
                     (ch.to_string(), ch.to_string())
                 };
-                let (code, virtual_key, shift) = us_key(ch);
+                let (code, virtual_key, shift) = crate::keyboard::char_key(ch);
                 let mut event = json!({"type":"keyDown","key":key,"code":code,"text":typed,"unmodifiedText":typed,
                     "windowsVirtualKeyCode":virtual_key,"nativeVirtualKeyCode":virtual_key,"modifiers":if shift { 8 } else { 0 }});
                 dispatch
@@ -258,63 +258,5 @@ impl ActionInput {
             self.state.finish_mouse_up(button);
         }
         Ok(())
-    }
-}
-
-/// US-layout `code`, Windows virtual key and whether Shift is needed for a
-/// character. Characters without a US key get an empty code and key 0; Chrome
-/// still inserts their `text`.
-fn us_key(ch: char) -> (String, u32, bool) {
-    const SHIFTED_DIGITS: &str = ")!@#$%^&*(";
-    const PUNCTUATION: &[(char, char, &str, u32)] = &[
-        ('-', '_', "Minus", 189),
-        ('=', '+', "Equal", 187),
-        ('[', '{', "BracketLeft", 219),
-        (']', '}', "BracketRight", 221),
-        ('\\', '|', "Backslash", 220),
-        (';', ':', "Semicolon", 186),
-        ('\'', '"', "Quote", 222),
-        (',', '<', "Comma", 188),
-        ('.', '>', "Period", 190),
-        ('/', '?', "Slash", 191),
-        ('`', '~', "Backquote", 192),
-    ];
-    if ch.is_ascii_alphabetic() {
-        let upper = ch.to_ascii_uppercase();
-        return (format!("Key{upper}"), upper as u32, ch.is_ascii_uppercase());
-    }
-    if let Some(digit) = ch.to_digit(10) {
-        return (format!("Digit{digit}"), 48 + digit, false);
-    }
-    if let Some(index) = SHIFTED_DIGITS.find(ch) {
-        return (format!("Digit{index}"), 48 + index as u32, true);
-    }
-    if ch == ' ' {
-        return ("Space".into(), 32, false);
-    }
-    if ch == '\n' {
-        return ("Enter".into(), 13, false);
-    }
-    for &(plain, shifted, code, virtual_key) in PUNCTUATION {
-        if ch == plain || ch == shifted {
-            return (code.into(), virtual_key, ch == shifted);
-        }
-    }
-    (String::new(), 0, false)
-}
-
-#[cfg(test)]
-mod us_key_tests {
-    use super::us_key;
-
-    #[test]
-    fn maps_us_layout_characters() {
-        assert_eq!(us_key('a'), ("KeyA".into(), 65, false));
-        assert_eq!(us_key('A'), ("KeyA".into(), 65, true));
-        assert_eq!(us_key('7'), ("Digit7".into(), 55, false));
-        assert_eq!(us_key('@'), ("Digit2".into(), 50, true));
-        assert_eq!(us_key(' '), ("Space".into(), 32, false));
-        assert_eq!(us_key('?'), ("Slash".into(), 191, true));
-        assert_eq!(us_key('é'), (String::new(), 0, false));
     }
 }
