@@ -12,9 +12,10 @@ if (typeof speechSynthesis !== 'undefined') {
         return voice;
     });
 
-    const origGetVoices = speechSynthesis.getVoices.bind(speechSynthesis);
-    speechSynthesis.getVoices = _eoka_mark(function getVoices() {
-        const voices = origGetVoices();
-        return voices.length > 0 ? voices : defaultVoices;
-    }, 'getVoices');
+    if (defaultVoices.length > 0) {
+        _eoka_patchMethod(SpeechSynthesis.prototype, 'getVoices', (original) => function(...args) {
+            const voices = original.apply(this, args);
+            return voices.length > 0 ? voices : defaultVoices;
+        });
+    }
 }

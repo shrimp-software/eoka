@@ -454,6 +454,7 @@ pub(super) async fn perform(
                     false,
                 )
                 .await?;
+            input.record_pointer(x, y);
             Ok(property("hovered", json!(true)))
         }
         Action::ScrollIntoView { .. } => {

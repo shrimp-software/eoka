@@ -1,17 +1,9 @@
 
-const _eoka_webdriverGet = _eoka_mark(() => false, 'get webdriver');
-Object.defineProperty(Object.getPrototypeOf(navigator), 'webdriver', {
-    get: _eoka_webdriverGet,
-    configurable: true,
-    enumerable: true
-});
-try {
-    Object.defineProperty(Navigator.prototype, 'webdriver', {
-        get: _eoka_webdriverGet,
-        configurable: true,
-        enumerable: true
-    });
-} catch(e) {}
+// `--disable-blink-features=AutomationControlled` already makes the native
+// getter report false. Only replace it where the browser still reports true.
+if (navigator.webdriver) {
+    _eoka_patchGetter(Navigator.prototype, 'webdriver', () => function() { return false; });
+}
 
 // Remove automation-related properties from window
 const automationProps = [
@@ -32,10 +24,3 @@ automationProps.forEach(prop => {
         if (prop in window) delete window[prop];
     } catch(e) {}
 });
-
-// Fix for Chrome's runtime.bindingsCalled check
-if (window.chrome && window.chrome.runtime) {
-    try {
-        delete window.chrome.runtime.bindingsCalled;
-    } catch(e) {}
-}

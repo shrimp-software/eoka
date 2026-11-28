@@ -54,6 +54,16 @@ struct HeldKey {
 pub(crate) struct HeldInputState {
     mouse_buttons: HashMap<MouseButton, (f64, f64)>,
     keys: HashMap<HeldKeyId, HeldKey>,
+    /// Where the last mouse event was dispatched, so human paths start at the
+    /// real pointer position instead of jumping in from nowhere.
+    pointer: Option<(f64, f64)>,
+}
+
+impl HeldInputState {
+    /// Last dispatched pointer position, if any mouse event was sent.
+    pub(crate) fn pointer(&self) -> Option<(f64, f64)> {
+        self.pointer
+    }
 }
 
 fn input_state_error(message: impl Into<String>) -> Error {
@@ -179,6 +189,7 @@ pub(crate) async fn held_mouse_move(
         state.mouse_button_mask(),
     )
     .await?;
+    state.pointer = Some((x, y));
     for position in state.mouse_buttons.values_mut() {
         *position = (x, y);
     }
@@ -205,8 +216,9 @@ pub(crate) async fn held_mouse_down(
         buttons,
     )
     .await;
-    if result.is_err() {
-        state.cancel_mouse_down(button);
+    match result {
+        Ok(()) => state.pointer = Some((x, y)),
+        Err(_) => state.cancel_mouse_down(button),
     }
     result
 }
@@ -230,6 +242,9 @@ pub(crate) async fn held_mouse_up(
     )
     .await;
     state.finish_mouse_up(button);
+    if result.is_ok() {
+        state.pointer = Some((x, y));
+    }
     result
 }
 
@@ -270,7 +285,7 @@ pub(crate) async fn coordinated_mouse_wheel(
     delta_x: f64,
     delta_y: f64,
 ) -> Result<()> {
-    let state = held_input.lock().await;
+    let mut state = held_input.lock().await;
     let buttons = state.mouse_button_mask();
     session
         .dispatch_mouse_event_full(crate::cdp::InputDispatchMouseEvent {
@@ -284,7 +299,9 @@ pub(crate) async fn coordinated_mouse_wheel(
             delta_x: Some(delta_x),
             delta_y: Some(delta_y),
         })
-        .await
+        .await?;
+    state.pointer = Some((x, y));
+    Ok(())
 }
 
 pub(crate) async fn coordinated_key_down(
@@ -504,6 +521,7 @@ impl Page {
                 continue;
             }
             state.finish_mouse_up(button);
+            state.pointer = Some((x, y));
         }
 
         match first_error {
