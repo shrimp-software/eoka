@@ -782,7 +782,8 @@ impl Transport {
             (Some(session), true) => {
                 let mut routes = lock_completions(&self.completion_routes);
                 if routes.contains_key(session.as_ref()) {
-                    return Err(Error::cdp_msg(
+                    return Err(Error::coded(
+                        crate::ErrorCode::Busy,
                         "Native command completion is already owned for this session",
                     ));
                 }
@@ -992,7 +993,8 @@ impl Transport {
             return Err(Error::transport("CDP transport is closed"));
         }
         if routes.contains_key(session) {
-            return Err(Error::cdp_msg(
+            return Err(Error::coded(
+                crate::ErrorCode::Busy,
                 "Request interception already owned for this session",
             ));
         }

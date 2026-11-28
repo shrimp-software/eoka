@@ -1,6 +1,7 @@
 use base64::Engine;
 use eoka::{
-    Browser, Error, Page, ScreenshotClip, ScreenshotFormat, ScreenshotOptions, StealthConfig,
+    Browser, Error, ErrorCode, Page, ScreenshotClip, ScreenshotFormat, ScreenshotOptions,
+    StealthConfig,
 };
 use serde_json::{json, Value};
 
@@ -214,9 +215,8 @@ async fn invalid_viewports_leave_layout_unchanged_and_validate_after_disconnect(
         let error = page.set_viewport(width, height, scale).await.unwrap_err();
         assert!(matches!(
             error,
-            Error::Cdp {
-                method: None,
-                code: None,
+            Error::Coded {
+                code: ErrorCode::InvalidArgument,
                 ..
             }
         ));
@@ -228,9 +228,8 @@ async fn invalid_viewports_leave_layout_unchanged_and_validate_after_disconnect(
         let error = page.set_viewport(width, height, scale).await.unwrap_err();
         assert!(matches!(
             error,
-            Error::Cdp {
-                method: None,
-                code: None,
+            Error::Coded {
+                code: ErrorCode::InvalidArgument,
                 ..
             }
         ));
