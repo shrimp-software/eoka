@@ -79,8 +79,8 @@ src/
 ├── error.rs            # Error enum; error/code.rs (ErrorCode), error/classify.rs (CDP error text)
 ├── action/             # Action engine: runner, perform, locator, destination
 ├── cdp/
-│   ├── transport.rs    # WebSocket commands, cancellation and shutdown
-│   ├── transport/      # Reader, writer task, Fetch interception, Chrome process lifecycle
+│   ├── transport.rs    # WebSocket commands, cancellation and routes
+│   ├── transport/      # Connect, pending commands, reader, writer task, Fetch interception, shutdown, Chrome process lifecycle
 │   ├── connection.rs   # Connection and shared target/session state
 │   ├── connection/     # Session commands grouped by page/network/document/input
 │   ├── headers.rs      # Target-scoped temporary header cleanup and recovery
