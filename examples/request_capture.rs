@@ -1,78 +1,78 @@
-//! Request capture example - demonstrate HTTP request monitoring
+//! Request capture example: record a page's HTTP traffic and read a response body.
 //!
+//! Serves a tiny local site, so no network access is needed.
 //! Run with: cargo run --example request_capture
 
-use eoka::{Browser, Result};
+use std::time::Duration;
+
+use eoka::network::RequestCaptureOptions;
+use eoka::{Browser, ResponseBody, Result};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+/// Minimal HTTP server: `/api` returns JSON, everything else a page that calls it.
+async fn serve() -> std::io::Result<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!("http://{}/", listener.local_addr()?);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut buffer = vec![0; 8192];
+                let n = socket.read(&mut buffer).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buffer[..n]);
+                let path = request.split_whitespace().nth(1).unwrap_or("/");
+                let (content_type, body) = if path.starts_with("/api") {
+                    ("application/json", r#"{"message":"hello from the API"}"#)
+                } else {
+                    (
+                        "text/html",
+                        "<!doctype html><title>demo</title><script>fetch('/api/greeting', {method: 'POST', body: 'hi'})</script>",
+                    )
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+            });
+        }
+    });
+    Ok(url)
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("eoka=info".parse().unwrap()),
-        )
-        .init();
-
-    println!("=== Eoka Request Capture Example ===\n");
-
-    println!("Launching browser...");
+    let url = serve().await?;
     let browser = Browser::launch().await?;
+    let page = browser.new_blank_page().await?;
 
-    // Create page
-    let page = browser.new_page("about:blank").await?;
+    // Start capturing before triggering the traffic.
+    let capture = page
+        .capture_requests(RequestCaptureOptions::default())
+        .await?;
+    page.goto(&url).await?;
 
-    // Enable request capture BEFORE navigation
-    println!("Enabling request capture...");
-    page.enable_request_capture().await?;
-
-    // Navigate to a page that makes API requests
-    println!("\nNavigating to httpbin.org...\n");
-    page.goto("https://httpbin.org/get?foo=bar&baz=123").await?;
-    page.wait(2000).await;
-
-    // Get response body of the page itself
-    // Note: To get request IDs you need to listen to network events
-    // For now, let's demonstrate the response body API
-
-    // Navigate to a JSON endpoint
-    println!("Fetching JSON endpoint...\n");
-    page.goto("https://httpbin.org/json").await?;
-    page.wait(1000).await;
-
-    // Get the page content (which is the JSON response rendered as text)
-    let content = page.text().await?;
-    println!("Response content (first 500 chars):");
-    println!("{}\n", &content[..content.len().min(500)]);
-
-    // Try a POST request via JavaScript and capture it
-    println!("Making a fetch request via JavaScript...");
-    let result: serde_json::Value = page
-        .evaluate(
-            r#"
-        (async () => {
-            const response = await fetch('https://httpbin.org/post', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify({ message: 'Hello from eoka!' })
-            });
-            return await response.json();
-        })()
-    "#,
+    let api = capture
+        .wait_for(
+            |r| r.url.ends_with("/api/greeting") && r.complete,
+            Duration::from_secs(10),
         )
         .await?;
+    println!(
+        "{} {} -> {:?} (post data: {:?})",
+        api.method, api.url, api.status, api.post_data
+    );
+    if let ResponseBody::Text(body) = capture.response_body(&api.request_id).await? {
+        println!("API response body: {body}");
+    }
 
-    println!("POST response:");
-    println!("{}\n", serde_json::to_string_pretty(&result)?);
-
-    // Disable request capture
-    page.disable_request_capture().await?;
-
-    println!("Closing browser...");
-    browser.close().await?;
-
-    println!("\n=== Done ===");
-    Ok(())
+    for request in capture.stop().await? {
+        println!(
+            "{:>4} {:<8} {:?} {}",
+            request.method,
+            request.resource_type.as_deref().unwrap_or("?"),
+            request.status,
+            request.url
+        );
+    }
+    browser.close().await
 }

@@ -236,19 +236,36 @@ impl Page {
         self.session.clear_extra_headers().await
     }
 
-    /// Enable network request capture
-    /// NOTE: This enables Network.enable which may be slightly detectable by advanced anti-bot
+    /// Start recording this page's requests and responses. Subscribe before
+    /// triggering the traffic you want; see [`RequestCapture`](crate::network::RequestCapture).
+    ///
+    /// Enables the CDP Network domain on this page while any capture is active,
+    /// which advanced anti-bot scripts may be able to detect.
+    pub async fn capture_requests(
+        &self,
+        options: crate::network::RequestCaptureOptions,
+    ) -> Result<crate::network::RequestCapture> {
+        crate::network::RequestCapture::start(self, options).await
+    }
+
+    /// Keep the CDP Network domain enabled on this page, so
+    /// [`get_response_body`](Self::get_response_body) works for request IDs you
+    /// obtain yourself. This records nothing; use
+    /// [`capture_requests`](Self::capture_requests) to list requests.
+    /// NOTE: Network.enable may be slightly detectable by advanced anti-bot scripts.
     pub async fn enable_request_capture(&self) -> Result<()> {
-        self.session.network_enable().await
+        crate::network::set_manual_capture(self, true).await
     }
 
-    /// Disable network request capture
+    /// Undo [`enable_request_capture`](Self::enable_request_capture). The domain
+    /// stays enabled while a [`RequestCapture`](crate::network::RequestCapture) is active.
     pub async fn disable_request_capture(&self) -> Result<()> {
-        self.session.network_disable().await
+        crate::network::set_manual_capture(self, false).await
     }
 
-    /// Get response body for a captured request
-    /// The request_id comes from CapturedRequest.request_id
+    /// Get the response body for a request, by
+    /// [`CapturedRequest::request_id`](crate::page::CapturedRequest::request_id).
+    /// Needs the Network domain enabled (an active capture) and a finished response.
     pub async fn get_response_body(&self, request_id: &str) -> Result<ResponseBody> {
         let (body, base64_encoded) = self.session.get_response_body(request_id).await?;
 
