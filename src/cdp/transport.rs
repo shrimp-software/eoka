@@ -1034,24 +1034,27 @@ impl Transport {
 
     pub(crate) async fn wait_for_owned_exit(&self, timeout: Duration) -> Result<bool> {
         let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let exited = match self
-                .child
-                .lock()
-                .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?
-                .as_mut()
-            {
-                None => true,
-                Some(child) => child.try_wait()?.is_some(),
-            };
-            if exited {
-                return Ok(true);
+        let exited = || -> Result<bool> {
+            Ok(
+                match self
+                    .child
+                    .lock()
+                    .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?
+                    .as_mut()
+                {
+                    None => true,
+                    Some(child) => child.try_wait()?.is_some(),
+                },
+            )
+        };
+        let polled = super::poll::poll_async(Some(deadline), Duration::from_millis(25), || {
+            match exited() {
+                Ok(false) => None,
+                result => Some(result),
             }
-            if tokio::time::Instant::now() >= deadline {
-                return Ok(false);
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
+        })
+        .await;
+        polled.unwrap_or(Ok(false))
     }
 
     /// Close the transport and terminate any owned Chrome process.

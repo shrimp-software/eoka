@@ -598,14 +598,18 @@ mod singleton_tests {
         let mut child = std::process::Command::new("true").spawn().unwrap();
         let stat = format!("/proc/{}/stat", child.id());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while !std::fs::read_to_string(&stat)
-            .unwrap()
-            .rsplit_once(')')
-            .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
-        {
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        }
+        crate::cdp::poll::poll_blocking(
+            Some(deadline),
+            std::time::Duration::from_millis(5),
+            || {
+                std::fs::read_to_string(&stat)
+                    .unwrap()
+                    .rsplit_once(')')
+                    .is_some_and(|(_, rest)| rest.trim_start().starts_with('Z'))
+                    .then_some(())
+            },
+        )
+        .expect("the exited child must become a zombie");
         assert_eq!(read_process_argv(child.id()), None);
         child.wait().unwrap();
     }

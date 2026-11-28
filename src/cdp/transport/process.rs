@@ -1,5 +1,6 @@
 //! Chrome child ownership, launch and DevTools endpoint discovery.
 
+use crate::cdp::poll::poll_blocking;
 use crate::{Error, Result};
 use std::{
     io::{BufRead, BufReader},
@@ -273,12 +274,12 @@ fn wait_for_chrome_devtools_url(
 ) -> Result<String> {
     let deadline = Instant::now() + Duration::from_secs(30);
 
-    loop {
+    poll_blocking(Some(deadline), Duration::from_millis(50), || {
         if cancelled.is_some_and(|cancelled| cancelled.load(Ordering::Acquire)) {
-            return Err(Error::Launch("Browser launch was cancelled".into()));
+            return Some(Err(Error::Launch("Browser launch was cancelled".into())));
         }
         match rx.try_recv() {
-            Ok(Ok(url)) => return Ok(url),
+            Ok(Ok(url)) => return Some(Ok(url)),
             Ok(Err(stderr)) => {
                 let status = child
                     .try_wait()
@@ -286,29 +287,29 @@ fn wait_for_chrome_devtools_url(
                     .flatten()
                     .map(|status| status.to_string())
                     .unwrap_or_else(|| "still running".to_string());
-                return Err(Error::Launch(format!(
+                return Some(Err(Error::Launch(format!(
                     "Failed waiting for Chrome DevTools URL: process {}; {}",
                     status, stderr
-                )));
+                ))));
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                return Err(Error::Launch(
+                return Some(Err(Error::Launch(
                     "Failed waiting for Chrome DevTools URL: stderr reader exited unexpectedly"
                         .into(),
-                ));
+                )));
             }
         }
 
         if let Some(dir) = profile_dir {
             if let Some(port) = crate::cdp::discover::read_devtools_active_port(dir) {
-                return crate::cdp::discover::discover_browser_ws("127.0.0.1", port).map_err(
-                    |error| {
+                return Some(
+                    crate::cdp::discover::discover_browser_ws("127.0.0.1", port).map_err(|error| {
                         Error::Launch(format!(
                             "Chrome wrote DevToolsActivePort ({}) but discovery failed: {}",
                             port, error
                         ))
-                    },
+                    }),
                 );
             }
         }
@@ -319,20 +320,19 @@ fn wait_for_chrome_devtools_url(
                 .ok()
                 .and_then(|result| result.err())
                 .unwrap_or_else(|| "Chrome exited before printing DevTools URL".to_string());
-            return Err(Error::Launch(format!(
+            return Some(Err(Error::Launch(format!(
                 "Failed waiting for Chrome DevTools URL: process {}; {}",
                 status, stderr
-            )));
+            ))));
         }
 
-        if Instant::now() >= deadline {
-            return Err(Error::Launch(
-                "Failed waiting for Chrome DevTools URL after 30s".into(),
-            ));
-        }
-
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        None
+    })
+    .unwrap_or_else(|| {
+        Err(Error::Launch(
+            "Failed waiting for Chrome DevTools URL after 30s".into(),
+        ))
+    })
 }
 
 pub(crate) fn chrome_version_output(
@@ -517,9 +517,9 @@ mod tests {
             });
             let started = self.runtime.path().join("descendant-started");
             let exited = self.runtime.path().join("descendant-exited");
-            while started.exists() && !exited.exists() && Instant::now() < deadline {
-                std::thread::sleep(Duration::from_millis(10));
-            }
+            poll_blocking(Some(deadline), Duration::from_millis(10), || {
+                (!started.exists() || exited.exists()).then_some(())
+            });
             self.cleaned_up.store(
                 stopped && (!started.exists() || exited.exists()),
                 Ordering::Release,
@@ -552,14 +552,13 @@ wait
 
     #[cfg(unix)]
     async fn fixture_file(path: &Path) -> String {
-        loop {
-            if let Ok(contents) = std::fs::read_to_string(path) {
-                if !contents.is_empty() {
-                    return contents;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::cdp::poll::poll_async(None, Duration::from_millis(10), || {
+            std::fs::read_to_string(path)
+                .ok()
+                .filter(|contents| !contents.is_empty())
+        })
+        .await
+        .expect("polling without a deadline only ends with a value")
     }
 
     #[cfg(unix)]
