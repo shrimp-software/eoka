@@ -160,6 +160,15 @@ All notable changes to this project will be documented in this file.
 - The WebGL vendor now always matches the renderer. Windows AMD and Intel
   renderers were paired with the NVIDIA vendor, and macOS Intel renderers with
   the Apple vendor.
+- Text lookups and waits now survive a navigation the page starts itself, such
+  as a link click, an accepted `beforeunload` or a `location` assignment.
+  `find_by_text`, `find_by_text_match` and `wait_for_text` used the old
+  document's cached node and reported the destination's text as not found, and
+  `find_all_by_text` returned no elements. `wait_for`, `wait_for_any`,
+  `wait_for_text`, `wait_for_visible` and `wait_for_hidden` now treat a
+  destroyed execution context or navigated target as a missed poll instead of
+  failing at once. `find_all_by_text` now returns `DOM.requestNode` errors
+  instead of dropping those elements.
 
 - Unused CDP protocol types are removed, and node calls and expectation
   comparisons in the action engine have one definition each.

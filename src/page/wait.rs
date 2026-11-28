@@ -1,15 +1,17 @@
-use super::{is_element_cdp_error, sleep_ms, Element, Page};
+use super::{is_element_cdp_error, is_navigation_race, sleep_ms, Element, Page};
 use crate::error::{Error, Result};
 
 /// Polling interval (ms) used by wait_for_* loop iterations.
 const POLL_INTERVAL_MS: u64 = 100;
 
-/// Convert a missing-element result into a polling miss while preserving
-/// operational failures such as a closed transport or malformed CDP reply.
+/// Convert a missing element, or a lookup that a navigation raced, into a
+/// polling miss while preserving operational failures such as a closed
+/// transport or malformed CDP reply.
 fn retry_if_not_found<T>(result: Result<T>) -> Result<Option<T>> {
     match result {
         Ok(value) => Ok(Some(value)),
         Err(Error::ElementNotFound(_)) => Ok(None),
+        Err(error) if is_navigation_race(&error) => Ok(None),
         Err(error) => Err(error),
     }
 }
@@ -59,7 +61,9 @@ impl Page {
                 match element.is_visible().await {
                     Ok(true) => Ok(Some(element)),
                     Ok(false) => Ok(None),
-                    Err(error) if is_element_cdp_error(&error) => Ok(None),
+                    Err(error) if is_element_cdp_error(&error) || is_navigation_race(&error) => {
+                        Ok(None)
+                    }
                     Err(error) => Err(error),
                 }
             },
@@ -81,9 +85,11 @@ impl Page {
                     Ok(el) => match el.is_visible().await {
                         Ok(false) => Ok(Some(())),
                         Ok(true) => Ok(None),
+                        Err(error) if is_navigation_race(&error) => Ok(None),
                         Err(error) if is_element_cdp_error(&error) => Ok(Some(())),
                         Err(error) => Err(error),
                     },
+                    Err(error) if is_navigation_race(&error) => Ok(None),
                     Err(error) => Err(error),
                 }
             },
@@ -233,6 +239,25 @@ mod tests {
         assert!(matches!(
             retry_if_not_found::<()>(Err(Error::transport("disconnected"))),
             Err(Error::Transport { .. })
+        ));
+    }
+
+    #[test]
+    fn test_retry_if_not_found_retries_navigation_race() {
+        let race = Error::cdp(
+            "Runtime.evaluate",
+            -32000,
+            "Execution context was destroyed.",
+        );
+        assert!(matches!(retry_if_not_found::<()>(Err(race)), Ok(None)));
+        let invalid = Error::cdp(
+            "DOM.querySelector",
+            -32000,
+            "DOMException: not a valid selector",
+        );
+        assert!(matches!(
+            retry_if_not_found::<()>(Err(invalid)),
+            Err(Error::Cdp { .. })
         ));
     }
 }

@@ -94,13 +94,7 @@ impl Page {
             .object_id
             .ok_or_else(|| Error::ElementNotFound(format!("text: {}", text)))?;
 
-        // Prime the DOM node-id space (DOM.requestNode returns 0 unless
-        // DOM.getDocument has populated it for the current document).
-        self.document_node().await?;
-
-        // Convert remote object to DOM node_id
-        let node_id = self.session.request_node(&object_id).await?;
-
+        let node_id = self.request_nodes(std::slice::from_ref(&object_id)).await?[0];
         if node_id == 0 {
             return Err(Error::ElementNotFound(format!("text: {}", text)));
         }
@@ -122,28 +116,44 @@ impl Page {
             None => return Ok(Vec::new()),
         };
 
-        // Get all indexed properties of the array in one CDP call
+        // Get all indexed properties of the array in one CDP call. Array
+        // elements have numeric names; skip "length" and prototype props.
         let properties = self.session.get_properties(&array_object_id).await?;
+        let object_ids: Vec<String> = properties
+            .into_iter()
+            .filter(|prop| prop.name.parse::<usize>().is_ok())
+            .filter_map(|prop| prop.value?.object_id)
+            .collect();
 
-        // Prime the DOM node-id space (DOM.requestNode returns 0 otherwise).
-        self.document_node().await?;
+        let node_ids = self.request_nodes(&object_ids).await?;
+        futures_util::future::try_join_all(
+            node_ids
+                .into_iter()
+                .filter(|&node_id| node_id != 0)
+                .map(|node_id| Element::from_node_id(self, node_id)),
+        )
+        .await
+    }
 
-        let mut elements = Vec::new();
-        for prop in &properties {
-            // Array elements have numeric names; skip "length" and prototype props
-            if prop.name.parse::<usize>().is_err() {
-                continue;
+    /// Convert remote element objects to DOM node ids. `DOM.requestNode` returns
+    /// 0 unless `DOM.getDocument` has populated the node-id space for the current
+    /// document, and the cached document node is stale after a navigation the
+    /// page started itself. On a 0, refresh the cache and convert every object
+    /// again, since ids from before the refresh are not valid after it.
+    async fn request_nodes(&self, object_ids: &[String]) -> Result<Vec<i32>> {
+        let mut refreshed = false;
+        loop {
+            self.document_node().await?;
+            let mut node_ids = Vec::with_capacity(object_ids.len());
+            for object_id in object_ids {
+                node_ids.push(self.session.request_node(object_id).await?);
             }
-            if let Some(ref obj_id) = prop.value.as_ref().and_then(|v| v.object_id.clone()) {
-                if let Ok(node_id) = self.session.request_node(obj_id).await {
-                    if node_id != 0 {
-                        elements.push(Element::from_node_id(self, node_id).await?);
-                    }
-                }
+            if refreshed || !node_ids.contains(&0) {
+                return Ok(node_ids);
             }
+            self.invalidate_document();
+            refreshed = true;
         }
-
-        Ok(elements)
     }
 
     /// Check if an element with the given text exists
