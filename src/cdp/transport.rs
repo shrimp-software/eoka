@@ -164,6 +164,10 @@ struct ReaderCompletionState {
     reason: CloseReason,
     shutdown: SocketShutdownGuard,
     lifecycle: LifecycleSink,
+    /// Signalled by the writer when it gives up. Shutting the socket down does
+    /// not wake a pending read on every platform (Windows), so the reader also
+    /// stops on this.
+    writer_failed: Arc<tokio::sync::Notify>,
 }
 
 /// Target lifecycle notifications for the connection's per-target state.
@@ -545,17 +549,20 @@ impl Transport {
         let request_base_auth = proxy_auth.is_some();
         // Construct the guard before spawning: abort-before-first-poll must
         // still shut down the socket while Transport retains the writer.
+        let writer_failed = Arc::new(tokio::sync::Notify::new());
         let completion_state = ReaderCompletionState {
             closed: Arc::clone(&closed),
             reason: Arc::clone(&reason),
             shutdown: SocketShutdownGuard(Arc::clone(&shutdown_socket)),
             lifecycle: Arc::clone(&lifecycle),
+            writer_failed: Arc::clone(&writer_failed),
         };
         let writer_state = writer::WriterState {
             closed: Arc::clone(&closed),
             reason,
             write_timeout: cmd_timeout,
             shutdown: SocketShutdownGuard(Arc::clone(&shutdown_socket)),
+            failed: writer_failed,
         };
         let writer_handle = tokio::spawn(writer::writer_loop(
             Arc::clone(&writer),

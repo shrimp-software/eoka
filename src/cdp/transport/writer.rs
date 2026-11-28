@@ -13,6 +13,7 @@ pub(super) struct WriterState {
     pub(super) reason: CloseReason,
     pub(super) write_timeout: Duration,
     pub(super) shutdown: SocketShutdownGuard,
+    pub(super) failed: Arc<tokio::sync::Notify>,
 }
 
 pub(super) async fn writer_loop(
@@ -26,6 +27,7 @@ pub(super) async fn writer_loop(
         reason,
         write_timeout,
         shutdown,
+        failed,
     } = state;
     let (mut replies_open, mut commands_open) = (true, true);
     loop {
@@ -82,6 +84,8 @@ pub(super) async fn writer_loop(
         if let Some(ack) = item.ack {
             drop(ack.send(Err(Error::transport(failure))));
         }
+        // Stores a permit if the reader is not waiting yet.
+        failed.notify_one();
         break;
     }
     // Shutting down the socket ends the reader, which fails every pending command.

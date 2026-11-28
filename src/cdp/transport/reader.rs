@@ -20,6 +20,7 @@ impl Transport {
             reason,
             shutdown,
             lifecycle,
+            writer_failed,
         } = completion_state;
         let mut exit_reason;
         // Automatic replies use their own id range, disjoint from commands and
@@ -27,7 +28,24 @@ impl Transport {
         let mut auto_id: u64 = AUTO_ID_MAX;
 
         loop {
-            let message = match source.next().await {
+            // `next()` is cancel-safe: a partly read frame stays buffered.
+            let next = match futures_util::future::select(
+                std::pin::pin!(source.next()),
+                std::pin::pin!(writer_failed.notified()),
+            )
+            .await
+            {
+                futures_util::future::Either::Left((next, _)) => next,
+                futures_util::future::Either::Right(((), _)) => {
+                    exit_reason = reason
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .clone()
+                        .unwrap_or_else(|| "CDP writer stopped".to_string());
+                    break;
+                }
+            };
+            let message = match next {
                 Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => message,
                 Some(Ok(Message::Ping(payload))) => {
                     // Split streams don't auto-pong; the writer sends it first.
