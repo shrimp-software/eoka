@@ -75,17 +75,7 @@ fn is_stale_node_error(e: &Error) -> bool {
     crate::error::classify::is(e, crate::error::classify::CdpFailure::NodeGone)
 }
 
-/// Whether a CDP error means a navigation replaced the document, execution
-/// context or target that the command used.
-pub(crate) fn is_navigation_race(e: &Error) -> bool {
-    matches!(e, Error::Cdp { message, .. } if [
-        "Cannot find context with specified id",
-        "Execution context was destroyed",
-        "Inspected target navigated or closed",
-    ]
-    .iter()
-    .any(|text| message.contains(text)))
-}
+pub(crate) use crate::error::classify::is_navigation_race;
 
 /// Check if an error means the element is missing, gone or not rendered.
 fn is_element_cdp_error(e: &Error) -> bool {

@@ -80,6 +80,20 @@ pub(crate) fn frame_discovery_raced(error: &Error) -> bool {
     )
 }
 
+/// Whether an evaluation raced a navigation of the page (waits treat these as
+/// "not yet"). Narrower than [`CdpFailure::ContextLost`]: lost remote objects
+/// are not included.
+pub(crate) fn is_navigation_race(error: &Error) -> bool {
+    cdp_message_contains(
+        error,
+        &[
+            "Cannot find context with specified id",
+            "Execution context was destroyed",
+            "Inspected target navigated or closed",
+        ],
+    )
+}
+
 /// Whether a node id refers to a document that was replaced. Narrower than
 /// [`CdpFailure::ContextLost`]: lost remote objects are not included.
 pub(crate) fn node_left_document(error: &Error) -> bool {

@@ -67,15 +67,15 @@ under Xvfb. Run one Chrome suite at a time.
 src/
 ├── lib.rs              # Public API: Browser, Page, StealthConfig, Result
 ├── browser.rs          # Browser API, tabs and session setup
-├── browser/launch.rs   # Chrome launch preparation and profile ownership
+├── browser/launch.rs   # Chrome launch preparation and profile ownership; launch/args.rs builds flags
 ├── browser/discovery.rs # Chrome discovery and wrapper-to-ELF resolution
 ├── page.rs             # Page abstraction
 ├── page/frames.rs      # Frame snapshots, geometry and frame evaluation
 ├── page/frames/shadow.rs # Clicking inside (closed) shadow roots
 ├── page/text_candidates.js # The one text matcher (find_by_text, text locators)
 ├── element.rs          # Element handles, pinned to backend node ids
-├── network.rs          # RequestCapture, NetworkWatcher
-├── session.rs          # Cookie import/export (incl. CHIPS partition keys)
+├── network.rs          # NetworkWatcher; network/{capture,store}.rs (RequestCapture)
+├── session.rs          # Cookie import/export (incl. CHIPS partition keys); session/matching.rs scopes cookies
 ├── error.rs            # Error enum; error/code.rs (ErrorCode), error/classify.rs (CDP error text)
 ├── action/             # Action engine: runner, perform, locator, destination
 ├── cdp/
@@ -343,10 +343,10 @@ Arguments reach page scripts as JSON, never spliced into source.
 ### Error Handling
 Chrome reports lifecycle conditions only as message text. The shared
 classification (session gone, context lost, node gone, not rendered) lives in
-`src/error/classify.rs` (`CdpFailure`); use it instead of new string matches.
-Frame discovery and shadow retries (`page/frames`), preparation retries
-(`action/perform.rs`) and recording support detection still match their own
-messages. CDP "box model" errors become
+`src/error/classify.rs`: `CdpFailure` plus the narrower checks frame discovery,
+shadow clicks, navigation races and recording start need. Add Chrome text
+there, never at a call site; eoka's own conditions match on `ErrorCode`.
+CDP "box model" errors become
 `ElementNotVisible`. `try_*` returns `Ok(false)` for missing, invisible,
 moved, covered and stale targets when no input was sent.
 

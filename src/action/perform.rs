@@ -137,24 +137,11 @@ pub(super) async fn point(page: &Page, node: &Node, require_enabled: bool) -> Re
         .as_f64()
         .ok_or_else(|| Error::cdp_msg("Invalid input coordinate"))?;
     if let Some(frame) = &node.frame_id {
-        page.frame_point_for_input(frame, x, y)
-            .await
-            .map_err(|error| match error {
-                Error::Cdp { ref message, .. } | Error::Coded { ref message, .. }
-                    if message == FRAME_POINT_COVERED =>
-                {
-                    actionability_changed("an iframe owner is covered")
-                }
-                other => other,
-            })
+        page.frame_point_for_input(frame, x, y).await
     } else {
         Ok((x, y))
     }
 }
-
-/// The message `Page::frame_point_for_input` reports when an iframe owner is
-/// covered at the input point.
-const FRAME_POINT_COVERED: &str = "Frame input point is covered by another element";
 
 fn actionability_changed(message: &str) -> Error {
     Error::coded(ErrorCode::ActionabilityChanged, message)

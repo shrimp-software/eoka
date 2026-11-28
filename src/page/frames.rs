@@ -355,8 +355,9 @@ impl Page {
                     )
                     .await?;
                 if !self.eval_impl::<bool>(result)? {
-                    return Err(Error::cdp_msg(
-                        "Frame input point is covered by another element",
+                    return Err(Error::coded(
+                        ErrorCode::ActionabilityChanged,
+                        "an iframe owner is covered",
                     ));
                 }
             }
