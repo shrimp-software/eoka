@@ -1,6 +1,6 @@
 //! Shorthand input methods work without configuration and report what is known.
 
-mod support;
+use crate::support;
 
 use eoka::{Action, ActionOptions, ActionOutcome, DispatchState, Error, Expectation, LocatorSpec};
 use std::future::IntoFuture;

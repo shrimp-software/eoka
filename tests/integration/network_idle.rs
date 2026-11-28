@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};

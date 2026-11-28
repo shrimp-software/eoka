@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use eoka::{Action, ActionOptions, ActionOutcome, DispatchState, Error, Expectation, LocatorSpec};
 use std::time::{Duration, Instant};

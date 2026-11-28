@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use support::{HttpFixture, Response};

@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use eoka::cdp::transport::CdpMessage;
 use serde_json::{json, Value};

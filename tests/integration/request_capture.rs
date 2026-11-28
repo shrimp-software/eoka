@@ -1,6 +1,6 @@
 //! Page-scoped request capture against a local HTTP fixture.
 
-mod support;
+use crate::support;
 
 use std::time::Duration;
 

@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use eoka::{Action, ActionOptions, Error};
 use eoka::{ActionOutcome, Destination, Expectation, InputMode, LocatorSpec};

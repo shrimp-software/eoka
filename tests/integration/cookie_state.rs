@@ -1,6 +1,6 @@
 //! Browser-level cookie capture, restore and scoped export.
 
-mod support;
+use crate::support;
 
 use eoka::{BrowserSession, Page, SessionCookie};
 use serde_json::{json, Value};

@@ -1,7 +1,7 @@
 //! Stealth regression checks: launch with the default (shipping) config and
 //! read the signals common bot detectors look at from a local page.
 
-mod support;
+use crate::support;
 
 use serde_json::Value;
 use support::{HttpFixture, Response};
