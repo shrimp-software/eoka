@@ -203,16 +203,16 @@ impl Page {
         if !has_storage && !replace {
             return Ok(());
         }
+        // Inlined as JSON literals rather than function arguments, which are
+        // capped at 1 MiB; origin storage can hold several megabytes.
+        let arguments = serde_json::to_string(&serde_json::json!([
+            state.url,
+            state.local_storage,
+            state.session_storage,
+            replace,
+        ]))?;
         let landed: StorageRestore = self
-            .evaluate_function(
-                RESTORE_STORAGE,
-                &[
-                    serde_json::Value::String(state.url.clone()),
-                    serde_json::json!(state.local_storage),
-                    serde_json::json!(state.session_storage),
-                    serde_json::Value::Bool(replace),
-                ],
-            )
+            .evaluate(&format!("({RESTORE_STORAGE})(...{arguments})"))
             .await?;
         match landed {
             StorageRestore { written: true, .. } => self.goto(&state.url).await,
@@ -254,8 +254,8 @@ impl Page {
     /// Start recording this page's requests and responses. Subscribe before
     /// triggering the traffic you want; see [`RequestCapture`](crate::network::RequestCapture).
     ///
-    /// Enables the CDP Network domain on this page while any capture is active,
-    /// which advanced anti-bot scripts may be able to detect.
+    /// Enables the CDP Network domain on this page (which advanced anti-bot
+    /// scripts may be able to detect); it stays enabled after the capture stops.
     pub async fn capture_requests(
         &self,
         options: crate::network::RequestCaptureOptions,
@@ -263,19 +263,21 @@ impl Page {
         crate::network::RequestCapture::start(self, options).await
     }
 
-    /// Keep the CDP Network domain enabled on this page, so
+    /// Enable the CDP Network domain on this page, so
     /// [`get_response_body`](Self::get_response_body) works for request IDs you
     /// obtain yourself. This records nothing; use
     /// [`capture_requests`](Self::capture_requests) to list requests.
     /// NOTE: Network.enable may be slightly detectable by advanced anti-bot scripts.
     pub async fn enable_request_capture(&self) -> Result<()> {
-        crate::network::set_manual_capture(self, true).await
+        self.session.network_enable().await
     }
 
-    /// Undo [`enable_request_capture`](Self::enable_request_capture). The domain
-    /// stays enabled while a [`RequestCapture`](crate::network::RequestCapture) is active.
+    /// Disable the CDP Network domain on this page. Chrome then discards
+    /// buffered response bodies and headers set with
+    /// [`set_extra_headers`](Self::set_extra_headers), and active
+    /// [`RequestCapture`](crate::network::RequestCapture)s receive no more events.
     pub async fn disable_request_capture(&self) -> Result<()> {
-        crate::network::set_manual_capture(self, false).await
+        self.session.network_disable().await
     }
 
     /// Get the response body for a request, by

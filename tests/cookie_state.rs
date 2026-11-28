@@ -402,12 +402,23 @@ async fn restore_replaces_storage_of_the_saved_origin() {
     let mut state = page.capture_state().await.unwrap();
     state.local_storage.remove("stale");
     state.local_storage.insert("token".into(), "new".into());
+    // Larger than the 1 MiB function-argument limit.
+    state
+        .local_storage
+        .insert("big".into(), "x".repeat(3 * 1024 * 1024));
     page.restore_state(&state).await.unwrap();
     let stored: Vec<Option<String>> = page
-        .evaluate("[localStorage.getItem('token'), localStorage.getItem('stale')]")
+        .evaluate("[localStorage.getItem('token'), localStorage.getItem('stale'), String(localStorage.getItem('big')?.length)]")
         .await
         .unwrap();
-    assert_eq!(stored, [Some("new".into()), None]);
+    assert_eq!(
+        stored,
+        [
+            Some("new".into()),
+            None,
+            Some((3 * 1024 * 1024).to_string())
+        ]
+    );
     browser.close().await.unwrap();
 }
 

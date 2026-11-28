@@ -7,7 +7,8 @@ use std::time::Duration;
 use eoka::network::RequestCaptureOptions;
 use eoka::ResponseBody;
 
-const PAGE: &str = "<!doctype html><title>capture</title>";
+// A data: icon keeps a stray /favicon.ico request out of the capture.
+const PAGE: &str = "<!doctype html><link rel=icon href=data:,><title>capture</title>";
 
 async fn fixture() -> support::HttpFixture {
     support::HttpFixture::start(|request| async move {
@@ -70,7 +71,7 @@ async fn captures_requests_with_readable_bodies() {
     assert!(drained.iter().any(|r| r.request_id == api.request_id));
     assert!(capture.get(&api.request_id).is_none());
     assert_eq!(capture.stats().lost_events, 0);
-    capture.stop().await.unwrap();
+    capture.stop().await;
     browser.close().await.unwrap();
 }
 
@@ -139,11 +140,11 @@ async fn capture_evicts_oldest_requests_first() {
     browser.close().await.unwrap();
 }
 
-/// Dropping one capture must not disable Network under another capture or
-/// an explicit `enable_request_capture`.
+/// Stopping or dropping a capture leaves Network enabled: bodies stay
+/// readable and another capture keeps receiving events.
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
-async fn dropping_a_capture_keeps_other_holders_working() {
+async fn stopping_a_capture_keeps_the_network_domain() {
     let server = fixture().await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
@@ -155,41 +156,64 @@ async fn dropping_a_capture_keeps_other_holders_working() {
         .capture_requests(RequestCaptureOptions::default())
         .await
         .unwrap();
-    page.enable_request_capture().await.unwrap();
-    first.stop().await.unwrap();
+    page.execute("fetch('/api/once')").await.unwrap();
+    let request = first
+        .wait_for(|r| r.url.ends_with("/api/once") && r.complete, wait())
+        .await
+        .unwrap();
+    let retained = first.stop().await;
+    assert!(retained.iter().any(|r| r.request_id == request.request_id));
+    assert!(page.get_response_body(&request.request_id).await.is_ok());
 
     page.execute("fetch('/api/after')").await.unwrap();
-    let request = second
+    second
         .wait_for(|r| r.url.ends_with("/api/after") && r.complete, wait())
         .await
         .unwrap();
     drop(second);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    // The explicit holder still keeps bodies readable.
-    assert!(page.get_response_body(&request.request_id).await.is_ok());
+
+    // Explicitly disabling Network is what discards bodies.
     page.disable_request_capture().await.unwrap();
+    assert!(page.get_response_body(&request.request_id).await.is_err());
     browser.close().await.unwrap();
 }
 
-/// Stopping the last capture disables Network, and Chrome then refuses bodies;
-/// this is why captures and `enable_request_capture` share one hold count.
+/// Regression guard: a capture must not send Network.disable, which also
+/// drops headers set with set_extra_headers.
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
-async fn stopping_the_last_capture_releases_the_network_domain() {
-    let server = fixture().await;
+async fn stopping_a_capture_keeps_extra_headers() {
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let server = support::HttpFixture::start(move |request| {
+        record
+            .lock()
+            .unwrap()
+            .push(request.headers.get("x-probe").cloned());
+        async { support::Response::html(PAGE) }
+    })
+    .await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
+    page.set_extra_headers([("X-Probe".to_string(), "1".to_string())].into())
+        .await
+        .unwrap();
     let capture = page
         .capture_requests(RequestCaptureOptions::default())
         .await
         .unwrap();
-    page.execute("fetch('/api/once')").await.unwrap();
-    let request = capture
-        .wait_for(|r| r.url.ends_with("/api/once") && r.complete, wait())
-        .await
-        .unwrap();
-    let retained = capture.stop().await.unwrap();
-    assert!(retained.iter().any(|r| r.request_id == request.request_id));
-    assert!(page.get_response_body(&request.request_id).await.is_err());
+    capture.stop().await;
+    seen.lock().unwrap().clear();
+    page.goto(&format!("{}after", server.url)).await.unwrap();
+    assert_eq!(
+        seen.lock().unwrap().first().cloned().flatten().as_deref(),
+        Some("1")
+    );
+
+    // Documented: an explicit disable drops them.
+    page.disable_request_capture().await.unwrap();
+    seen.lock().unwrap().clear();
+    page.goto(&format!("{}again", server.url)).await.unwrap();
+    assert_eq!(seen.lock().unwrap().first().cloned().flatten(), None);
     browser.close().await.unwrap();
 }

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
@@ -416,16 +416,17 @@ impl Shared {
 /// `Network` events. Out-of-process iframes and workers have their own
 /// sessions and are not included.
 ///
-/// The page's Network domain stays enabled while any capture (or
-/// [`Page::enable_request_capture`](crate::Page::enable_request_capture)) is
-/// active on it. [`stop`](Self::stop) or Drop ends collection; the last holder
-/// disables the domain, after which Chrome may no longer return response bodies.
+/// Starting a capture enables the page's CDP Network domain. [`stop`](Self::stop)
+/// or Drop ends collection but leaves the domain enabled, because other
+/// features (such as [`Page::set_extra_headers`](crate::Page::set_extra_headers))
+/// rely on it and `Network.disable` discards their state.
+/// [`Page::disable_request_capture`](crate::Page::disable_request_capture)
+/// turns it off explicitly.
 pub struct RequestCapture {
     shared: Arc<Shared>,
     page: Page,
     stop: Option<oneshot::Sender<()>>,
     worker: Option<tokio::task::JoinHandle<()>>,
-    hold: Option<NetworkHold>,
 }
 
 impl RequestCapture {
@@ -434,7 +435,7 @@ impl RequestCapture {
         let session_id = session.session_id().to_owned();
         // Subscribe before enabling so no early event is missed.
         let mut events = session.transport().subscribe();
-        let hold = NetworkHold::acquire(page).await?;
+        session.network_enable().await?;
         let (changed, _) = watch::channel(0);
         let shared = Arc::new(Shared {
             store: std::sync::Mutex::new(RequestStore::new(options.max_requests)),
@@ -478,7 +479,6 @@ impl RequestCapture {
             page: page.clone(),
             stop: Some(stop),
             worker: Some(worker),
-            hold: Some(hold),
         })
     }
 
@@ -536,20 +536,17 @@ impl RequestCapture {
         self.page.get_response_body(request_id).await
     }
 
-    /// Stop collecting and release this capture's hold on the Network domain.
-    /// Retained requests are returned, oldest first.
-    pub async fn stop(mut self) -> Result<Vec<CapturedRequest>> {
+    /// Stop collecting and return retained requests, oldest first. The Network
+    /// domain stays enabled, so their bodies remain readable through
+    /// [`Page::get_response_body`](crate::Page::get_response_body).
+    pub async fn stop(mut self) -> Vec<CapturedRequest> {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
         if let Some(worker) = self.worker.take() {
             let _ = worker.await;
         }
-        let requests = self.requests();
-        if let Some(hold) = self.hold.take() {
-            hold.release().await?;
-        }
-        Ok(requests)
+        self.requests()
     }
 }
 
@@ -557,13 +554,6 @@ impl Drop for RequestCapture {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
-        }
-        if let Some(hold) = self.hold.take() {
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    let _ = hold.release().await;
-                });
-            }
         }
     }
 }
@@ -575,65 +565,6 @@ impl std::fmt::Debug for RequestCapture {
             .field("stats", &self.stats())
             .finish()
     }
-}
-
-/// Who keeps one session's Network domain enabled.
-#[derive(Default)]
-struct Holders {
-    captures: usize,
-    manual: bool,
-}
-
-type HolderMap = std::sync::Mutex<HashMap<String, Arc<Mutex<Holders>>>>;
-
-fn holders_for(session_id: &str) -> Arc<Mutex<Holders>> {
-    static HOLDERS: OnceLock<HolderMap> = OnceLock::new();
-    HOLDERS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .entry(session_id.to_owned())
-        .or_default()
-        .clone()
-}
-
-/// The async lock orders enable/disable commands for one session, so a late
-/// disable cannot land after a newer capture's enable.
-struct NetworkHold {
-    page: Page,
-}
-
-impl NetworkHold {
-    async fn acquire(page: &Page) -> Result<Self> {
-        let holders = holders_for(page.session().session_id());
-        let mut holders = holders.lock().await;
-        page.session().network_enable().await?;
-        holders.captures += 1;
-        Ok(Self { page: page.clone() })
-    }
-
-    async fn release(self) -> Result<()> {
-        let holders = holders_for(self.page.session().session_id());
-        let mut holders = holders.lock().await;
-        holders.captures = holders.captures.saturating_sub(1);
-        if holders.captures == 0 && !holders.manual {
-            self.page.session().network_disable().await?;
-        }
-        Ok(())
-    }
-}
-
-/// Backs [`Page::enable_request_capture`](crate::Page::enable_request_capture).
-pub(crate) async fn set_manual_capture(page: &Page, enabled: bool) -> Result<()> {
-    let holders = holders_for(page.session().session_id());
-    let mut holders = holders.lock().await;
-    if enabled {
-        page.session().network_enable().await?;
-    } else if holders.captures == 0 {
-        page.session().network_disable().await?;
-    }
-    holders.manual = enabled;
-    Ok(())
 }
 
 #[cfg(test)]

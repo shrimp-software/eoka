@@ -65,7 +65,7 @@ async fn main() -> Result<()> {
         println!("API response body: {body}");
     }
 
-    for request in capture.stop().await? {
+    for request in capture.stop().await {
         println!(
             "{:>4} {:<8} {:?} {}",
             request.method,
