@@ -15,6 +15,7 @@ fn test_build_full_script() {
 // `ownerDocument === document`) to hide chromedriver markers eoka never
 // produces. The flag still compiles but adds nothing.
 #[test]
+#[allow(deprecated)]
 fn test_aggressive_cdp_evasion_adds_nothing() {
     let config = StealthConfig {
         aggressive_cdp_evasion: true,

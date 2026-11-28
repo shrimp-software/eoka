@@ -8,11 +8,12 @@
 //!
 //! ## Features
 //!
-//! - **Stealth by Default** - Binary patching, 15 JS evasions, human-like mouse/typing
+//! - **Stealth by Default** - Native-shaped JS evasions, isolated-world locators,
+//!   CDP command filtering, human-like mouse/typing (binary patching is opt-in)
 //! - **Puppeteer-like API** - `click()`, `type()`, `wait_for()`, `screenshot()`, etc.
 //! - **Direct CDP Transport** - No separate WebDriver server or browser-driver dependency
 //! - **AI-Agent Ready** - PageState introspection, element indexing, text extraction
-//! - **Fast** - Lazy evasion scripts, mmap patching, stack-allocated paths
+//! - **Fast** - Lazy evasion scripts, one CDP writer task, cached isolated worlds
 //!
 //! ## Quick Start
 //!
@@ -21,7 +22,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> eoka::Result<()> {
-//!     // Launch browser (patches Chrome, applies evasions)
+//!     // Launch browser (applies evasions)
 //!     let browser = Browser::launch().await?;
 //!
 //!     // Create page and navigate
@@ -106,7 +107,9 @@ pub use download::{
 pub use element::{BoundingBox, Element};
 pub use error::{Error, ErrorCode, Result};
 pub use fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
-pub use network::{NetworkEvent, NetworkWatcher};
+pub use network::{
+    NetworkEvent, NetworkWatcher, RequestCapture, RequestCaptureOptions, RequestCaptureStats,
+};
 pub use page::{
     CaptureBodyError, CapturedFrameResponse, FrameResponseCapture, FrameResponseCaptureOptions,
     FrameResponseCaptureReport,
@@ -208,9 +211,13 @@ pub struct StealthConfig {
     /// Extra Chrome command-line arguments appended after standard stealth args.
     /// E.g. vec!["--use-fake-ui-for-media-stream".into()] to auto-grant camera.
     pub extra_args: Vec<String>,
-    /// Enable legacy, invasive CDP-marker hiding that proxies `window.document`
-    /// and patches Object reflection APIs. It can break modern SPAs, so it is
-    /// disabled by default. Prefer the normal WebDriver and fingerprint evasions.
+    /// Has no effect. It enabled a `window.document` Proxy that hid
+    /// ChromeDriver markers eoka never produces and broke `ownerDocument`
+    /// identity.
+    #[deprecated(
+        since = "0.11.0",
+        note = "has no effect; eoka produces no ChromeDriver markers"
+    )]
     pub aggressive_cdp_evasion: bool,
     /// Treat this as a session attached to a user-owned browser. When true,
     /// `Browser::new_page`/`new_blank_page`/`attach_page` skip injecting the
