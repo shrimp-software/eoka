@@ -30,6 +30,34 @@ pub struct Cookie {
     pub session: bool,
     #[serde(default)]
     pub same_site: Option<String>,
+    /// CHIPS partition. Chrome before ~119 sent a bare top-level-site string.
+    #[serde(default, deserialize_with = "partition_key")]
+    pub partition_key: Option<CookiePartitionKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CookiePartitionKey {
+    pub top_level_site: String,
+    #[serde(default)]
+    pub has_cross_site_ancestor: bool,
+}
+
+fn partition_key<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<CookiePartitionKey>, D::Error> {
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::String(site)) if !site.is_empty() => Some(CookiePartitionKey {
+                top_level_site: site,
+                has_cross_site_ancestor: false,
+            }),
+            Some(value @ serde_json::Value::Object(_)) => {
+                serde_json::from_value(value).map_err(serde::de::Error::custom)?
+            }
+            _ => None,
+        },
+    )
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -51,6 +79,44 @@ pub struct NetworkSetCookie {
     pub same_site: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub partition_key: Option<CookiePartitionKey>,
+}
+
+#[cfg(test)]
+mod cookie_tests {
+    use super::*;
+
+    #[test]
+    fn partition_key_accepts_object_legacy_string_and_absence() {
+        let base = serde_json::json!({"name":"n","value":"v","domain":"a.test","path":"/","expires":-1,"size":2,"httpOnly":false,"secure":true,"session":true});
+        let parse = |key: Option<serde_json::Value>| {
+            let mut cookie = base.clone();
+            if let Some(key) = key {
+                cookie["partitionKey"] = key;
+            }
+            serde_json::from_value::<Cookie>(cookie)
+                .unwrap()
+                .partition_key
+        };
+        assert_eq!(parse(None), None);
+        assert_eq!(
+            parse(Some(
+                serde_json::json!({"topLevelSite":"https://top.test","hasCrossSiteAncestor":true})
+            )),
+            Some(CookiePartitionKey {
+                top_level_site: "https://top.test".into(),
+                has_cross_site_ancestor: true
+            })
+        );
+        assert_eq!(
+            parse(Some(serde_json::json!("https://top.test"))),
+            Some(CookiePartitionKey {
+                top_level_site: "https://top.test".into(),
+                has_cross_site_ancestor: false
+            })
+        );
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]

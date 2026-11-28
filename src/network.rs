@@ -1,19 +1,23 @@
 //! Network Request Capture
 //!
-//! Provides streaming capture of HTTP requests and responses.
+//! [`RequestCapture`] (from [`Page::capture_requests`](crate::Page::capture_requests))
+//! records one page's HTTP requests and responses. [`NetworkWatcher`] is the
+//! lower-level engine for callers that feed it CDP events themselves.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{broadcast, mpsc, oneshot, watch, Mutex};
 
 use crate::cdp::transport::CdpMessage;
 use crate::cdp::types::{
     NetworkLoadingFailedEvent, NetworkLoadingFinishedEvent, NetworkRequestWillBeSentEvent,
     NetworkResponseReceivedEvent,
 };
-use crate::page::CapturedRequest;
-
+use crate::error::{Error, Result};
+use crate::page::{CapturedRequest, Page, ResponseBody};
 /// Network event types. `Debug` omits header values and URL queries.
 #[derive(Clone)]
 pub enum NetworkEvent {
@@ -92,15 +96,185 @@ impl std::fmt::Debug for NetworkEvent {
     }
 }
 
-/// Maximum number of in-flight requests tracked before evicting the oldest.
-/// Prevents unbounded memory growth from long-lived connections (WebSocket,
-/// SSE, long-polling) that never fire loadingFinished/loadingFailed.
-const MAX_INFLIGHT_REQUESTS: usize = 10_000;
+/// Default bound for [`NetworkWatcher`]. Long-lived connections (WebSocket,
+/// SSE, long-polling) never finish, so every store is bounded.
+const MAX_TRACKED_REQUESTS: usize = 10_000;
 
-/// Watches network events and provides a stream of captured requests
+/// Bounded request store, evicting the oldest entry (in-flight or complete).
+pub(crate) struct RequestStore {
+    capacity: usize,
+    next: u64,
+    /// Insertion order: sequence number -> request id.
+    order: BTreeMap<u64, String>,
+    /// Request id -> (sequence number, request).
+    requests: HashMap<String, (u64, CapturedRequest)>,
+    evicted: u64,
+    failed: u64,
+}
+
+impl RequestStore {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            next: 0,
+            order: BTreeMap::new(),
+            requests: HashMap::new(),
+            evicted: 0,
+            failed: 0,
+        }
+    }
+
+    /// Apply one CDP Network event. Returns whether it was a recognised
+    /// network event and, if any, the consumer-facing event.
+    pub(crate) fn apply(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> (bool, Option<NetworkEvent>) {
+        match self.apply_inner(method, params) {
+            Some(Some(event)) => (true, Some(event)),
+            Some(None) => (true, None),
+            None => (false, None),
+        }
+    }
+
+    fn apply_inner(
+        &mut self,
+        method: &str,
+        params: &serde_json::Value,
+    ) -> Option<Option<NetworkEvent>> {
+        match method {
+            "Network.requestWillBeSent" => {
+                let e: NetworkRequestWillBeSentEvent =
+                    serde_json::from_value(params.clone()).ok()?;
+                // Redirects re-fire with the same request_id; keep the original entry.
+                if self.requests.contains_key(&e.request_id) {
+                    tracing::trace!(
+                        "Ignoring redirect requestWillBeSent for {} (keeping original)",
+                        e.request_id
+                    );
+                    return Some(None);
+                }
+                while self.requests.len() >= self.capacity {
+                    let Some((_, oldest)) = self.order.pop_first() else {
+                        break;
+                    };
+                    self.requests.remove(&oldest);
+                    self.evicted += 1;
+                }
+                let request = CapturedRequest {
+                    request_id: e.request_id.clone(),
+                    url: e.request.url,
+                    method: e.request.method,
+                    headers: e.request.headers,
+                    post_data: e.request.post_data,
+                    resource_type: e.r#type,
+                    status: None,
+                    status_text: None,
+                    response_headers: None,
+                    mime_type: None,
+                    timestamp: e.timestamp,
+                    complete: false,
+                };
+                let sequence = self.next;
+                self.next += 1;
+                self.order.insert(sequence, e.request_id.clone());
+                self.requests
+                    .insert(e.request_id, (sequence, request.clone()));
+                Some(Some(NetworkEvent::RequestStarted(request)))
+            }
+            "Network.responseReceived" => {
+                let e: NetworkResponseReceivedEvent =
+                    serde_json::from_value(params.clone()).ok()?;
+                if let Some((_, req)) = self.requests.get_mut(&e.request_id) {
+                    req.status = Some(e.response.status);
+                    req.status_text = Some(e.response.status_text.clone());
+                    req.response_headers = Some(e.response.headers.clone());
+                    req.mime_type = e.response.mime_type.clone();
+                }
+                Some(Some(NetworkEvent::ResponseReceived {
+                    request_id: e.request_id,
+                    status: e.response.status,
+                    status_text: e.response.status_text,
+                    headers: e.response.headers,
+                    mime_type: e.response.mime_type,
+                }))
+            }
+            "Network.loadingFinished" => {
+                let e: NetworkLoadingFinishedEvent = serde_json::from_value(params.clone()).ok()?;
+                // Completed entries stay (up to the bound) so their bodies can be read.
+                if let Some((_, req)) = self.requests.get_mut(&e.request_id) {
+                    req.complete = true;
+                }
+                Some(Some(NetworkEvent::RequestCompleted {
+                    request_id: e.request_id,
+                    encoded_data_length: e.encoded_data_length,
+                }))
+            }
+            "Network.loadingFailed" => {
+                let e: NetworkLoadingFailedEvent = serde_json::from_value(params.clone()).ok()?;
+                if let Some((sequence, _)) = self.requests.remove(&e.request_id) {
+                    self.order.remove(&sequence);
+                    self.failed += 1;
+                }
+                Some(Some(NetworkEvent::RequestFailed {
+                    request_id: e.request_id,
+                    error_text: e.error_text,
+                    canceled: e.canceled.unwrap_or(false),
+                }))
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn get(&self, request_id: &str) -> Option<CapturedRequest> {
+        self.requests.get(request_id).map(|(_, r)| r.clone())
+    }
+
+    /// Retained requests, oldest first.
+    pub(crate) fn all(&self) -> Vec<CapturedRequest> {
+        self.order.values().filter_map(|id| self.get(id)).collect()
+    }
+
+    /// Remove and return completed requests, oldest first.
+    fn drain_completed(&mut self) -> Vec<CapturedRequest> {
+        let done: Vec<u64> = self
+            .order
+            .iter()
+            .filter(|(_, id)| self.requests.get(*id).is_some_and(|(_, r)| r.complete))
+            .map(|(sequence, _)| *sequence)
+            .collect();
+        done.into_iter()
+            .filter_map(|sequence| self.order.remove(&sequence))
+            .filter_map(|id| self.requests.remove(&id).map(|(_, r)| r))
+            .collect()
+    }
+
+    fn find(&self, predicate: &dyn Fn(&CapturedRequest) -> bool) -> Option<CapturedRequest> {
+        self.order
+            .values()
+            .filter_map(|id| self.requests.get(id))
+            .map(|(_, r)| r)
+            .find(|r| predicate(r))
+            .cloned()
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.order.clear();
+        self.requests.clear();
+    }
+}
+
+/// Watches network events and provides a stream of captured requests.
+///
+/// Feed it events with [`process_event`](Self::process_event). Use
+/// [`for_session`](Self::for_session) to ignore events from other CDP sessions;
+/// [`new`](Self::new) accepts every session. At most 10,000 requests are kept,
+/// evicting the oldest first. Prefer [`Page::capture_requests`](crate::Page::capture_requests),
+/// which subscribes and filters for you.
 pub struct NetworkWatcher {
-    /// In-flight requests (request_id -> CapturedRequest)
-    requests: Arc<Mutex<HashMap<String, CapturedRequest>>>,
+    session_id: Option<String>,
+    requests: Arc<Mutex<RequestStore>>,
     /// Channel to send events to consumers
     event_tx: mpsc::Sender<NetworkEvent>,
     /// Channel to receive events
@@ -108,153 +282,50 @@ pub struct NetworkWatcher {
 }
 
 impl NetworkWatcher {
-    /// Create a new NetworkWatcher
+    /// Create a watcher that accepts events from every CDP session.
     pub fn new() -> Self {
+        Self::with_filter(None, MAX_TRACKED_REQUESTS)
+    }
+
+    /// Create a watcher that ignores events not tagged with `session_id`
+    /// (for example from [`Session::session_id`](crate::cdp::Session::session_id)).
+    pub fn for_session(session_id: impl Into<String>) -> Self {
+        Self::with_filter(Some(session_id.into()), MAX_TRACKED_REQUESTS)
+    }
+
+    fn with_filter(session_id: Option<String>, capacity: usize) -> Self {
         let (event_tx, event_rx) = mpsc::channel(256);
         Self {
-            requests: Arc::new(Mutex::new(HashMap::new())),
+            session_id,
+            requests: Arc::new(Mutex::new(RequestStore::new(capacity))),
             event_tx,
             event_rx: Mutex::new(event_rx),
         }
     }
 
-    /// Process a CDP event
-    /// Returns true if the event was a network event that was processed
+    /// Process a CDP event.
+    /// Returns true if it was a network event for this watcher's session.
     pub async fn process_event(&self, event: &CdpMessage) -> bool {
-        if let CdpMessage::Event { method, params, .. } = event {
-            match method.as_str() {
-                "Network.requestWillBeSent" => {
-                    if let Ok(e) =
-                        serde_json::from_value::<NetworkRequestWillBeSentEvent>(params.clone())
-                    {
-                        self.on_request_will_be_sent(e).await;
-                        return true;
-                    }
-                }
-                "Network.responseReceived" => {
-                    if let Ok(e) =
-                        serde_json::from_value::<NetworkResponseReceivedEvent>(params.clone())
-                    {
-                        self.on_response_received(e).await;
-                        return true;
-                    }
-                }
-                "Network.loadingFinished" => {
-                    if let Ok(e) =
-                        serde_json::from_value::<NetworkLoadingFinishedEvent>(params.clone())
-                    {
-                        self.on_loading_finished(e).await;
-                        return true;
-                    }
-                }
-                "Network.loadingFailed" => {
-                    if let Ok(e) =
-                        serde_json::from_value::<NetworkLoadingFailedEvent>(params.clone())
-                    {
-                        self.on_loading_failed(e).await;
-                        return true;
-                    }
-                }
-                _ => {}
-            }
-        }
-        false
-    }
-
-    async fn on_request_will_be_sent(&self, event: NetworkRequestWillBeSentEvent) {
-        let request = {
-            let mut requests = self.requests.lock().await;
-
-            // Redirects re-fire with the same request_id; keep the original entry.
-            if requests.contains_key(&event.request_id) {
-                tracing::trace!(
-                    "Ignoring redirect requestWillBeSent for {} (keeping original)",
-                    event.request_id
-                );
-                return;
-            }
-
-            // Evict one entry if at capacity (memory safety valve).
-            if requests.len() >= MAX_INFLIGHT_REQUESTS {
-                if let Some(id) = requests.keys().next().cloned() {
-                    requests.remove(&id);
-                    tracing::debug!("Evicted a tracked request (cap={})", MAX_INFLIGHT_REQUESTS);
-                }
-            }
-
-            let request = CapturedRequest {
-                request_id: event.request_id.clone(),
-                url: event.request.url.clone(),
-                method: event.request.method.clone(),
-                headers: event.request.headers.clone(),
-                post_data: event.request.post_data.clone(),
-                resource_type: event.r#type.clone(),
-                status: None,
-                status_text: None,
-                response_headers: None,
-                mime_type: None,
-                timestamp: event.timestamp,
-                complete: false,
-            };
-            requests.insert(event.request_id.clone(), request.clone());
-            request
+        let CdpMessage::Event {
+            method,
+            params,
+            session_id,
+        } = event
+        else {
+            return false;
         };
-
-        // Send event
-        self.emit(NetworkEvent::RequestStarted(request));
-    }
-
-    async fn on_response_received(&self, event: NetworkResponseReceivedEvent) {
-        // Update the stored request
+        if self
+            .session_id
+            .as_ref()
+            .is_some_and(|wanted| session_id.as_ref() != Some(wanted))
         {
-            let mut requests = self.requests.lock().await;
-            if let Some(req) = requests.get_mut(&event.request_id) {
-                req.status = Some(event.response.status);
-                req.status_text = Some(event.response.status_text.clone());
-                req.response_headers = Some(event.response.headers.clone());
-                req.mime_type = event.response.mime_type.clone();
-            }
+            return false;
         }
-
-        // Send event
-        self.emit(NetworkEvent::ResponseReceived {
-            request_id: event.request_id,
-            status: event.response.status,
-            status_text: event.response.status_text,
-            headers: event.response.headers,
-            mime_type: event.response.mime_type,
-        });
-    }
-
-    async fn on_loading_finished(&self, event: NetworkLoadingFinishedEvent) {
-        // Mark complete rather than removing, so get_request() still returns it.
-        {
-            let mut requests = self.requests.lock().await;
-            if let Some(req) = requests.get_mut(&event.request_id) {
-                req.complete = true;
-            }
+        let (handled, emitted) = self.requests.lock().await.apply(method, params);
+        if let Some(event) = emitted {
+            self.emit(event);
         }
-
-        // Send event
-        self.emit(NetworkEvent::RequestCompleted {
-            request_id: event.request_id,
-            encoded_data_length: event.encoded_data_length,
-        });
-    }
-
-    async fn on_loading_failed(&self, event: NetworkLoadingFailedEvent) {
-        // Remove failed request
-        {
-            let mut requests = self.requests.lock().await;
-            requests.remove(&event.request_id);
-        }
-
-        // Send event
-        self.emit(NetworkEvent::RequestFailed {
-            request_id: event.request_id,
-            error_text: event.error_text,
-            canceled: event.canceled.unwrap_or(false),
-        });
+        handled
     }
 
     /// Emit an event to consumers without blocking the pump.
@@ -282,26 +353,217 @@ impl NetworkWatcher {
 
     /// Get a captured request by ID
     pub async fn get_request(&self, request_id: &str) -> Option<CapturedRequest> {
-        let requests = self.requests.lock().await;
-        requests.get(request_id).cloned()
+        self.requests.lock().await.get(request_id)
     }
 
-    /// Get all captured requests
+    /// Get all retained requests, oldest first.
     pub async fn get_all_requests(&self) -> Vec<CapturedRequest> {
-        let requests = self.requests.lock().await;
-        requests.values().cloned().collect()
+        self.requests.lock().await.all()
     }
 
     /// Clear all captured requests
     pub async fn clear(&self) {
-        let mut requests = self.requests.lock().await;
-        requests.clear();
+        self.requests.lock().await.clear();
     }
 }
 
 impl Default for NetworkWatcher {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Options for [`Page::capture_requests`](crate::Page::capture_requests).
+#[derive(Debug, Clone)]
+pub struct RequestCaptureOptions {
+    /// Maximum retained requests, in-flight or complete; the oldest is evicted
+    /// first. Defaults to 1000. Zero is treated as one.
+    pub max_requests: usize,
+}
+
+impl Default for RequestCaptureOptions {
+    fn default() -> Self {
+        Self { max_requests: 1000 }
+    }
+}
+
+/// Loss counters for a [`RequestCapture`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RequestCaptureStats {
+    /// Requests evicted to stay within `max_requests`.
+    pub evicted: u64,
+    /// Requests removed because loading failed or was canceled.
+    pub failed: u64,
+    /// CDP events missed because the capture fell behind the transport.
+    /// Nonzero means retained requests may be incomplete.
+    pub lost_events: u64,
+}
+
+struct Shared {
+    store: std::sync::Mutex<RequestStore>,
+    changed: watch::Sender<u64>,
+    lost: AtomicU64,
+    closed: AtomicBool,
+}
+
+impl Shared {
+    fn store(&self) -> std::sync::MutexGuard<'_, RequestStore> {
+        self.store.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// Requests made by one page's top-level CDP session, captured from
+/// `Network` events. Out-of-process iframes and workers have their own
+/// sessions and are not included.
+///
+/// Starting a capture enables the page's CDP Network domain. [`stop`](Self::stop)
+/// or Drop ends collection but leaves the domain enabled, because other
+/// features (such as [`Page::set_extra_headers`](crate::Page::set_extra_headers))
+/// rely on it and `Network.disable` discards their state.
+/// [`Page::disable_request_capture`](crate::Page::disable_request_capture)
+/// turns it off explicitly.
+pub struct RequestCapture {
+    shared: Arc<Shared>,
+    page: Page,
+    stop: Option<oneshot::Sender<()>>,
+    worker: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl RequestCapture {
+    pub(crate) async fn start(page: &Page, options: RequestCaptureOptions) -> Result<Self> {
+        let session = page.session();
+        let session_id = session.session_id().to_owned();
+        // Subscribe before enabling so no early event is missed.
+        let mut events = session.transport().subscribe();
+        session.network_enable().await?;
+        let (changed, _) = watch::channel(0);
+        let shared = Arc::new(Shared {
+            store: std::sync::Mutex::new(RequestStore::new(options.max_requests)),
+            changed,
+            lost: AtomicU64::new(0),
+            closed: AtomicBool::new(false),
+        });
+        let (stop, mut stopped) = oneshot::channel::<()>();
+        let worker_shared = shared.clone();
+        let worker = tokio::spawn(async move {
+            let pump = async {
+                loop {
+                    match events.recv().await {
+                        Ok(CdpMessage::Event {
+                            method,
+                            params,
+                            session_id: Some(source),
+                        }) if source == session_id && method.starts_with("Network.") => {
+                            if worker_shared.store().apply(&method, &params).0 {
+                                worker_shared
+                                    .changed
+                                    .send_modify(|version| *version = version.wrapping_add(1));
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            worker_shared.lost.fetch_add(skipped, Ordering::Relaxed);
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            };
+            let _ = futures_util::future::select(std::pin::pin!(pump), &mut stopped).await;
+            worker_shared.closed.store(true, Ordering::Release);
+            worker_shared
+                .changed
+                .send_modify(|version| *version = version.wrapping_add(1));
+        });
+        Ok(Self {
+            shared,
+            page: page.clone(),
+            stop: Some(stop),
+            worker: Some(worker),
+        })
+    }
+
+    /// Retained requests, oldest first, without removing them.
+    pub fn requests(&self) -> Vec<CapturedRequest> {
+        self.shared.store().all()
+    }
+
+    /// A retained request by its CDP request ID.
+    pub fn get(&self, request_id: &str) -> Option<CapturedRequest> {
+        self.shared.store().get(request_id)
+    }
+
+    /// Remove and return requests that finished loading, oldest first.
+    /// In-flight requests stay and keep receiving updates.
+    pub fn drain_completed(&self) -> Vec<CapturedRequest> {
+        self.shared.store().drain_completed()
+    }
+
+    /// Loss counters since the capture started.
+    pub fn stats(&self) -> RequestCaptureStats {
+        let store = self.shared.store();
+        RequestCaptureStats {
+            evicted: store.evicted,
+            failed: store.failed,
+            lost_events: self.shared.lost.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Wait until a retained request satisfies `predicate`, such as
+    /// `|r| r.url.ends_with("/api") && r.complete`, and return it.
+    pub async fn wait_for(
+        &self,
+        predicate: impl Fn(&CapturedRequest) -> bool,
+        timeout: Duration,
+    ) -> Result<CapturedRequest> {
+        let mut changes = self.shared.changed.subscribe();
+        tokio::time::timeout(timeout, async {
+            loop {
+                if let Some(found) = self.shared.store().find(&predicate) {
+                    return Ok(found);
+                }
+                if self.shared.closed.load(Ordering::Acquire) || changes.changed().await.is_err() {
+                    return Err(Error::transport("Request capture stopped"));
+                }
+            }
+        })
+        .await
+        .map_err(|_| Error::Timeout("No captured request matched before the deadline".into()))?
+    }
+
+    /// Body of a captured request, available once it is `complete` and while
+    /// capture is active. Chrome evicts bodies under memory pressure.
+    pub async fn response_body(&self, request_id: &str) -> Result<ResponseBody> {
+        self.page.get_response_body(request_id).await
+    }
+
+    /// Stop collecting and return retained requests, oldest first. The Network
+    /// domain stays enabled, so their bodies remain readable through
+    /// [`Page::get_response_body`](crate::Page::get_response_body).
+    pub async fn stop(mut self) -> Vec<CapturedRequest> {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.await;
+        }
+        self.requests()
+    }
+}
+
+impl Drop for RequestCapture {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+    }
+}
+
+impl std::fmt::Debug for RequestCapture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestCapture")
+            .field("retained", &self.shared.store().requests.len())
+            .field("stats", &self.stats())
+            .finish()
     }
 }
 
@@ -467,5 +729,86 @@ mod tests {
             .get_request(&format!("req-{}", N - 1))
             .await
             .is_some());
+    }
+
+    fn on_session(message: CdpMessage, id: &str) -> CdpMessage {
+        match message {
+            CdpMessage::Event { method, params, .. } => CdpMessage::Event {
+                method,
+                params,
+                session_id: Some(id.to_string()),
+            },
+            other => other,
+        }
+    }
+
+    /// Regression: the watcher accepted events from every CDP session.
+    #[tokio::test]
+    async fn test_for_session_ignores_other_sessions() {
+        let watcher = NetworkWatcher::for_session("mine");
+        let theirs = on_session(request_will_be_sent("a", "https://a.test/"), "theirs");
+        let untagged = request_will_be_sent("b", "https://b.test/");
+        let mine = on_session(request_will_be_sent("c", "https://c.test/"), "mine");
+        assert!(!watcher.process_event(&theirs).await);
+        assert!(!watcher.process_event(&untagged).await);
+        assert!(watcher.process_event(&mine).await);
+        let ids: Vec<_> = watcher
+            .get_all_requests()
+            .await
+            .into_iter()
+            .map(|r| r.request_id)
+            .collect();
+        assert_eq!(ids, ["c"]);
+    }
+
+    /// Regression: eviction removed an arbitrary HashMap entry instead of the
+    /// oldest, and completed requests were never removed at all.
+    #[test]
+    fn test_store_evicts_oldest_first_including_completed() {
+        let mut store = RequestStore::new(3);
+        let apply = |store: &mut RequestStore, message: CdpMessage| {
+            let CdpMessage::Event { method, params, .. } = message else {
+                unreachable!()
+            };
+            store.apply(&method, &params)
+        };
+        for i in 0..5 {
+            let id = format!("r{i}");
+            apply(
+                &mut store,
+                request_will_be_sent(&id, &format!("https://x.test/{i}")),
+            );
+            apply(
+                &mut store,
+                event(
+                    "Network.loadingFinished",
+                    serde_json::json!({"requestId": id, "timestamp": 2.0, "encodedDataLength": 1}),
+                ),
+            );
+        }
+        let ids: Vec<_> = store.all().into_iter().map(|r| r.request_id).collect();
+        assert_eq!(ids, ["r2", "r3", "r4"]);
+        assert_eq!(store.evicted, 2);
+
+        // A failed request frees its slot without disturbing the order.
+        apply(
+            &mut store,
+            event(
+                "Network.loadingFailed",
+                serde_json::json!({"requestId": "r3", "errorText": "net::ERR_FAILED"}),
+            ),
+        );
+        apply(&mut store, request_will_be_sent("r5", "https://x.test/5"));
+        let ids: Vec<_> = store.all().into_iter().map(|r| r.request_id).collect();
+        assert_eq!(ids, ["r2", "r4", "r5"]);
+        assert_eq!((store.evicted, store.failed), (2, 1));
+
+        let drained: Vec<_> = store
+            .drain_completed()
+            .into_iter()
+            .map(|r| r.request_id)
+            .collect();
+        assert_eq!(drained, ["r2", "r4"], "r5 is still in flight");
+        assert_eq!(store.all().len(), 1);
     }
 }
