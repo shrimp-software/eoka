@@ -53,7 +53,7 @@ async fn shuts_down_streams(shutdown: Shutdown) {
         Shutdown::ExplicitClose => transport.close().await.unwrap(),
     }
     tokio::time::timeout(Duration::from_secs(1), async {
-        while !transport.reader_handle.as_ref().unwrap().is_finished() {
+        while !transport.reader_handle.is_finished() {
             tokio::task::yield_now().await;
         }
     })
@@ -62,10 +62,7 @@ async fn shuts_down_streams(shutdown: Shutdown) {
     assert!(transport.is_closed());
 
     assert!(
-        matches!(events.recv().await, Ok(CdpMessage::Event { method, .. }) if method == "Test.queued")
-    );
-    assert!(
-        matches!(transport.recv_event().await, Some(CdpMessage::Event { method, .. }) if method == "Test.queued")
+        matches!(events.recv().await.as_deref(), Ok(CdpMessage::Event { method, .. }) if method == "Test.queued")
     );
     assert_eq!(
         requests.recv().await.unwrap().params["requestId"],
@@ -78,7 +75,6 @@ async fn shuts_down_streams(shutdown: Shutdown) {
             events.recv().await,
             Err(broadcast::error::RecvError::Closed)
         ));
-        assert!(transport.recv_event().await.is_none());
         assert!(requests.recv().await.is_none());
         assert!(responses.recv().await.is_none());
         assert!(matches!(
@@ -138,7 +134,7 @@ async fn reader_abort_shuts_down_socket_before_first_poll_with_writer_retained()
     let transport = Transport::build(None, stream, None, 1, false, false).unwrap();
     // No await between build and abort: this current-thread runtime cannot poll
     // the spawned reader before its abort request. Keep both socket owners.
-    transport.reader_handle.as_ref().unwrap().abort();
+    transport.reader_handle.abort();
     let _writer = transport.writer.lock().await;
     assert_peer_terminated(&mut peer).await;
     assert!(transport.is_closed());
@@ -179,23 +175,4 @@ async fn transport_drop_shuts_down_socket_with_writer_retained() {
     let _writer = writer.lock().await;
     drop(transport);
     assert_peer_terminated(&mut peer).await;
-}
-
-#[tokio::test]
-async fn try_recv_event_does_not_wait_for_a_blocked_recv_event() {
-    let (transport, _peer) = pending_test_peer().await;
-    let mut waiting = Box::pin(transport.recv_event());
-    poll_fn(|cx| {
-        assert!(matches!(waiting.as_mut().poll(cx), Poll::Pending));
-        Poll::Ready(())
-    })
-    .await;
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), transport.try_recv_event())
-            .await
-            .expect("nonblocking receive must not wait for the persistent receiver mutex")
-            .is_none()
-    );
-    drop(waiting);
-    transport.close().await.unwrap();
 }

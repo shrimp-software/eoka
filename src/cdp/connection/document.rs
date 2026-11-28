@@ -3,6 +3,61 @@
 use super::Session;
 use crate::cdp::types::*;
 use crate::Result;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// A per-call Runtime object group, released (best effort) on drop so remote
+/// objects do not accumulate in the page for the document's lifetime.
+pub(crate) struct ObjectGroup {
+    session: Session,
+    pub(crate) name: String,
+    active: bool,
+}
+
+impl ObjectGroup {
+    pub(crate) fn new(session: &Session) -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self {
+            session: session.clone(),
+            name: format!("eoka-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+            active: true,
+        }
+    }
+
+    /// Release now and report the outcome; dropping releases in the background.
+    pub(crate) async fn release(mut self) -> Result<()> {
+        release_group(&self.session, &self.name).await?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+async fn release_group(session: &Session, name: &str) -> Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        session.send::<_, serde_json::Value>(
+            "Runtime.releaseObjectGroup",
+            &serde_json::json!({ "objectGroup": name }),
+        ),
+    )
+    .await
+    .map_err(|_| crate::Error::cdp_msg("Object group cleanup timed out"))??;
+    Ok(())
+}
+
+impl Drop for ObjectGroup {
+    fn drop(&mut self) {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        if !self.active {
+            return;
+        }
+        let session = self.session.clone();
+        let name = std::mem::take(&mut self.name);
+        // A navigated or closed page has already discarded the group.
+        runtime.spawn(async move { drop(release_group(&session, &name).await) });
+    }
+}
 
 impl Session {
     pub(crate) async fn create_isolated_world(&self, frame_id: &str) -> Result<i64> {
@@ -84,66 +139,18 @@ impl Session {
         Ok(result.node_ids)
     }
 
-    /// Get the box model for an element
-    pub(crate) async fn get_box_model(&self, node_id: i32) -> Result<BoxModel> {
-        let result: DOMGetBoxModelResult = self
-            .send(
-                "DOM.getBoxModel",
-                &DOMGetBoxModel {
-                    node_id: Some(node_id),
-                },
-            )
-            .await?;
-        Ok(result.model)
-    }
-
-    /// Get outer HTML of an element
-    pub(crate) async fn get_outer_html(&self, node_id: i32) -> Result<String> {
-        let result: DOMGetOuterHTMLResult = self
-            .send(
-                "DOM.getOuterHTML",
-                &DOMGetOuterHTML {
-                    node_id: Some(node_id),
-                },
-            )
-            .await?;
-        Ok(result.outer_html)
-    }
-
-    /// Resolve a DOM node to a Runtime remote object ID
-    pub(crate) async fn resolve_node(&self, node_id: i32) -> Result<String> {
-        let result: DOMResolveNodeResult = self
-            .send(
-                "DOM.resolveNode",
-                &DOMResolveNode {
-                    node_id: Some(node_id),
-                    object_group: Some("eoka".to_string()),
-                },
-            )
-            .await?;
-        result
-            .object
-            .object_id
-            .ok_or_else(|| crate::error::Error::cdp("DOM.resolveNode", -1, "No object_id returned"))
-    }
-
-    /// Call a function on a remote object and return the result by value
-    pub(crate) async fn call_function_on(
-        &self,
-        object_id: &str,
-        function_declaration: &str,
-    ) -> Result<RuntimeEvaluateResult> {
-        self.call_function_on_impl(object_id, function_declaration, true)
-            .await
-    }
-
     /// Evaluate JavaScript and return a remote object reference (not by value).
+    /// The result, and objects derived from it such as `Runtime.getProperties`
+    /// entries, live in a per-call group released when the guard drops.
     pub(crate) async fn evaluate_for_remote_object(
         &self,
         expression: &str,
-    ) -> Result<RuntimeEvaluateResult> {
-        self.evaluate_impl(expression, false, Some("eoka"), true)
-            .await
+    ) -> Result<(RuntimeEvaluateResult, ObjectGroup)> {
+        let group = ObjectGroup::new(self);
+        let result = self
+            .evaluate_impl(expression, false, Some(&group.name), true)
+            .await?;
+        Ok((result, group))
     }
 
     /// Convert a remote object ID to a DOM node_id via DOM.requestNode
@@ -174,31 +181,6 @@ impl Session {
             )
             .await?;
         Ok(result.result)
-    }
-
-    async fn call_function_on_impl(
-        &self,
-        object_id: &str,
-        function_declaration: &str,
-        return_by_value: bool,
-    ) -> Result<RuntimeEvaluateResult> {
-        let result: RuntimeCallFunctionOnResult = self
-            .send(
-                "Runtime.callFunctionOn",
-                &RuntimeCallFunctionOn {
-                    function_declaration: function_declaration.to_string(),
-                    object_id: Some(object_id.to_string()),
-                    arguments: None,
-                    silent: None,
-                    return_by_value: Some(return_by_value),
-                    await_promise: Some(true),
-                },
-            )
-            .await?;
-        Ok(RuntimeEvaluateResult {
-            result: result.result,
-            exception_details: result.exception_details,
-        })
     }
 
     /// Evaluate JavaScript expression and return the result by value

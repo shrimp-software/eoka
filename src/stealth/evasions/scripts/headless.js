@@ -1,14 +1,9 @@
-// Real headless/new and headed Chrome both report the native pair
-// (reduce=false, no-preference=true). Wrapping matchMedia used to fabricate
-// an impossible both-false state, so it is intentionally left untouched.
-// The pointer/hover mismatch real headless X servers have is fixed natively
-// with `--blink-settings=primaryPointerType=4,...` in the launch arguments.
+// matchMedia (reduced motion, pointer/hover) stays native; pointer and hover
+// are pinned by `--blink-settings` in the launch arguments.
 
-// PerformanceObserver is fully implemented in current headless Chrome. The one
-// observable difference older headless builds had was an empty
-// `supportedEntryTypes`, which a detector can read without constructing an
-// observer. Restore the desktop list only in that case; never stub observe()
-// or delivery, because a silent observer is itself a headless signal.
+// Older headless builds had an empty `PerformanceObserver.supportedEntryTypes`.
+// Restore the desktop list only then; never stub observe() or delivery, since a
+// silent observer is itself a headless signal.
 try {
     if (typeof PerformanceObserver === 'function') {
         const types = PerformanceObserver.supportedEntryTypes;
@@ -18,33 +13,23 @@ try {
                 'interaction-contentful-paint', 'largest-contentful-paint', 'layout-shift',
                 'long-animation-frame', 'longtask', 'mark', 'measure', 'navigation', 'paint',
                 'resource', 'soft-navigation', 'visibility-state']);
-            Object.defineProperty(PerformanceObserver, 'supportedEntryTypes', {
-                get: _eoka_mark(() => desktop, 'get supportedEntryTypes'),
-                configurable: true
-            });
+            _eoka_patchGetter(PerformanceObserver, 'supportedEntryTypes', () => () => desktop);
         }
     }
 } catch(e) {}
 
-// `isSecureContext` must stay native: it follows the scheme (and sandbox
-// flags), so forcing it true on an http:// page would contradict
-// location.protocol. Only repair the impossible https-but-insecure state, and
-// only in the top-level frame: an https iframe under an http (or sandboxed)
-// ancestor is genuinely not a secure context and lacks every [SecureContext]
-// API, so claiming true there would contradict the rest of the frame.
+// `isSecureContext` follows the scheme and ancestors, so it stays native. Only
+// the impossible https-but-insecure top-level frame is repaired; an https
+// iframe under an http ancestor is genuinely insecure.
 try {
     if (window.isSecureContext === false && window.location.protocol === 'https:' &&
             window.top === window) {
-        Object.defineProperty(window, 'isSecureContext', {
-            get: _eoka_mark(() => true, 'get isSecureContext'),
-            configurable: true
-        });
+        _eoka_patchGetter(window, 'isSecureContext', () => () => true);
     }
 } catch(e) {}
 
-// `window.sandbox` does not exist in stock Chrome. This script runs at
-// document start, before page globals exist, so any value here comes from the
-// automation environment and is safe to remove.
+// `window.sandbox` does not exist in stock Chrome; at document start any value
+// comes from the automation environment.
 try {
     if ('sandbox' in window) {
         delete window.sandbox;
@@ -54,9 +39,6 @@ try {
 // Ensure window.origin is correct
 try {
     if (!window.origin || window.origin === 'null') {
-        Object.defineProperty(window, 'origin', {
-            get: _eoka_mark(function() { return window.location.origin; }, 'get origin'),
-            configurable: true
-        });
+        _eoka_patchGetter(window, 'origin', () => () => window.location.origin);
     }
 } catch(e) {}

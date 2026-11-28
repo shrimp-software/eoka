@@ -176,7 +176,11 @@ impl Page {
             .await
     }
 
-    /// Retry an operation multiple times with delays between attempts
+    /// Retry an operation multiple times with delays between attempts.
+    ///
+    /// Only errors for which [`Error::is_retryable`] holds are retried; any
+    /// other error is returned at once. An action error is retried only when
+    /// no input was sent, so a retry never repeats input that may have landed.
     pub async fn with_retry<F, Fut, T>(
         &self,
         attempts: u32,
@@ -188,25 +192,24 @@ impl Page {
         Fut: std::future::Future<Output = Result<T>>,
     {
         let attempts = attempts.max(1);
-        let mut last_error = String::new();
-
-        for attempt in 1..=attempts {
+        let mut attempt = 1;
+        loop {
             match operation().await {
                 Ok(result) => return Ok(result),
-                Err(e @ Error::Action { .. }) => return Err(e),
-                Err(e) => {
-                    last_error = e.to_string();
-                    if attempt < attempts {
-                        sleep_ms(delay_ms).await;
-                    }
+                Err(error) if !error.is_retryable() => return Err(error),
+                Err(error) if attempt >= attempts => {
+                    return Err(Error::RetryExhausted {
+                        attempts,
+                        last_error: error.to_string(),
+                        source: Box::new(error),
+                    })
+                }
+                Err(_) => {
+                    attempt += 1;
+                    sleep_ms(delay_ms).await;
                 }
             }
         }
-
-        Err(Error::RetryExhausted {
-            attempts,
-            last_error,
-        })
     }
 }
 

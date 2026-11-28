@@ -91,6 +91,24 @@ pub enum RecordingError {
     Core(#[from] Error),
 }
 
+impl From<RecordingError> for Error {
+    /// Folds a recording failure into the crate error so `?` composes.
+    /// Protocol failures pass through; the rest become [`Error::Coded`].
+    fn from(error: RecordingError) -> Self {
+        use crate::ErrorCode;
+        let code = match &error {
+            RecordingError::Core(inner) => return inner.clone(),
+            RecordingError::Unsupported(_) => ErrorCode::Unsupported,
+            RecordingError::Precondition(_) => ErrorCode::PreconditionFailed,
+            RecordingError::AlreadyActive => ErrorCode::Busy,
+            RecordingError::InvalidOptions(_) => ErrorCode::InvalidArgument,
+            RecordingError::InvalidState(_) => ErrorCode::InvalidState,
+            RecordingError::CleanupUncertain(_) => ErrorCode::CleanupUncertain,
+        };
+        Error::coded(code, error.to_string())
+    }
+}
+
 pub(crate) type RecordingSlot = Arc<Mutex<Option<Arc<RecordingState>>>>;
 type RecordingRegistry = HashMap<String, HashMap<String, Weak<Mutex<Option<Arc<RecordingState>>>>>>;
 
@@ -239,7 +257,7 @@ impl RecordingState {
                         "Recording connection disconnected",
                     )))
                 } else {
-                    match event {
+                    match event.as_ref().map(|event| event.as_deref()) {
                         Ok(Ok(CdpMessage::Event {
                             method,
                             params,

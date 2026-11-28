@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use eoka::{Action, ActionOptions, ActionOutcome, DispatchState, Error, Expectation, LocatorSpec};
 
@@ -228,5 +228,241 @@ async fn history_without_an_entry_fails_before_dispatch() {
     let receipt = page.act(Action::Back, options()).await.unwrap();
     assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
     assert_eq!(receipt.verification.as_deref(), Some("document_ready"));
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn find_by_text_returns_innermost_static_match() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    page.execute("document.body.innerHTML=`<div id=app><div id=wrap><span id=target>Sign in</span></div><p>Other</p></div>`").await.unwrap();
+    let found = page.find_by_text("Sign in").await.unwrap();
+    assert_eq!(
+        found.get_attribute("id").await.unwrap().as_deref(),
+        Some("target")
+    );
+    let all = page.find_all_by_text("Sign in").await.unwrap();
+    assert_eq!(all.len(), 1, "ancestors must not be returned");
+    // Quotes and template syntax are data, not code.
+    page.execute(r"document.body.innerHTML=`<p id=q>it's \${x}</p>`")
+        .await
+        .unwrap();
+    let quoted = page.find_by_text("it's ${x}").await.unwrap();
+    assert_eq!(
+        quoted.get_attribute("id").await.unwrap().as_deref(),
+        Some("q")
+    );
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn fill_reports_a_masked_value_before_the_deadline() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    page.execute("document.body.innerHTML=`<input id=phone>`;document.querySelector('#phone').addEventListener('input',e=>{e.target.value=e.target.value.replace(/\\D/g,'')})").await.unwrap();
+    let started = std::time::Instant::now();
+    let error = page
+        .act(
+            Action::Fill {
+                target: LocatorSpec::css("#phone"),
+                value: "12ab".into(),
+                input_mode: Default::default(),
+            },
+            ActionOptions {
+                timeout_ms: 20_000,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "waited out the deadline"
+    );
+    match error {
+        Error::Action { code, source, .. } => {
+            assert_eq!(code, "value_mismatch");
+            let text = source.to_string();
+            assert!(
+                !text.contains("12ab"),
+                "value leaked into the error: {text}"
+            );
+            assert!(matches!(
+                *source,
+                Error::ValueMismatch {
+                    expected_chars: 4,
+                    actual_chars: 2,
+                    ..
+                }
+            ));
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn goto_to_an_attachment_fails_fast_as_aborted() {
+    let fixture = support::HttpFixture::start(|_| async {
+        support::Response {
+            status: "200 OK",
+            headers: vec![
+                ("Content-Type".into(), "application/octet-stream".into()),
+                (
+                    "Content-Disposition".into(),
+                    "attachment; filename=x.bin".into(),
+                ),
+            ],
+            body: vec![0; 16],
+            body_gate: None,
+        }
+    })
+    .await;
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    let started = std::time::Instant::now();
+    let error = page.goto(&fixture.url).await.unwrap_err();
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    assert!(
+        matches!(&error, Error::Action { code, .. } if code == "navigation_aborted"),
+        "{error:?}"
+    );
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn expectation_survives_a_navigation_started_by_the_click() {
+    let fixture = support::HttpFixture::start(|request| async move {
+        if request.target.starts_with("/next") {
+            support::Response::html("<h1 id=done>Next page</h1>")
+        } else {
+            support::Response::html("<a id=go href=/next>Go</a>")
+        }
+    })
+    .await;
+    let browser = support::browser().await;
+    let page = browser.new_page(&fixture.url).await.unwrap();
+    let receipt = page
+        .act(
+            Action::Click {
+                target: LocatorSpec::css("#go"),
+                human: false,
+                double: false,
+            },
+            ActionOptions {
+                expect: Some(Expectation::Visible {
+                    target: LocatorSpec::css("#done"),
+                }),
+                destination: eoka::Destination::Current,
+                timeout_ms: 10_000,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn with_retry_stops_on_permanent_errors() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    let calls = std::sync::atomic::AtomicU32::new(0);
+    let error = page
+        .with_retry(5, 1, || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), _>(Error::InvalidUrl("bad".into()))
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(error, Error::InvalidUrl(_)));
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let calls = std::sync::atomic::AtomicU32::new(0);
+    let error = page
+        .with_retry(3, 1, || async {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err::<(), _>(Error::Timeout("slow".into()))
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(
+        matches!(error, Error::RetryExhausted { attempts: 3, ref source, .. } if matches!(**source, Error::Timeout(_)))
+    );
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn locator_covers_hover_focus_type_and_submit() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    page.execute("document.body.innerHTML=`<form id=f onsubmit='event.preventDefault();document.querySelector(\"#h\").textContent=\"sent\"'><input id=q></form><div id=h>hover</div>`").await.unwrap();
+    let receipt = page.locator("#h").hover(options()).await.unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    let receipt = page.locator("#q").focus(options()).await.unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    page.locator("#q")
+        .type_text(
+            "abc",
+            ActionOptions {
+                expect: Some(Expectation::Value {
+                    target: LocatorSpec::css("#q"),
+                    value: "abc".into(),
+                }),
+                ..options()
+            },
+        )
+        .await
+        .unwrap();
+    page.locator("#q")
+        .submit(ActionOptions {
+            expect: Some(Expectation::Text {
+                target: LocatorSpec::css("#h"),
+                value: "sent".into(),
+                contains: false,
+            }),
+            ..options()
+        })
+        .await
+        .unwrap();
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn locators_run_outside_the_page_world() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    // A page that watches or sabotages the DOM APIs locators use.
+    page.execute("document.body.innerHTML='<button id=go onclick=\"this.textContent=\\'done\\'\">Go</button>';window.calls=0;for(const name of ['querySelectorAll','elementFromPoint']){const original=Document.prototype[name];Document.prototype[name]=function(...args){window.calls++;return name==='querySelectorAll'?[]:original.apply(this,args)}}").await.unwrap();
+    let receipt = page
+        .locator("#go")
+        .click(ActionOptions {
+            expect: Some(Expectation::Text {
+                target: LocatorSpec::css("#go"),
+                value: "done".into(),
+                contains: false,
+            }),
+            ..options()
+        })
+        .await
+        .unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    assert_eq!(page.evaluate::<u32>("window.calls").await.unwrap(), 0);
+    // After a navigation the cached world is gone; the next locator recovers.
+    page.execute("location.reload()").await.unwrap();
+    page.wait(300).await;
+    page.execute("document.body.innerHTML='<p id=again>x</p>'")
+        .await
+        .unwrap();
+    assert!(page.locator("#again").state().await.unwrap().is_some());
     browser.close().await.unwrap();
 }

@@ -3,15 +3,17 @@
 //! Manages browser and page sessions over the CDP transport.
 
 mod document;
+pub(crate) use document::ObjectGroup;
 mod input;
 mod network;
 mod page;
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
-use super::transport::Transport;
+use super::transport::{TargetLifecycle, Transport};
 use super::types::*;
 use crate::error::Result;
 use crate::page::HeldInputState;
@@ -50,21 +52,103 @@ fn state_for_target(
     state
 }
 
+async fn attach_session(
+    transport: &Arc<Transport>,
+    targets: &TargetRegistry,
+    target_id: &str,
+) -> Result<Session> {
+    let session_id = transport.attach_to_target(target_id).await?;
+    Ok(Session {
+        transport: Arc::clone(transport),
+        session_id,
+        target_id: target_id.to_string(),
+        target: state_for_target(targets, target_id, transport),
+        targets: Arc::clone(targets),
+    })
+}
+
+/// Release retained state for a target that no longer exists.
+async fn remove_target_state(registry: &TargetRegistry, target_id: &str) {
+    let state = registry
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(target_id);
+    if let Some(state) = state {
+        if let Some(monitor) = state.monitor.lock().await.as_ref() {
+            monitor.closed();
+        }
+    }
+}
+
+/// Upper bound for the existence probe after a session detaches.
+const TARGET_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Remove per-target state when Chrome destroys a target, whoever closed it.
+/// A detached session alone does not prove the target is gone (eoka detaches
+/// its own helper sessions), so detachment of a known target is confirmed with
+/// `Target.getTargetInfo`. Holds only weak references.
+fn spawn_target_lifecycle(transport: &Arc<Transport>, registry: &TargetRegistry) {
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        return;
+    };
+    let mut events = transport.watch_target_lifecycle();
+    let transport = Arc::downgrade(transport);
+    let registry = Arc::downgrade(registry);
+    runtime.spawn(async move {
+        while let Some(event) = events.recv().await {
+            let Some(targets) = registry.upgrade() else {
+                break;
+            };
+            let target_id = match event {
+                TargetLifecycle::Destroyed { target_id } => target_id,
+                TargetLifecycle::Detached { target_id } => {
+                    let known = targets
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .contains_key(&target_id);
+                    if !known || !target_is_gone(&transport, &target_id).await {
+                        continue;
+                    }
+                    target_id
+                }
+            };
+            remove_target_state(&targets, &target_id).await;
+        }
+    });
+}
+
+async fn target_is_gone(transport: &Weak<Transport>, target_id: &str) -> bool {
+    let Some(transport) = transport.upgrade() else {
+        return false;
+    };
+    let params = serde_json::json!({"targetId": target_id});
+    let probe = transport.send::<_, serde_json::Value>("Target.getTargetInfo", &params);
+    // -32602 is Chrome's "No target with given id found".
+    matches!(
+        tokio::time::timeout(TARGET_PROBE_TIMEOUT, probe).await,
+        Ok(Err(crate::Error::Cdp {
+            code: Some(-32602),
+            ..
+        }))
+    )
+}
+
 /// A CDP connection to Chrome
 pub struct Connection {
     transport: Arc<Transport>,
     /// Target state survives dropped Page handles, including failed header cleanup.
-    /// Explicit target closure or connection teardown releases the retained state.
+    /// Target closure (by eoka, the site or Chrome) or connection teardown
+    /// releases the retained state.
     targets: TargetRegistry,
 }
 
 impl Connection {
     /// Create a new connection wrapping a transport
     pub(crate) fn new(transport: Transport) -> Self {
-        Self {
-            transport: Arc::new(transport),
-            targets: Arc::new(Mutex::new(HashMap::new())),
-        }
+        let transport = Arc::new(transport);
+        let targets: TargetRegistry = Arc::new(Mutex::new(HashMap::new()));
+        spawn_target_lifecycle(&transport, &targets);
+        Self { transport, targets }
     }
 
     /// Get a reference to the transport
@@ -102,24 +186,7 @@ impl Connection {
 
     /// Attach to a target and get a session
     pub(crate) async fn attach_to_target(&self, target_id: &str) -> Result<Session> {
-        let result: TargetAttachToTargetResult = self
-            .transport
-            .send(
-                "Target.attachToTarget",
-                &TargetAttachToTarget {
-                    target_id: target_id.to_string(),
-                    flatten: Some(true),
-                },
-            )
-            .await?;
-
-        Ok(Session {
-            transport: Arc::clone(&self.transport),
-            session_id: result.session_id,
-            target_id: target_id.to_string(),
-            target: state_for_target(&self.targets, target_id, &self.transport),
-            targets: Arc::clone(&self.targets),
-        })
+        attach_session(&self.transport, &self.targets, target_id).await
     }
 
     /// Close a target
@@ -143,7 +210,7 @@ impl Connection {
         match result {
             Ok(result) => {
                 if result.success {
-                    self.remove_target(target_id).await;
+                    remove_target_state(&self.targets, target_id).await;
                 }
                 cleanup?;
                 Ok(result.success)
@@ -164,19 +231,6 @@ impl Connection {
             .send("Target.getTargets", &TargetGetTargets {})
             .await?;
         Ok(result.target_infos)
-    }
-
-    async fn remove_target(&self, target_id: &str) {
-        let state = self
-            .targets
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .remove(target_id);
-        if let Some(state) = state {
-            if let Some(monitor) = state.monitor.lock().await.as_ref() {
-                monitor.closed();
-            }
-        }
     }
 
     /// Activate (focus) a target
@@ -353,7 +407,9 @@ impl Session {
 
     pub(crate) async fn monitor_network(&self, fresh: bool) -> Result<()> {
         let mut monitor = self.target.monitor.lock().await;
-        if monitor.is_none() {
+        // A failed monitor (detached session, crash, overflow) never recovers;
+        // replace it. Dropping the old one detaches its private session.
+        if monitor.as_ref().is_none_or(|monitor| monitor.failed()) {
             *monitor = Some(Arc::new(
                 super::network_idle::NetworkMonitor::start(&self.transport, &self.target_id, fresh)
                     .await?,
@@ -377,23 +433,7 @@ impl Session {
     }
 
     pub(crate) async fn attach_frame_target(&self, target_id: &str) -> Result<Session> {
-        let result: TargetAttachToTargetResult = self
-            .transport
-            .send(
-                "Target.attachToTarget",
-                &TargetAttachToTarget {
-                    target_id: target_id.to_string(),
-                    flatten: Some(true),
-                },
-            )
-            .await?;
-        Ok(Session {
-            transport: Arc::clone(&self.transport),
-            session_id: result.session_id,
-            target_id: target_id.to_string(),
-            target: state_for_target(&self.targets, target_id, &self.transport),
-            targets: Arc::clone(&self.targets),
-        })
+        attach_session(&self.transport, &self.targets, target_id).await
     }
 
     pub(crate) async fn detach(&self) -> Result<()> {
@@ -455,3 +495,6 @@ async fn owned_teardown<T: Send + 'static>(
         )
     })?
 }
+
+#[cfg(test)]
+mod tests;

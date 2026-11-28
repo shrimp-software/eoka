@@ -12,7 +12,10 @@ use crate::error::{Error, Result};
 use crate::Redacted;
 
 /// Browser cookie (simplified, serializable). `Debug` omits the value.
-#[derive(Clone, Serialize, Deserialize)]
+///
+/// A `domain` with a leading dot is a domain cookie that also covers
+/// subdomains; without one the cookie is host-only, as Chrome reports it.
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct SessionCookie {
     /// Cookie name.
     pub name: String,
@@ -30,6 +33,43 @@ pub struct SessionCookie {
     pub same_site: Option<String>,
     /// Expiry as a Unix timestamp in seconds, or `None` for a session cookie.
     pub expires: Option<f64>,
+    /// CHIPS partition for a `Partitioned` cookie, or `None` for an
+    /// unpartitioned one. Missing in session files written before 0.11.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition_key: Option<CookiePartitionKey>,
+}
+
+/// The partition a `Partitioned` (CHIPS) cookie is stored under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CookiePartitionKey {
+    /// Top-level site the cookie was set under, such as `https://example.com`.
+    pub top_level_site: String,
+    /// Whether the cookie was set in a frame with a cross-site ancestor.
+    #[serde(default)]
+    pub has_cross_site_ancestor: bool,
+}
+
+impl CookiePartitionKey {
+    /// Whether a top-level request to `target` would use this partition.
+    /// Fails closed: anything not provably the same site is a mismatch.
+    fn matches_top_level(&self, target: &RequestTarget<'_>) -> bool {
+        if self.has_cross_site_ancestor {
+            return false;
+        }
+        let Some((scheme, host)) = self.top_level_site.split_once("://") else {
+            return false;
+        };
+        let secure = match scheme.to_ascii_lowercase().as_str() {
+            "https" => true,
+            "http" => false,
+            _ => return false,
+        };
+        let host = host.strip_suffix('/').unwrap_or(host);
+        secure == target.secure
+            && !host.is_empty()
+            && !host.contains([':', '/', '@'])
+            && domain_matches(&target.host, &format!(".{host}"))
+    }
 }
 
 /// Exported browser session. `Debug` omits cookie values, header values and URL queries.
@@ -77,6 +117,7 @@ impl fmt::Debug for SessionCookie {
             .field("http_only", &self.http_only)
             .field("same_site", &self.same_site)
             .field("expires", &self.expires)
+            .field("partition_key", &self.partition_key)
             .finish()
     }
 }
@@ -150,6 +191,8 @@ impl BrowserSession {
 
     /// Cookies a browser would send to `url`, longest path first (RFC 6265 §5.4):
     /// matching domain and path, not expired, and `Secure` only over https/wss.
+    /// A partitioned cookie is included only when its partition is the top-level
+    /// site of `url` itself, as for a first-party request.
     ///
     /// Fails with [`Error::InvalidUrl`] for a URL that cannot be parsed safely,
     /// including other schemes and non-ASCII hosts, because a mistaken host would
@@ -176,6 +219,9 @@ impl BrowserSession {
                     && (target.secure || !c.secure)
                     && c.expires
                         .is_none_or(|expires| expires < 0.0 || expires > now)
+                    && c.partition_key
+                        .as_ref()
+                        .is_none_or(|key| key.matches_top_level(&target))
             })
             .collect();
         cookies.sort_by_key(|c| std::cmp::Reverse(c.path.len()));
@@ -291,12 +337,13 @@ fn header_safe(cookie: &SessionCookie) -> bool {
         && !cookie.value.bytes().any(unsafe_byte)
 }
 
-fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+/// Atomically writes `contents` to `path`, readable only by the owner.
+pub(crate) fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
     let name = path
         .file_name()
-        .ok_or_else(|| std::io::Error::other("Session path has no file name"))?
+        .ok_or_else(|| std::io::Error::other("Path has no file name"))?
         .to_string_lossy();
     let temporary = path.with_file_name(format!(".{name}.{:016x}.tmp", fastrand::u64(..)));
     let mut options = std::fs::OpenOptions::new();
@@ -327,14 +374,10 @@ mod tests {
     fn test_browser_state_round_trips_storage_and_http_only_cookie() {
         let state = BrowserState {
             cookies: vec![SessionCookie {
-                name: "session".to_string(),
-                value: "secret".to_string(),
-                domain: ".example.com".to_string(),
-                path: "/".to_string(),
                 secure: true,
                 http_only: true,
                 same_site: Some("Lax".to_string()),
-                expires: None,
+                ..cookie("session", "secret", ".example.com", "/")
             }],
             local_storage: HashMap::from([("token".to_string(), "value".to_string())]),
             session_storage: HashMap::from([("tab".to_string(), "value".to_string())]),
@@ -355,36 +398,9 @@ mod tests {
     fn test_cookies_for_domain() {
         let session = BrowserSession {
             cookies: vec![
-                SessionCookie {
-                    name: "site1".to_string(),
-                    value: "v1".to_string(),
-                    domain: "example.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                },
-                SessionCookie {
-                    name: "site2".to_string(),
-                    value: "v2".to_string(),
-                    domain: "other.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                },
-                SessionCookie {
-                    name: "sub".to_string(),
-                    value: "v3".to_string(),
-                    domain: ".example.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                },
+                cookie("site1", "v1", "example.com", "/"),
+                cookie("site2", "v2", "other.com", "/"),
+                cookie("sub", "v3", ".example.com", "/"),
             ],
             user_agent: String::new(),
             url: String::new(),
@@ -414,10 +430,7 @@ mod tests {
             value: value.to_string(),
             domain: domain.to_string(),
             path: path.to_string(),
-            secure: false,
-            http_only: false,
-            same_site: None,
-            expires: None,
+            ..Default::default()
         }
     }
 
@@ -691,27 +704,9 @@ mod tests {
         let session = BrowserSession {
             cookies: vec![
                 // Host-only cookie: stored domain has no leading dot.
-                SessionCookie {
-                    name: "host".to_string(),
-                    value: "1".to_string(),
-                    domain: "example.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                },
+                cookie("host", "1", "example.com", "/"),
                 // Domain cookie: stored domain has a leading dot.
-                SessionCookie {
-                    name: "dom".to_string(),
-                    value: "2".to_string(),
-                    domain: ".example.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                },
+                cookie("dom", "2", ".example.com", "/"),
             ],
             user_agent: String::new(),
             url: String::new(),
@@ -739,5 +734,47 @@ mod tests {
         // Suffix that is not a dot-boundary subdomain matches neither.
         let bad = names("badexample.com");
         assert!(bad.is_empty());
+    }
+
+    #[test]
+    fn test_session_files_without_partition_key_still_load() {
+        let json = r#"{"name":"a","value":"1","domain":"x.test","path":"/","secure":false,"http_only":false,"same_site":null,"expires":null}"#;
+        let cookie: SessionCookie = serde_json::from_str(json).unwrap();
+        assert_eq!(cookie.partition_key, None);
+        assert!(!serde_json::to_string(&cookie)
+            .unwrap()
+            .contains("partition_key"));
+    }
+
+    /// A partitioned cookie is sent only to a first-party request for its
+    /// partition's top-level site, never to its host from another site.
+    #[test]
+    fn test_partitioned_cookies_need_their_top_level_site() {
+        let partitioned = |site: &str, cross: bool| SessionCookie {
+            partition_key: Some(CookiePartitionKey {
+                top_level_site: site.into(),
+                has_cross_site_ancestor: cross,
+            }),
+            ..cookie("chips", "1", ".site.test", "/")
+        };
+        for (site, cross, url, expected) in [
+            (
+                "https://site.test",
+                false,
+                "https://app.site.test/",
+                "chips=1",
+            ),
+            ("https://site.test", false, "https://site.test/", "chips=1"),
+            ("https://top.test", false, "https://app.site.test/", ""),
+            ("https://site.test", true, "https://app.site.test/", ""),
+            ("http://site.test", false, "https://app.site.test/", ""),
+            ("https://othersite.test", false, "https://site.test/", ""),
+            ("garbage", false, "https://site.test/", ""),
+        ] {
+            let header = session(vec![partitioned(site, cross)])
+                .cookie_header_for(url)
+                .unwrap();
+            assert_eq!(header, expected, "{site} cross={cross} {url}");
+        }
     }
 }

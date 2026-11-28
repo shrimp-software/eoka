@@ -1,23 +1,21 @@
 
-if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
-    const origEnumerateDevices = navigator.mediaDevices.enumerateDevices.bind(navigator.mediaDevices);
-
+if (typeof MediaDevices !== 'undefined' && MediaDevices.prototype.enumerateDevices) {
     const fakeDevices = __EOKA_MEDIA_DEVICES__;
-    navigator.mediaDevices.enumerateDevices = _eoka_mark(async function enumerateDevices() {
-        const devices = await origEnumerateDevices();
+    _eoka_patchMethod(MediaDevices.prototype, 'enumerateDevices', (original) => async function(...args) {
+        const devices = await original.apply(this, args);
         if (devices.length === 0) {
             return fakeDevices.map(d => {
-                const device = Object.create(MediaDeviceInfo.prototype);
-                Object.defineProperties(device, {
-                    deviceId: { value: d.deviceId, enumerable: true },
-                    groupId: { value: d.groupId, enumerable: true },
-                    kind: { value: d.kind, enumerable: true },
-                    label: { value: d.label, enumerable: true },
-                    toJSON: { value: _eoka_mark(() => d, 'toJSON') }
+                const device = _eoka_instance(MediaDeviceInfo.prototype, {
+                    deviceId: d.deviceId,
+                    groupId: d.groupId,
+                    kind: d.kind,
+                    label: d.label
                 });
-                return device;
+                return Object.defineProperty(device, 'toJSON', {
+                    value: _eoka_mark({ toJSON() { return d; } }.toJSON)
+                });
             });
         }
         return devices;
-    }, 'enumerateDevices');
+    });
 }

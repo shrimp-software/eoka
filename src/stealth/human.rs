@@ -124,6 +124,22 @@ pub(crate) fn bezier_curve(start: Point, end: Point, num_points: usize) -> Vec<P
     points
 }
 
+/// Where a human path starts: the real pointer, or for an untouched page a
+/// random point inside the viewport.
+fn approach_start(pointer: Option<Point>, viewport: Point) -> Point {
+    pointer.unwrap_or_else(|| {
+        (
+            random_f64_range(0.0, viewport.0.max(1.0)),
+            random_f64_range(0.0, viewport.1.max(1.0)),
+        )
+    })
+}
+
+/// Where wheel events land: the real pointer, or the viewport centre.
+fn scroll_origin(pointer: Option<Point>, viewport: Point) -> Point {
+    pointer.unwrap_or((viewport.0 / 2.0, viewport.1 / 2.0))
+}
+
 /// Human-like interaction helpers
 pub struct Human<'a> {
     session: &'a Session,
@@ -152,14 +168,41 @@ impl<'a> Human<'a> {
         self
     }
 
-    /// Move mouse to target position with human-like Bezier curve
+    /// `choose` applied to the last dispatched pointer position on this
+    /// target (shared with Page input) and the viewport, which is only
+    /// measured when no pointer position is known.
+    async fn pointer_point(&self, choose: fn(Option<Point>, Point) -> Point) -> Point {
+        let pointer = self.held_input.lock().await.pointer();
+        let viewport = match pointer {
+            Some(_) => (0.0, 0.0),
+            None => self.viewport().await,
+        };
+        choose(pointer, viewport)
+    }
+
+    /// CSS layout viewport size; a desktop default when metrics are unavailable.
+    async fn viewport(&self) -> Point {
+        let metrics: Result<serde_json::Value> = self
+            .session
+            .send("Page.getLayoutMetrics", &serde_json::json!({}))
+            .await;
+        metrics
+            .ok()
+            .and_then(|m| {
+                let viewport = &m["cssLayoutViewport"];
+                Some((
+                    viewport["clientWidth"].as_f64()?,
+                    viewport["clientHeight"].as_f64()?,
+                ))
+            })
+            .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+            .unwrap_or((1280.0, 720.0))
+    }
+
+    /// Move mouse to target position with human-like Bezier curve, starting
+    /// from the last dispatched pointer position.
     pub async fn move_to(&self, target_x: f64, target_y: f64) -> Result<()> {
-        // Start from a random position relative to the target — this looks more
-        // natural than a fixed range and works on any viewport size.
-        let offset_x = random_f64_range(-300.0, 300.0);
-        let offset_y = random_f64_range(-200.0, 200.0);
-        let start_x = (target_x + offset_x).max(0.0);
-        let start_y = (target_y + offset_y).max(0.0);
+        let (start_x, start_y) = self.pointer_point(approach_start).await;
 
         let distance = ((target_x - start_x).powi(2) + (target_y - start_y).powi(2)).sqrt();
         let num_points = self.speed.mouse_points(distance);
@@ -360,22 +403,19 @@ impl<'a> Human<'a> {
         coordinated_key_up(self.session, &self.held_input, key).await
     }
 
-    /// Scroll the page by delta_y pixels (positive = down, negative = up)
+    /// Scroll the page by delta_y pixels (positive = down, negative = up).
+    /// Wheel events land at the current pointer, or the viewport centre when
+    /// no pointer position is known yet.
     pub async fn scroll(&self, delta_y: f64) -> Result<()> {
         let num_scrolls = random_range(3, 8);
         let per_scroll = delta_y / num_scrolls as f64;
+        let (x, y) = self.pointer_point(scroll_origin).await;
 
         for _ in 0..num_scrolls {
             let jitter = random_f64_range(-20.0, 20.0);
             let scroll_amount = per_scroll + jitter;
 
-            self.mouse_wheel(
-                random_f64_range(400.0, 800.0),
-                random_f64_range(300.0, 600.0),
-                0.0,
-                scroll_amount,
-            )
-            .await?;
+            self.mouse_wheel(x, y, 0.0, scroll_amount).await?;
 
             sleep(Duration::from_millis(random_range(30, 100))).await;
         }
@@ -421,6 +461,21 @@ mod tests {
                 assert!(y.is_finite(), "y should be finite, got {y}");
             }
         }
+    }
+
+    // Regression: paths started at a random point within 300px of the target
+    // instead of the real pointer, so consecutive moves teleported, and wheel
+    // events landed at random coordinates regardless of pointer or viewport.
+    #[test]
+    fn test_paths_and_scrolls_start_at_the_known_pointer() {
+        let viewport = (800.0, 600.0);
+        assert_eq!(approach_start(Some((12.0, 34.0)), viewport), (12.0, 34.0));
+        for _ in 0..200 {
+            let (x, y) = approach_start(None, viewport);
+            assert!((0.0..800.0).contains(&x) && (0.0..600.0).contains(&y));
+        }
+        assert_eq!(scroll_origin(Some((5.0, 6.0)), viewport), (5.0, 6.0));
+        assert_eq!(scroll_origin(None, (640.0, 360.0)), (320.0, 180.0));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use eoka::{Action, ActionOptions, ActionOutcome, DispatchState, Error, Expectation, LocatorSpec};
 use std::time::{Duration, Instant};
@@ -17,7 +17,7 @@ fn expected_text(selector: &str, value: &str) -> ActionOptions {
 #[tokio::test]
 #[ignore = "requires Chrome; local action fixture"]
 async fn actions_reject_ambiguity_and_missing_expectations_without_input() {
-    let server=support::HttpFixture::start(|_|async {support::Response::html("<button onclick='window.hits++'>a</button><button>b</button><p id=result>pending</p><script>window.hits=0</script>")}).await;
+    let server=support::HttpFixture::html("<button onclick='window.hits++'>a</button><button>b</button><p id=result>pending</p><script>window.hits=0</script>").await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
     let err = page
@@ -42,7 +42,7 @@ async fn actions_reject_ambiguity_and_missing_expectations_without_input() {
 #[tokio::test]
 #[ignore = "requires Chrome; local action fixture"]
 async fn actions_wait_for_replacement_and_verify_one_click() {
-    let server=support::HttpFixture::start(|_|async {support::Response::html("<button id=go disabled>Go</button><p id=result>pending</p><script>window.hits=0;setTimeout(()=>{document.querySelector('#go').outerHTML=\"<button id=go onclick=\"+JSON.stringify(\"window.hits++;document.querySelector('#result').textContent='done'\")+\">Go</button>\"},150)</script>")}).await;
+    let server=support::HttpFixture::html("<button id=go disabled>Go</button><p id=result>pending</p><script>window.hits=0;setTimeout(()=>{document.querySelector('#go').outerHTML=\"<button id=go onclick=\"+JSON.stringify(\"window.hits++;document.querySelector('#result').textContent='done'\")+\">Go</button>\"},150)</script>").await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
     let receipt = page
@@ -59,7 +59,7 @@ async fn actions_wait_for_replacement_and_verify_one_click() {
 #[tokio::test]
 #[ignore = "requires Chrome; local action fixture"]
 async fn fill_select_and_navigation_verify_intrinsic_results() {
-    let server=support::HttpFixture::start(|_|async {support::Response::html("<input id=name><select id=choice><option value=a>A</option><option value=b>B</option></select>")}).await;
+    let server=support::HttpFixture::html("<input id=name><select id=choice><option value=a>A</option><option value=b>B</option></select>").await;
     let browser = support::browser().await;
     let page = browser.new_blank_page().await.unwrap();
     page.act(
@@ -98,7 +98,7 @@ async fn fill_select_and_navigation_verify_intrinsic_results() {
 #[tokio::test]
 #[ignore = "requires Chrome; local action fixture"]
 async fn action_deadline_reports_unknown_without_replaying() {
-    let server=support::HttpFixture::start(|_|async {support::Response::html("<button id=go onclick='window.hits++'>Go</button><p id=result>pending</p><script>window.hits=0</script>")}).await;
+    let server=support::HttpFixture::html("<button id=go onclick='window.hits++'>Go</button><p id=result>pending</p><script>window.hits=0</script>").await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
     let mut options = expected_text("#result", "done");

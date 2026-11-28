@@ -3,7 +3,7 @@
 use std::{future::Future, future::IntoFuture, pin::Pin};
 
 use super::{Action, ActionOptions, ActionReceipt, Destination, Expectation};
-use crate::{DispatchState, Error, Page, Result};
+use crate::{DispatchState, Error, ErrorCode, Page, Result};
 
 type ActionFuture<T> = Pin<Box<dyn Future<Output = Result<T>> + Send>>;
 
@@ -114,7 +114,12 @@ impl IntoFuture for TryActionCall {
                 }) if receipt.dispatch == DispatchState::NotSent
                     && matches!(
                         *source,
-                        Error::ElementNotFound(_) | Error::ElementNotVisible { .. }
+                        Error::ElementNotFound(_)
+                            | Error::ElementNotVisible { .. }
+                            | Error::Coded {
+                                code: ErrorCode::ActionabilityChanged | ErrorCode::TargetStale,
+                                ..
+                            }
                     ) =>
                 {
                     Ok(false)

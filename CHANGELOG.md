@@ -4,8 +4,139 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-28
+
+### Breaking
+
+- Errors eoka raises itself carry a stable `ErrorCode` in the new
+  `Error::Coded { code, message }` instead of a `code:` prefix inside an
+  `Error::Cdp` message. `Error::Action::code` is an `ErrorCode` (it still
+  compares equal to its string form, e.g. `code == "history_unavailable"`).
+  Codes that used to collapse into `action_failed` (`invalid_timeout`,
+  `invalid_expectation`, `actionability_changed`, `ambiguous_destination`,
+  `target_stale`, …) are reported as themselves. `Error::code()` and
+  `Error::is_retryable()` are new, and `RecordingError` converts into `Error`.
+- `Error::ValueMismatch` reports character counts instead of the expected and
+  actual values, which could be passwords.
+- `Error::RetryExhausted` keeps the last error as `source`.
+- `Transport::subscribe()` yields `Arc<CdpMessage>` from a 4096-event buffer
+  (`EVENT_CHANNEL_CAPACITY`). `Transport::recv_event` and `try_recv_event`
+  are removed.
+- Commands blocked by `filter_cdp` return an error instead of `{}`, and
+  launched browsers now honour `filter_cdp = false`.
+- `SessionCookie` gains `partition_key` (and `Default`); the CDP `Cookie` and
+  `NetworkSetCookie` types gain the same field.
+- `InputMode` gains `Human`.
+- `StealthConfig::default().patch_binary` is `false`; see Changed.
+
+### Added
+
+- `Page::capture_requests(RequestCaptureOptions)` returns a page-scoped,
+  bounded `RequestCapture` whose request ids work with `get_response_body`.
+  `NetworkWatcher::for_session` filters one tab.
+- `Locator` gains `double_click`, `hover`, `human_hover`, `type_text`,
+  `focus`, `submit` and `scroll_into_view`.
+- `InputMode::Human`: a trusted `keydown`/`keyup` pair per character, US-layout
+  key and code, at irregular intervals. `human_type` and `human_fill` use it;
+  they used to be identical to `type_into` and `fill`.
+- `WEBGL_EVASION`, `CANVAS_EVASION` and `AUDIO_EVASION`.
+- CI runs on pushes to `main`; Publish runs only after CI passes on the
+  commit it publishes.
+
+### Changed
+
+- Binary patching is opt-in. Chrome for Testing and stock Chrome contain none
+  of the markers the patcher hid; its only match was the unrelated `cdc_acm`
+  constant inside Chrome's code, which it overwrote. When enabled, it rewrites
+  only ChromeDriver's `$cdc_`/`$wdc_`/`$chromeDriver` inside non-executable
+  sections, refuses binaries it cannot parse, never copies a binary with
+  nothing to patch, keeps a verified persistent cache on Linux
+  (`~/.cache/eoka/patched-chrome`) and publishes entries atomically.
+- Evasions patch interface prototypes with the native name, length,
+  `toString`, non-constructibility and receiver checks, and leave APIs that
+  Chrome already reports correctly native (`window.chrome`, plugins,
+  permissions, `navigator.webdriver`, connection).
+- With a proxy configured, Chrome runs with
+  `--webrtc-ip-handling-policy=disable_non_proxied_udp`; the script that
+  stripped every STUN/TURN server (and broke calls) is removed.
+- User `--disable-features`, `--enable-features`, `--disable-blink-features`,
+  `--enable-blink-features` and `--blink-settings` in `extra_args` are merged
+  with eoka's own; Chrome keeps only the last copy, so a user list used to
+  drop `AutomationControlled`. The no-op `IsolateOrigins,site-per-process`
+  disable is gone.
+- `Browser::new_page` verifies navigation like `Page::goto` instead of
+  sleeping 100ms.
+- All CDP writes go through one writer task with a priority lane for pongs and
+  automatic Fetch replies, so event reading never waits on the socket. A
+  stalled socket closes the transport with its reason.
+- `find_by_text` and text locators share one matcher, and arguments reach
+  page scripts as JSON rather than spliced source.
+- Pointer movement, drags and scrolls start from the last real pointer
+  position instead of a random point.
+- The patcher, `frames.rs` and every browser test binary are split or merged
+  for maintainability; all browser tests now build into `tests/integration.rs`.
+
+### Deprecated
+
+- `StealthConfig::human_mouse`, `human_typing` and `debug`, which never had
+  an effect.
+- `aggressive_cdp_evasion` (now a no-op) and the `CDP_EVASION`,
+  `TIMEZONE_EVASION` and `WEBRTC_EVASION` constants (now empty).
+
 ### Fixed
 
+- Durable profiles kept failing to launch after Chrome updated
+  ("configured user agent conflicts with persisted browser identity"). Only an
+  explicitly configured user agent must match the stored identity; a detected
+  one moves the stored identity to the installed Chrome version.
+- Stored identities are written `0600` with a random temporary name.
+- macOS identities claim only Apple-silicon (ANGLE Metal) renderers, matching
+  their `arm` architecture; ARM Linux identities report `Linux aarch64` and
+  `arm`.
+- The JavaScript `getTimezoneOffset` shim, wrong in early March and in
+  November for US zones, is removed; the native timezone override applies on
+  every session.
+- `webgl_spoof`, `canvas_spoof` and `audio_spoof` each gate only their own
+  surface; turning one off used to do nothing.
+- `document.fonts.check` reports fonts the page itself registered.
+- `restore_state` restores cookies before loading the saved URL, keeps the
+  fingerprint's client hints, writes storage only on the saved origin, and
+  merges storage on live sessions. Partitioned (CHIPS) cookies keep their
+  partition through capture and restore.
+- `Element` handles are pinned to backend node ids; `click_shadow` (and
+  anything else that re-requested the document) made every outstanding handle
+  fail with "No node with given id found". Element calls release their remote
+  objects.
+- Locators resolve in one cached isolated world per frame. Top-frame locators
+  ran in the page's own world, where a page could watch or sabotage
+  `querySelectorAll`/`elementFromPoint`, and framed locators created a new
+  world on every 25ms poll.
+- `find_by_text` returned the outermost container holding the text (often
+  the app root); it now returns the innermost match, like `click_by_text`.
+- `try_*` returns `Ok(false)` for every not-dispatched actionability failure
+  (moved, covered, stale), not only for missing or hidden targets.
+- Fill fails with `ValueMismatch` once a masked, trimmed or truncated value has
+  settled, instead of waiting out the deadline.
+- Navigation that Chrome aborts (a download, or replaced by another
+  navigation) fails at once with `navigation_aborted` instead of waiting for a
+  commit that never comes.
+- Expectations checked after a click survive the navigation the click caused.
+- The destination watcher rescans targets when events lag instead of failing
+  an already-dispatched action.
+- `with_retry` retries only retryable errors, including action errors where no
+  input was sent, and no longer retries invalid URLs or options.
+- `new_page` and `new_blank_page` close the tab when setup or navigation fails.
+- Per-target state is released when tabs or out-of-process frames are
+  destroyed outside eoka, and a failed network-idle monitor is recreated.
+- Commands on a detached session fail at once with Chrome's `-32001` error
+  instead of waiting for the command timeout.
+- Command and automatic-reply ids stay in disjoint, wrapping int32 ranges.
+- CDP error `data` is kept, and the command deadline names method and id.
+- Clearing extra headers no longer re-enables the Network domain.
+- IPv6 DevTools hosts work for discovery; `close()` reaps Chrome on a blocking
+  thread.
+- Engine pointer events carry `force` like the coordinated input path, so
+  `page.click` and `click_at` send the same events.
 - Launching Chrome, and probing its version, now retry for up to two seconds
   when Linux reports the executable busy (`ETXTBSY`). A just-written patched
   Chrome copy could stay open for writing in a child that another thread had
@@ -14,6 +145,21 @@ All notable changes to this project will be documented in this file.
   recorded as held, which made the next press fail with "mouse button is
   already held". Drag input now shares its mouse handling with the coordinated
   input path, which already freed the button.
+- `window.outerHeight` is now larger than `innerHeight` in headless launches,
+  as in a real browser window. The window is sized to the viewport plus
+  Chrome's 87px toolbar area instead of to the viewport itself, so the value
+  is native. The headless screen is the smallest common resolution that
+  contains the window (1920x1200 for the default 1920x1080 viewport) and the
+  window sits at the screen origin. Viewport dimensions are unchanged. (#50)
+- Linux identities no longer report a SwiftShader WebGL renderer. They now
+  claim a Mesa Intel, AMD or NVIDIA renderer, and identities already stored
+  beside a profile with a software renderer are replaced on next launch.
+  Rendering still runs in software on hosts without a GPU, so WebGL
+  capability or pixel probes can disagree with the claimed GPU, as they
+  already can for macOS and Windows identities. (#51)
+- The WebGL vendor now always matches the renderer. Windows AMD and Intel
+  renderers were paired with the NVIDIA vendor, and macOS Intel renderers with
+  the Apple vendor.
 - Text lookups and waits now survive a navigation the page starts itself, such
   as a link click, an accepted `beforeunload` or a `location` assignment.
   `find_by_text`, `find_by_text_match` and `wait_for_text` used the old
@@ -24,11 +170,8 @@ All notable changes to this project will be documented in this file.
   failing at once. `find_all_by_text` now returns `DOM.requestNode` errors
   instead of dropping those elements.
 
-### Changed
-
-- Internal cleanup with no public API change: unused CDP protocol types are
-  removed, and node calls and expectation comparisons in the action engine have
-  one definition each.
+- Unused CDP protocol types are removed, and node calls and expectation
+  comparisons in the action engine have one definition each.
 
 ## [0.10.2] - 2026-11-08
 
@@ -90,7 +233,7 @@ All notable changes to this project will be documented in this file.
   matching `Element` methods now return `ActionCall` instead of being `async fn`
   returning `Result<()>`. Awaiting one yields an `ActionReceipt`: `OutcomeUnknown`
   proves dispatch only, and `.expecting(..)` proves one call. `Page::act` and
-  `Locator` remain strict. See [MIGRATION-0.10.md](MIGRATION-0.10.md).
+  `Locator` remain strict.
 - **Breaking:** `try_click`, `try_click_by_text`, `try_human_click` and
   `try_human_click_by_text` return `TryActionCall`.
 - **Breaking:** `Page::with_action_options` is replaced by

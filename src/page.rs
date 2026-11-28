@@ -70,19 +70,14 @@ pub(crate) fn escape_js_string(s: &str) -> String {
     out
 }
 
-/// Whether a CDP error message names a missing/stale backend node.
-fn is_missing_node_message(message: &str) -> bool {
-    message.contains("Could not find node") || message.contains("No node with given id")
-}
-
 /// Check if a CDP error indicates the cached node id is no longer valid.
 fn is_stale_node_error(e: &Error) -> bool {
-    matches!(e, Error::Cdp { message, .. } if is_missing_node_message(message))
+    crate::error::classify::is(e, crate::error::classify::CdpFailure::NodeGone)
 }
 
 /// Whether a CDP error means a navigation replaced the document, execution
 /// context or target that the command used.
-fn is_navigation_race(e: &Error) -> bool {
+pub(crate) fn is_navigation_race(e: &Error) -> bool {
     matches!(e, Error::Cdp { message, .. } if [
         "Cannot find context with specified id",
         "Execution context was destroyed",
@@ -92,32 +87,16 @@ fn is_navigation_race(e: &Error) -> bool {
     .any(|text| message.contains(text)))
 }
 
-/// Check if a CDP error is an element-related error (not found, not visible, etc.)
+/// Check if an error means the element is missing, gone or not rendered.
 fn is_element_cdp_error(e: &Error) -> bool {
-    match e {
-        Error::ElementNotFound(_) | Error::ElementNotVisible { .. } => true,
-        Error::Cdp { message, .. } => {
-            message.contains("box model")
-                || is_missing_node_message(message)
-                || message.contains("Node is not an element")
-        }
-        Error::Action { .. }
-        | Error::Launch(_)
-        | Error::Transport { .. }
-        | Error::Navigation(_)
-        | Error::InvalidUrl(_)
-        | Error::Timeout(_)
-        | Error::InputState(_)
-        | Error::InvalidScreenshotOptions(_)
-        | Error::ValueMismatch { .. }
-        | Error::Serialization(_)
-        | Error::Decode(_)
-        | Error::Io(_)
-        | Error::ChromeNotFound
-        | Error::Patching { .. }
-        | Error::RetryExhausted { .. }
-        | Error::EvaluationTooLarge { .. } => false,
-    }
+    use crate::error::classify::{cdp_failure, CdpFailure};
+    matches!(
+        e,
+        Error::ElementNotFound(_) | Error::ElementNotVisible { .. }
+    ) || matches!(
+        cdp_failure(e),
+        Some(CdpFailure::NodeGone | CdpFailure::NotRendered | CdpFailure::NotElement)
+    )
 }
 
 /// Text matching strategy for find_by_text operations
@@ -498,8 +477,9 @@ mod tests {
 
     #[test]
     fn test_missing_node_message_variants() {
-        assert!(is_missing_node_message("Could not find node with given id"));
-        assert!(is_missing_node_message("No node with given id found"));
-        assert!(!is_missing_node_message("box model could not be computed"));
+        let stale = |message: &str| is_stale_node_error(&Error::cdp("DOM.x", -32000, message));
+        assert!(stale("Could not find node with given id"));
+        assert!(stale("No node with given id found"));
+        assert!(!stale("box model could not be computed"));
     }
 }

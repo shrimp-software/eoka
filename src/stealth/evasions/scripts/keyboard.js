@@ -1,18 +1,20 @@
 
-if (navigator.keyboard && navigator.keyboard.getLayoutMap && __EOKA_KEYBOARD_MAP__) {
+if (typeof Keyboard !== 'undefined' && Keyboard.prototype.getLayoutMap && __EOKA_KEYBOARD_MAP__) {
     const layoutEntries = __EOKA_KEYBOARD_MAP__;
     const layoutMap = new Map(Object.entries(layoutEntries));
     const fakeMap = {
-        get: _eoka_mark((code) => layoutMap.get(code) || null, 'get'),
-        has: _eoka_mark((code) => layoutMap.has(code), 'has'),
+        get(code) { return layoutMap.get(code); },
+        has(code) { return layoutMap.has(code); },
         size: layoutMap.size,
-        entries: _eoka_mark(() => layoutMap.entries(), 'entries'),
-        forEach: _eoka_mark((cb, thisArg) => layoutMap.forEach(cb, thisArg), 'forEach'),
-        [Symbol.iterator]: _eoka_mark(function* () {
-            yield* layoutMap.entries();
-        }, '[Symbol.iterator]'),
+        entries() { return layoutMap.entries(); },
+        keys() { return layoutMap.keys(); },
+        values() { return layoutMap.values(); },
+        forEach(cb, thisArg) { layoutMap.forEach((v, k) => cb.call(thisArg, v, k, fakeMap)); },
+        [Symbol.iterator]() { return layoutMap.entries(); },
     };
-    navigator.keyboard.getLayoutMap = _eoka_mark(function getLayoutMap() {
+    for (const method of Object.values(fakeMap)) _eoka_mark(method);
+    _eoka_mark(fakeMap[Symbol.iterator], 'entries');
+    _eoka_patchMethod(Keyboard.prototype, 'getLayoutMap', () => function() {
         return Promise.resolve(fakeMap);
-    }, 'getLayoutMap');
+    });
 }

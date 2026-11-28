@@ -1,359 +1,45 @@
-//! Chrome binary patcher
+//! Chrome binary patcher (opt-in through `StealthConfig::patch_binary`).
 //!
-//! Patches Chrome/Chromium binary to disable automation detection.
-//! Uses Aho-Corasick for O(n) multi-pattern matching.
+//! Rewrites ChromeDriver's automation markers (`$cdc_`, `$wdc_`,
+//! `$chromeDriver`) inside non-executable data sections of a private copy of
+//! the browser; unparseable headers fail closed. Stock Chrome has none of
+//! these markers, so it is only scanned, recorded as clean and launched as is.
+//!
+//! On non-macOS Unix, patched copies live in a persistent private cache
+//! (`$XDG_CACHE_HOME/eoka/patched-chrome` or `~/.cache/eoka/patched-chrome`)
+//! keyed by the source's canonical path, size, mtime and the patcher schema.
+//! Entries are staged and published with one atomic rename, and every reuse
+//! verifies length and content hash against the manifest. macOS and Windows
+//! patch into the per-launch runtime directory instead.
 
-use aho_corasick::{AhoCorasick, Match};
-use memmap2::MmapMut;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
+pub use crate::browser::discovery::find_chrome;
 use crate::error::{Error, Result};
 
-/// Patch pattern with replacement strategy
-#[derive(Clone)]
-struct PatchPattern {
-    pattern: &'static [u8],
-    strategy: PatchStrategy,
-}
+mod cache;
+#[cfg(target_os = "macos")]
+mod macos;
+mod sections;
 
-#[derive(Clone, Copy, PartialEq)]
-enum PatchStrategy {
-    RandomizePrefix,
-    Scramble,
-    Nullify,
-    Skip,
-}
-
-/// All patterns to find and patch
-static PATCH_PATTERNS: &[PatchPattern] = &[
-    PatchPattern {
-        pattern: b"$cdc_",
-        strategy: PatchStrategy::RandomizePrefix,
-    },
-    PatchPattern {
-        pattern: b"cdc_",
-        strategy: PatchStrategy::RandomizePrefix,
-    },
-    // Do NOT scramble the `webdriver` literal. Chrome builds the
-    // `Navigator.prototype.webdriver` accessor name from that string, so
-    // scrambling it in the binary renames the accessor to `ewdbirevr` and
-    // leaves an impossible property visible to every reflection sweep. The
-    // JS evasion (`webdriver.js`) already redefines the property on the same
-    // prototype, which is the supported way to hide it.
-    PatchPattern {
-        pattern: b"--enable-automation",
-        strategy: PatchStrategy::Nullify,
-    },
-    PatchPattern {
-        pattern: b"devtoolsw",
-        strategy: PatchStrategy::Scramble,
-    },
-    PatchPattern {
-        pattern: b"debuggerPrivate",
-        strategy: PatchStrategy::Scramble,
-    },
-    PatchPattern {
-        pattern: b"HeadlessChrome",
-        strategy: PatchStrategy::Scramble,
-    },
-    PatchPattern {
-        pattern: b"$wdc_",
-        strategy: PatchStrategy::RandomizePrefix,
-    },
-    PatchPattern {
-        pattern: b"$chromeDriver",
-        strategy: PatchStrategy::RandomizePrefix,
-    },
-    // Detection only
-    PatchPattern {
-        pattern: b"Runtime.enable",
-        strategy: PatchStrategy::Skip,
-    },
-    PatchPattern {
-        pattern: b"Page.addScriptToEvaluateOnNewDocument",
-        strategy: PatchStrategy::Skip,
-    },
-];
-
-/// Matcher over all patterns (find) and over only rewritten patterns (verify).
-static PATTERN_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
-static VERIFY_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
-
-/// Build (once) an Aho-Corasick matcher over `PATCH_PATTERNS`, optionally
-/// excluding `Skip`-strategy patterns (those are detected but never rewritten,
-/// so verification must ignore them).
-fn build_matcher(
-    cell: &'static OnceLock<AhoCorasick>,
-    include_skip: bool,
-) -> Result<&'static AhoCorasick> {
-    if let Some(ac) = cell.get() {
-        return Ok(ac);
-    }
-    let patterns: Vec<&[u8]> = PATCH_PATTERNS
-        .iter()
-        .filter(|p| include_skip || p.strategy != PatchStrategy::Skip)
-        .map(|p| p.pattern)
-        .collect();
-    let ac = AhoCorasick::new(&patterns).map_err(|e| {
-        Error::patching(
-            "init",
-            format!("Failed to build Aho-Corasick automaton: {}", e),
-        )
-    })?;
-    Ok(cell.get_or_init(|| ac))
-}
-
-fn get_pattern_matcher() -> Result<&'static AhoCorasick> {
-    build_matcher(&PATTERN_MATCHER, true)
-}
-
-fn get_verify_matcher() -> Result<&'static AhoCorasick> {
-    build_matcher(&VERIFY_MATCHER, false)
-}
-
-/// Bumped whenever `PATCH_PATTERNS` changes in a way that makes previously
-/// patched copies invalid. It participates in the cache key, so stale copies
-/// (for example ones where `webdriver` was scrambled into `ewdbirevr`) are
-/// never reused.
-const PATCHER_SCHEMA_VERSION: u64 = 2;
-
-/// Stable temp-subdir name for the patched copy, keyed on the original binary's
-/// identity (path + size + mtime) so the cache hits across runs.
-fn stable_cache_name(original_path: &Path) -> String {
-    use std::hash::{Hash, Hasher};
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-
-    PATCHER_SCHEMA_VERSION.hash(&mut hasher);
-    let abs = fs::canonicalize(original_path).unwrap_or_else(|_| original_path.to_path_buf());
-    abs.hash(&mut hasher);
-
-    if let Ok(meta) = fs::metadata(original_path) {
-        meta.len().hash(&mut hasher);
-        if let Ok(modified) = meta.modified() {
-            if let Ok(dur) = modified.duration_since(std::time::UNIX_EPOCH) {
-                dur.as_nanos().hash(&mut hasher);
-            }
-        }
-    }
-
-    format!("eoka-chrome-{:016x}", hasher.finish())
-}
-
-#[cfg(not(unix))]
-fn create_dir_secure(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir)?;
-    Ok(())
-}
-
-#[cfg(unix)]
-fn validate_cache_root(path: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    // SAFETY: geteuid has no arguments or memory-safety preconditions.
-    let uid = unsafe { libc::geteuid() };
-    // Constructors retain the canonical root. Check every component without
-    // following replacement symlinks: a private leaf is not protected when an
-    // ancestor lets another user rename it.
-    for ancestor in path.ancestors() {
-        let metadata = fs::symlink_metadata(ancestor)?;
-        if !metadata.is_dir()
-            || (metadata.uid() != uid && metadata.uid() != 0)
-            || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
-        {
-            return Err(Error::patching(
-                "cache",
-                format!("Untrusted Chrome cache ancestor: {}", ancestor.display()),
-            ));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn validate_private_cache_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = fs::symlink_metadata(path)?;
-    // SAFETY: geteuid has no arguments or memory-safety preconditions.
-    let uid = unsafe { libc::geteuid() };
-    if !metadata.is_dir() || metadata.uid() != uid || metadata.mode() & 0o077 != 0 {
-        return Err(Error::patching(
-            "cache",
-            format!(
-                "Chrome cache directory is not private and owned: {}",
-                path.display()
-            ),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_private_cache_directory(path: &Path) -> Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-
-    let parent = path
-        .parent()
-        .ok_or_else(|| Error::patching("cache", "Chrome cache directory has no parent"))?;
-    validate_cache_root(parent)?;
-    match fs::DirBuilder::new().mode(0o700).create(path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-        Err(error) => return Err(error.into()),
-    }
-    validate_private_cache_directory(path)
-}
-
-fn remove_file_if_exists(path: &Path) -> Result<()> {
-    match fs::remove_file(path) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        result => result.map_err(Into::into),
-    }
-}
-
-/// Find Chrome binary on the system
-pub fn find_chrome() -> Result<PathBuf> {
-    let candidates: &[&str] = if cfg!(target_os = "macos") {
-        &[
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
-            "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
-        ]
-    } else if cfg!(target_os = "linux") {
-        &[
-            "/usr/bin/google-chrome",
-            "/usr/bin/google-chrome-stable",
-            "/usr/bin/google-chrome-beta",
-            "/usr/bin/google-chrome-unstable",
-            "/usr/bin/chromium",
-            "/usr/bin/chromium-browser",
-            "/snap/bin/chromium",
-        ]
-    } else if cfg!(target_os = "windows") {
-        &[
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-        ]
-    } else {
-        &[]
-    };
-
-    for candidate in candidates {
-        let path = Path::new(candidate);
-        if path.exists() {
-            #[cfg(target_os = "linux")]
-            {
-                let resolved = resolve_to_elf(path, false);
-                return Ok(resolved);
-            }
-            #[cfg(not(target_os = "linux"))]
-            return Ok(path.to_path_buf());
-        }
-    }
-
-    Err(Error::ChromeNotFound)
-}
-
-/// On Linux, `/usr/bin/chromium-browser` (and similar) are often shell script
-/// wrappers, not actual ELF binaries. The patcher needs the real binary so it
-/// can rewrite detection markers. This function checks the magic bytes and, if
-/// the candidate is not an ELF, looks for the real binary in the standard lib
-/// directories where distros place it.
 #[cfg(target_os = "linux")]
-fn resolve_to_elf(path: &Path, explicit: bool) -> PathBuf {
-    if is_elf(path) {
-        return path.to_path_buf();
-    }
+use cache::resolve_elf_for_patching;
+use cache::{create_cache_root, persistent_cache_root, SourceIdentity};
+#[cfg(unix)]
+use cache::{create_private_cache_directory, validate_cache_root};
 
-    // Follow symlinks first — google-chrome might be a symlink to the real thing
-    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    if is_elf(&resolved) {
-        tracing::info!("Resolved symlink {:?} to ELF binary {:?}", path, resolved);
-        return resolved;
-    }
-
-    // Google Chrome ships `google-chrome[-beta|-unstable]` as a shell wrapper
-    // that execs `$HERE/chrome` — the real ELF sits next to the wrapper. This
-    // covers every channel (stable in /opt/google/chrome, beta in
-    // /opt/google/chrome-beta, …) without hardcoding channel paths.
-    if let Some(sibling) = resolved.parent().map(|d| d.join("chrome")) {
-        if is_elf(&sibling) {
-            tracing::info!("Resolved wrapper {:?} to sibling ELF {:?}", path, sibling);
-            return sibling;
-        }
-    }
-
-    if explicit
-        && !matches!(resolved.parent(), Some(parent) if parent == Path::new("/usr/bin") || parent == Path::new("/bin"))
-    {
-        return path.to_path_buf();
-    }
-
-    // Derive the binary name from the candidate (e.g. "chromium-browser")
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("chromium-browser");
-
-    let lib_candidates = [
-        format!("/usr/lib/{0}/{0}", name),
-        format!("/usr/lib64/{0}/{0}", name),
-    ];
-
-    for lib_path in &lib_candidates {
-        let p = Path::new(lib_path);
-        if is_elf(p) {
-            tracing::info!("Resolved wrapper script {:?} to ELF binary {:?}", path, p);
-            return p.to_path_buf();
-        }
-    }
-    if !explicit {
-        for candidate in [
-            "/usr/lib/chromium-browser/chromium-browser",
-            "/usr/lib/chromium/chromium",
-            "/opt/google/chrome/chrome",
-            "/opt/google/chrome/google-chrome",
-        ] {
-            let candidate = Path::new(candidate);
-            if is_elf(candidate) {
-                tracing::info!(
-                    "Resolved discovered Chrome wrapper {:?} to ELF binary {:?}",
-                    path,
-                    candidate
-                );
-                return candidate.to_path_buf();
-            }
-        }
-    }
-
-    // Fallback: return as-is and let the patcher fail with a clear error
-    tracing::warn!(
-        "Chrome candidate {:?} is not an ELF binary and no lib binary was found",
-        path,
-    );
-    path.to_path_buf()
-}
-
-/// Check if a file starts with the ELF magic bytes (0x7f ELF).
-#[cfg(target_os = "linux")]
-fn is_elf(path: &Path) -> bool {
-    File::open(path)
-        .and_then(|mut f| {
-            let mut magic = [0u8; 4];
-            f.read_exact(&mut magic)?;
-            Ok(magic == [0x7f, b'E', b'L', b'F'])
-        })
-        .unwrap_or(false)
-}
+/// Bumped whenever the rewrite rules or the cache layout change. It is part
+/// of the cache key and of every manifest, so older entries are never reused.
+const PATCHER_SCHEMA_VERSION: u64 = 3;
 
 /// Chrome binary patcher
 pub struct ChromePatcher {
     original_path: PathBuf,
     patched_path: PathBuf,
+    #[cfg(not(target_os = "macos"))]
+    root: PathBuf,
+    #[cfg(not(target_os = "macos"))]
+    identity: SourceIdentity,
     #[cfg(target_os = "macos")]
     original_bundle: Option<PathBuf>,
     #[cfg(target_os = "macos")]
@@ -361,25 +47,54 @@ pub struct ChromePatcher {
 }
 
 impl ChromePatcher {
-    /// Create a new patcher for the given Chrome binary
+    /// Create a patcher for the given Chrome binary.
+    ///
+    /// Uses the persistent cache (`$XDG_CACHE_HOME/eoka/patched-chrome` or
+    /// `~/.cache/eoka/patched-chrome`) on Linux and other non-macOS Unix
+    /// systems, and the system temp directory elsewhere.
     pub fn new(chrome_path: &Path) -> Result<Self> {
-        Self::new_with_root(chrome_path, &std::env::temp_dir())
+        match persistent_cache_root() {
+            Some(root) => Self::with_cache_dir(chrome_path, &root),
+            None => Self::new_with_root(chrome_path, &std::env::temp_dir()),
+        }
     }
 
-    pub(crate) fn new_in_runtime(chrome_path: &Path, runtime: &Path) -> Result<Self> {
+    /// Create a patcher whose cache entries live under `cache_dir`. Missing
+    /// directories are created private to the current user; on Unix every
+    /// ancestor must be owned by the user or root and not writable by others
+    /// (unless sticky).
+    pub fn with_cache_dir(chrome_path: &Path, cache_dir: &Path) -> Result<Self> {
+        create_cache_root(cache_dir)?;
+        Self::new_with_root(chrome_path, cache_dir)
+    }
+
+    /// Patcher used by `Browser::launch`: the persistent cache where one is
+    /// available and trusted, otherwise the launch's private runtime directory.
+    pub(crate) fn for_launch(chrome_path: &Path, runtime: &Path) -> Result<Self> {
         #[cfg(target_os = "linux")]
-        let chrome_path = resolve_to_elf(chrome_path, true);
-        #[cfg(target_os = "linux")]
-        if !is_elf(&chrome_path) {
-            return Err(Error::patching(
-                "new",
-                "Cannot resolve the requested Chrome wrapper to its ELF binary",
-            ));
+        let chrome_path = &resolve_elf_for_patching(chrome_path)?;
+        if let Some(root) = persistent_cache_root() {
+            match Self::with_cache_dir(chrome_path, &root) {
+                Ok(patcher) => return Ok(patcher),
+                Err(error) => tracing::warn!(
+                    "Persistent Chrome patch cache {:?} unusable ({}); patching into the runtime directory",
+                    root,
+                    error
+                ),
+            }
         }
+        Self::new_in_runtime(chrome_path, runtime)
+    }
+
+    fn new_in_runtime(chrome_path: &Path, runtime: &Path) -> Result<Self> {
+        #[cfg(target_os = "linux")]
+        let chrome_path = &resolve_elf_for_patching(chrome_path)?;
         let root = runtime.join("patch");
         #[cfg(unix)]
         create_private_cache_directory(&root)?;
-        Self::new_with_root(chrome_path.as_ref(), &root)
+        #[cfg(not(unix))]
+        create_cache_root(&root)?;
+        Self::new_with_root(chrome_path, &root)
     }
 
     fn new_with_root(chrome_path: &Path, root: &Path) -> Result<Self> {
@@ -391,14 +106,17 @@ impl ChromePatcher {
         }
         #[cfg(unix)]
         let root = {
-            let root = fs::canonicalize(root)?;
+            let root = std::fs::canonicalize(root)?;
             validate_cache_root(&root)?;
             root
         };
+        #[cfg(not(unix))]
+        let root = root.to_path_buf();
+        let identity = SourceIdentity::of(chrome_path)?;
+        let key = identity.cache_key();
 
         #[cfg(target_os = "macos")]
         {
-            // On macOS, handle the full .app bundle
             if let Some(bundle) = chrome_path
                 .ancestors()
                 .find(|path| path.extension().is_some_and(|extension| extension == "app"))
@@ -407,9 +125,7 @@ impl ChromePatcher {
                     .file_name()
                     .ok_or_else(|| Error::patching("new", "Invalid bundle path"))?;
 
-                let patched_bundle = root
-                    .join(format!("{}-owned", stable_cache_name(chrome_path)))
-                    .join(bundle_name);
+                let patched_bundle = root.join(format!("{key}-owned")).join(bundle_name);
 
                 let relative_path = chrome_path
                     .strip_prefix(bundle)
@@ -425,16 +141,19 @@ impl ChromePatcher {
             }
         }
 
-        // Non-macOS or non-bundled binary
         let filename = chrome_path
             .file_name()
             .ok_or_else(|| Error::patching("new", "Invalid path"))?;
 
-        let patched_path = root.join(stable_cache_name(chrome_path)).join(filename);
+        let patched_path = root.join(&key).join(filename);
 
         Ok(Self {
             original_path: chrome_path.to_path_buf(),
             patched_path,
+            #[cfg(not(target_os = "macos"))]
+            root,
+            #[cfg(not(target_os = "macos"))]
+            identity,
             #[cfg(target_os = "macos")]
             original_bundle: None,
             #[cfg(target_os = "macos")]
@@ -442,547 +161,28 @@ impl ChromePatcher {
         })
     }
 
-    /// Check if a patched binary already exists and is valid
+    /// Whether `get_patched_path` can answer from a verified cache entry
+    /// (a patched copy, or a record that the binary needs no patching)
+    /// without rewriting anything.
     pub fn is_patched(&self) -> bool {
-        #[cfg(unix)]
-        if self.validate_cache_directory().is_err() {
-            return false;
-        }
-        let orig_modified = fs::metadata(&self.original_path)
-            .and_then(|m| m.modified())
-            .ok();
-        let patched_modified = fs::metadata(&self.patched_path)
-            .and_then(|m| m.modified())
-            .ok();
-
-        match (orig_modified, patched_modified) {
-            (Some(orig), Some(patched)) if patched > orig => {
-                let verified = self.verify_patched_sample();
-                #[cfg(target_os = "macos")]
-                let verified = verified
-                    && self
-                        .verify_owned_bundle()
-                        .and_then(|()| self.verify_signature())
-                        .is_ok();
-                verified
-            }
-            _ => false,
-        }
+        self.cached_path().is_some()
     }
 
-    /// Quick verification by checking first 64KB for unpatched patterns
-    fn verify_patched_sample(&self) -> bool {
-        const SAMPLE_SIZE: usize = 64 * 1024;
-
-        let mut file = match File::open(&self.patched_path) {
-            Ok(f) => f,
-            Err(_) => return false,
-        };
-
-        let mut buffer = vec![0u8; SAMPLE_SIZE];
-        let bytes_read = match file.read(&mut buffer) {
-            Ok(n) => n,
-            Err(_) => return false,
-        };
-        buffer.truncate(bytes_read);
-
-        match get_verify_matcher() {
-            Ok(ac) => !ac.is_match(&buffer),
-            Err(_) => false,
-        }
-    }
-
-    #[cfg(unix)]
-    fn cache_directory(&self) -> Result<&Path> {
-        #[cfg(target_os = "macos")]
-        let path = self.patched_bundle.as_ref().unwrap_or(&self.patched_path);
-        #[cfg(not(target_os = "macos"))]
-        let path = &self.patched_path;
-        path.parent()
-            .ok_or_else(|| Error::patching("cache", "Chrome cache directory has no parent"))
-    }
-
-    #[cfg(unix)]
-    fn validate_cache_directory(&self) -> Result<()> {
-        let directory = self.cache_directory()?;
-        let parent = directory
-            .parent()
-            .ok_or_else(|| Error::patching("cache", "Chrome cache directory has no parent"))?;
-        validate_cache_root(parent)?;
-        validate_private_cache_directory(directory)
-    }
-
-    /// Copy the app bundle into owned storage before patching or signing it.
-    #[cfg(target_os = "macos")]
-    fn copy_bundle(&self) -> Result<()> {
-        create_private_cache_directory(self.cache_directory()?)?;
-        let (orig_bundle, dest_bundle) = match (&self.original_bundle, &self.patched_bundle) {
-            (Some(o), Some(d)) => (o, d),
-            _ => return Ok(()),
-        };
-
-        match fs::symlink_metadata(dest_bundle) {
-            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(dest_bundle)?,
-            Ok(_) => {
-                return Err(Error::patching(
-                    "copy_bundle",
-                    "Owned Chrome bundle path is not a directory",
-                ));
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-
-        let orig_bundle = fs::canonicalize(orig_bundle)?;
-        tracing::info!("Creating owned Chrome bundle at {:?}...", dest_bundle);
-        Self::copy_owned_bundle(&orig_bundle, dest_bundle, &orig_bundle, dest_bundle)?;
-
-        self.verify_owned_bundle()
-    }
-
-    #[cfg(target_os = "macos")]
-    fn copy_owned_bundle(
-        src: &Path,
-        dst: &Path,
-        original_bundle: &Path,
-        patched_bundle: &Path,
-    ) -> Result<()> {
-        use std::os::unix::fs::symlink;
-
-        fs::create_dir(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            let src_path = entry.path();
-            let dst_path = dst.join(entry.file_name());
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                Self::copy_owned_bundle(&src_path, &dst_path, original_bundle, patched_bundle)?;
-            } else if file_type.is_file() {
-                fs::copy(&src_path, &dst_path)?;
-            } else if file_type.is_symlink() {
-                let target = fs::read_link(&src_path)?;
-                let resolved = fs::canonicalize(&src_path)?;
-                let relative = resolved.strip_prefix(original_bundle).map_err(|_| {
-                    Error::patching(
-                        "copy_bundle",
-                        format!(
-                            "Bundle symlink escapes source bundle: {}",
-                            src_path.display()
-                        ),
-                    )
-                })?;
-                let target = if target.is_absolute() {
-                    patched_bundle.join(relative)
-                } else {
-                    let mut depth = src.components().count() - original_bundle.components().count();
-                    for component in target.components() {
-                        match component {
-                            std::path::Component::ParentDir => {
-                                depth = depth.checked_sub(1).ok_or_else(|| {
-                                    Error::patching(
-                                        "copy_bundle",
-                                        format!(
-                                            "Bundle symlink traverses outside source bundle: {}",
-                                            src_path.display()
-                                        ),
-                                    )
-                                })?;
-                            }
-                            std::path::Component::Normal(_) => depth += 1,
-                            _ => {}
-                        }
-                    }
-                    target
-                };
-                symlink(target, &dst_path)?;
-            } else {
-                return Err(Error::patching(
-                    "copy_bundle",
-                    format!("Unsupported bundle entry: {}", src_path.display()),
-                ));
-            }
-        }
-        fs::set_permissions(dst, fs::metadata(src)?.permissions())?;
-        Ok(())
-    }
-
-    /// Validate resolved links only after the entire owned tree exists.
-    /// Lexical depth alone cannot account for intermediate directory symlinks.
-    #[cfg(target_os = "macos")]
-    fn verify_owned_bundle(&self) -> Result<()> {
-        let Some(bundle) = &self.patched_bundle else {
-            return Ok(());
-        };
-        let bundle = fs::canonicalize(bundle)?;
-        Self::verify_owned_bundle_links(&bundle, &bundle)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn verify_owned_bundle_links(directory: &Path, bundle: &Path) -> Result<()> {
-        for entry in fs::read_dir(directory)? {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
-            let path = entry.path();
-            if file_type.is_dir() {
-                Self::verify_owned_bundle_links(&path, bundle)?;
-            } else if file_type.is_symlink() && !fs::canonicalize(&path)?.starts_with(bundle) {
-                return Err(Error::patching(
-                    "copy_bundle",
-                    format!("Bundle symlink escapes owned bundle: {}", path.display()),
-                ));
-            }
-        }
-        Ok(())
-    }
-
-    /// Symlink all sibling files from the original binary's directory into the
-    /// patched directory. On Linux, Chromium uses `$ORIGIN` RPATH so it resolves
-    /// shared libraries (libffmpeg.so, etc.) and data files (icudtl.dat, v8
-    /// snapshots, locale paks) relative to the binary. Without these symlinks
-    /// the patched copy in /tmp cannot find its resources and crashes.
-    #[cfg(not(target_os = "macos"))]
-    fn symlink_companion_files(&self) -> Result<()> {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::symlink;
-
-            let orig_dir = match self.original_path.parent() {
-                Some(d) => d,
-                None => {
-                    return Err(Error::patching(
-                        "dependencies",
-                        "Chrome binary has no parent directory",
-                    ))
-                }
-            };
-            let patch_dir = match self.patched_path.parent() {
-                Some(d) => d,
-                None => {
-                    return Err(Error::patching(
-                        "dependencies",
-                        "Patched binary has no parent directory",
-                    ))
-                }
-            };
-
-            // Nothing to do if source and destination are the same directory
-            if orig_dir == patch_dir {
-                return Ok(());
-            }
-
-            let orig_filename = self.original_path.file_name();
-
-            for entry in fs::read_dir(orig_dir)? {
-                let entry = entry?;
-                // Skip the binary itself — we're patching that
-                if Some(entry.file_name().as_os_str()) == orig_filename {
-                    continue;
-                }
-
-                let dest = patch_dir.join(entry.file_name());
-                if !dest.exists() {
-                    symlink(entry.path(), &dest)?;
-                }
-            }
-
-            tracing::debug!(
-                "Symlinked companion files from {:?} into {:?}",
-                orig_dir,
-                patch_dir
-            );
-        }
-        #[cfg(windows)]
-        {
-            let orig_dir = self.original_path.parent().ok_or_else(|| {
-                Error::patching("dependencies", "Chrome binary has no parent directory")
-            })?;
-            let patch_dir = self.patched_path.parent().ok_or_else(|| {
-                Error::patching("dependencies", "Patched binary has no parent directory")
-            })?;
-            for entry in fs::read_dir(orig_dir)? {
-                let entry = entry?;
-                if entry.path() != self.original_path {
-                    copy_dependency(&entry.path(), &patch_dir.join(entry.file_name()))?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Get path to patched binary (patches if needed)
+    /// Path to launch: a verified patched copy, or the original binary when it
+    /// contains nothing the patcher rewrites. Patches on a cache miss.
     pub fn get_patched_path(&self) -> Result<PathBuf> {
-        if !self.is_patched() {
-            self.patch()?;
+        if let Some(path) = self.cached_path() {
+            return Ok(path);
         }
-        Ok(self.patched_path.clone())
+        self.patch_and_resolve()
     }
 
-    /// Perform the patching
+    /// Scan and, if the binary contains markers, patch now without consulting
+    /// the cache first. A valid entry that a concurrent or earlier run already
+    /// published is reused rather than replaced.
     pub fn patch(&self) -> Result<()> {
-        tracing::info!("Patching Chrome binary: {:?}", self.original_path);
-
-        #[cfg(target_os = "macos")]
-        {
-            self.copy_bundle()?;
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            #[cfg(unix)]
-            create_private_cache_directory(self.cache_directory()?)?;
-            #[cfg(not(unix))]
-            if let Some(parent) = self.patched_path.parent() {
-                create_dir_secure(parent)?;
-            }
-            // Symlink companion files (.so, .pak, .dat, .bin, locales, etc.)
-            // so the patched binary can find its resources. Chromium uses
-            // $ORIGIN RPATH, meaning it resolves libraries relative to the
-            // binary — without these symlinks the patched copy crashes.
-            self.symlink_companion_files()?;
-        }
-
-        #[cfg(target_os = "macos")]
-        let read_path = if self.patched_bundle.is_some() {
-            &self.patched_path
-        } else {
-            &self.original_path
-        };
-        #[cfg(not(target_os = "macos"))]
-        let read_path = &self.original_path;
-
-        let file_size = fs::metadata(read_path)?.len() as usize;
-
-        let patch_count = if file_size > 10 * 1024 * 1024 {
-            tracing::debug!(
-                "Using memory-mapped patching for {}MB file",
-                file_size / 1024 / 1024
-            );
-            self.patch_with_mmap(read_path)?
-        } else {
-            tracing::debug!("Using in-memory patching for {}KB file", file_size / 1024);
-            self.patch_in_memory(read_path)?
-        };
-
-        // Make executable on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&self.patched_path)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&self.patched_path, perms)?;
-        }
-
-        // Re-sign on macOS
-        #[cfg(target_os = "macos")]
-        {
-            self.codesign()?;
-        }
-
-        tracing::info!(
-            "Patched {} occurrences, saved to {:?}",
-            patch_count,
-            self.patched_path
-        );
-
-        Ok(())
+        self.patch_and_resolve().map(|_| ())
     }
-
-    fn patch_with_mmap(&self, read_path: &Path) -> Result<usize> {
-        #[cfg(target_os = "macos")]
-        let should_patch_in_place = self.patched_bundle.is_some();
-        #[cfg(not(target_os = "macos"))]
-        let should_patch_in_place = false;
-
-        let file = if should_patch_in_place {
-            OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&self.patched_path)?
-        } else {
-            remove_file_if_exists(&self.patched_path)?;
-            let mut dst = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&self.patched_path)?;
-            let mut src = File::open(read_path)?;
-            std::io::copy(&mut src, &mut dst)?;
-            dst
-        };
-
-        // SAFETY: `file` is a regular file we created exclusively and hold open
-        // read-write; no other process maps or writes it concurrently.
-        let mut mmap = unsafe { MmapMut::map_mut(&file)? };
-        let patch_count = self.apply_patches(&mut mmap)?;
-
-        mmap.flush()?;
-        Ok(patch_count)
-    }
-
-    fn patch_in_memory(&self, read_path: &Path) -> Result<usize> {
-        let mut file = File::open(read_path)?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-
-        let original_len = data.len();
-        let patch_count = self.apply_patches(&mut data)?;
-
-        if data.len() != original_len {
-            return Err(Error::patching(
-                "patch_in_memory",
-                format!(
-                    "Binary size changed during patching: {} -> {}",
-                    original_len,
-                    data.len()
-                ),
-            ));
-        }
-
-        remove_file_if_exists(&self.patched_path)?;
-        let mut out_file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&self.patched_path)?;
-        out_file.write_all(&data)?;
-
-        Ok(patch_count)
-    }
-
-    fn apply_patches(&self, data: &mut [u8]) -> Result<usize> {
-        let matches: Vec<Match> = get_pattern_matcher()?.find_iter(&*data).collect();
-        let mut patch_count = 0;
-        let mut patched_ranges: Vec<(usize, usize)> = Vec::new();
-
-        for m in matches {
-            let pattern_idx = m.pattern().as_usize();
-            let pattern = &PATCH_PATTERNS[pattern_idx];
-            let start = m.start();
-            let end = m.end();
-
-            if patched_ranges
-                .iter()
-                .any(|(ps, pe)| start < *pe && end > *ps)
-            {
-                continue;
-            }
-
-            match pattern.strategy {
-                PatchStrategy::RandomizePrefix => {
-                    let replacement = random_string(pattern.pattern.len());
-                    data[start..end].copy_from_slice(replacement.as_bytes());
-                    patch_count += 1;
-                    patched_ranges.push((start, end));
-                }
-                PatchStrategy::Scramble => {
-                    // Guard against underflow on `len - 1`.
-                    if pattern.pattern.len() >= 2 {
-                        for i in (0..pattern.pattern.len() - 1).step_by(2) {
-                            data.swap(start + i, start + i + 1);
-                        }
-                        patch_count += 1;
-                        patched_ranges.push((start, end));
-                    }
-                }
-                PatchStrategy::Nullify => {
-                    for byte in &mut data[start..end] {
-                        *byte = b' ';
-                    }
-                    patch_count += 1;
-                    patched_ranges.push((start, end));
-                }
-                PatchStrategy::Skip => {
-                    tracing::trace!(
-                        "Found (not patching): {:?} at offset {}",
-                        String::from_utf8_lossy(pattern.pattern),
-                        start
-                    );
-                }
-            }
-        }
-
-        if patch_count > 0 {
-            tracing::debug!("Applied {} patches using Aho-Corasick", patch_count);
-        }
-
-        Ok(patch_count)
-    }
-
-    #[cfg(target_os = "macos")]
-    fn codesign(&self) -> Result<()> {
-        use std::process::Command;
-
-        let sign_path = self.patched_bundle.as_ref().unwrap_or(&self.patched_path);
-
-        tracing::info!("Re-signing {:?} with ad-hoc signature...", sign_path);
-
-        // The copied bundle keeps extended attributes (quarantine, Finder
-        // info) from the installed Chrome, and codesign rejects any bundle
-        // carrying them. Strip them from the private copy first.
-        let _ = Command::new("/usr/bin/xattr")
-            .arg("-cr")
-            .arg(sign_path)
-            .output();
-
-        // Sign without the original entitlements and hardened-runtime flags.
-        // Google Chrome's entitlements include Apple-restricted ones
-        // (application identifier, keychain groups, developer entitlements)
-        // that only Google's signature may claim; macOS kills an ad-hoc
-        // binary carrying them before it prints anything. Without the
-        // hardened runtime, V8's JIT and helper loading need no entitlements.
-        let output = Command::new("/usr/bin/codesign")
-            .args(["--sign", "-", "--force", "--deep"])
-            .arg(sign_path)
-            .output()?;
-        if !output.status.success() {
-            return Err(Error::patching(
-                "codesign",
-                format!(
-                    "Ad-hoc Chrome signing failed ({}): {}",
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr)
-                ),
-            ));
-        }
-        self.verify_signature()?;
-        tracing::info!("Successfully re-signed and verified patched binary");
-        Ok(())
-    }
-
-    #[cfg(target_os = "macos")]
-    fn verify_signature(&self) -> Result<()> {
-        use std::process::Command;
-
-        let sign_path = self.patched_bundle.as_ref().unwrap_or(&self.patched_path);
-        let verification = Command::new("/usr/bin/codesign")
-            .args(["--verify", "--deep", "--strict"])
-            .arg(sign_path)
-            .output()?;
-        if !verification.status.success() {
-            return Err(Error::patching(
-                "codesign",
-                format!(
-                    "Patched Chrome signature verification failed ({}): {}",
-                    verification.status,
-                    String::from_utf8_lossy(&verification.stderr)
-                ),
-            ));
-        }
-        Ok(())
-    }
-}
-
-#[cfg(windows)]
-fn copy_dependency(source: &Path, destination: &Path) -> Result<()> {
-    if source.is_dir() {
-        fs::create_dir_all(destination)?;
-        for entry in fs::read_dir(source)? {
-            let entry = entry?;
-            copy_dependency(&entry.path(), &destination.join(entry.file_name()))?;
-        }
-    } else {
-        fs::copy(source, destination)?;
-    }
-    Ok(())
 }
 
 fn random_string(len: usize) -> String {
@@ -999,454 +199,4 @@ fn random_string(len: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_find_chrome() {
-        if let Ok(path) = find_chrome() {
-            println!("Found Chrome at: {:?}", path);
-            assert!(path.exists());
-        }
-    }
-
-    /// Verify that find_chrome returns an ELF binary, not a shell wrapper.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_find_chrome_returns_elf() {
-        if let Ok(path) = find_chrome() {
-            assert!(
-                is_elf(&path),
-                "find_chrome() returned {:?} which is not an ELF binary",
-                path,
-            );
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn test_is_elf() {
-        // /usr/bin/ls should be an ELF binary on any Linux
-        let ls = Path::new("/usr/bin/ls");
-        if ls.exists() {
-            assert!(is_elf(ls), "/usr/bin/ls should be ELF");
-        }
-
-        // A non-existent path is not ELF
-        assert!(!is_elf(Path::new("/nonexistent")));
-    }
-
-    #[test]
-    fn test_random_string() {
-        let s = random_string(10);
-        assert_eq!(s.len(), 10);
-        assert!(s.chars().all(|c| c.is_alphanumeric()));
-    }
-
-    #[test]
-    fn test_aho_corasick_patterns() {
-        let test_data = b"$cdc_test devtoolsw HeadlessChrome webdriver";
-        let ac = get_pattern_matcher().expect("pattern matcher should build");
-        let matches: Vec<_> = ac.find_iter(test_data).collect();
-        assert!(
-            matches.len() >= 3,
-            "every rewritten literal except webdriver must match"
-        );
-        assert!(
-            !matches
-                .iter()
-                .any(|m| &test_data[m.start()..m.end()] == b"webdriver"),
-            "webdriver must not be a rewrite pattern"
-        );
-    }
-
-    #[test]
-    fn test_verify_matcher_matches_rewritten_patterns() {
-        let ac = get_verify_matcher().expect("verify matcher should build");
-        // Patterns that patching actually rewrites must be flagged by the
-        // verification matcher (an unpatched sample should fail verification).
-        assert!(ac.is_match(b"devtoolsw"), "should match devtoolsw");
-        assert!(ac.is_match(b"$cdc_"), "should match $cdc_");
-        assert!(
-            !ac.is_match(b"webdriver"),
-            "webdriver is no longer rewritten and must not fail verification"
-        );
-    }
-
-    #[test]
-    fn test_verify_matcher_excludes_skip_patterns() {
-        let ac = get_verify_matcher().expect("verify matcher should build");
-        // Skip-strategy patterns are detection-only and never rewritten, so
-        // they must NOT be part of verification — otherwise every real Chrome
-        // binary would look "unpatched" forever.
-        assert!(
-            !ac.is_match(b"Runtime.enable"),
-            "Skip pattern Runtime.enable must be excluded from verification"
-        );
-        assert!(
-            !ac.is_match(b"Page.addScriptToEvaluateOnNewDocument"),
-            "Skip pattern must be excluded from verification"
-        );
-    }
-
-    #[test]
-    fn test_apply_patches_preserves_length() {
-        // Build a patcher against a real (throwaway) file so ChromePatcher::new
-        // succeeds, then patch an in-memory buffer directly.
-        let dir = std::env::temp_dir().join(format!("eoka-patcher-test-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join("fake-chrome");
-        fs::write(&fake, b"placeholder").unwrap();
-
-        let patcher = ChromePatcher::new(&fake).expect("patcher should construct");
-
-        let mut buf = b"prefix devtoolsw suffix".to_vec();
-        let original_len = buf.len();
-        let count = patcher.apply_patches(&mut buf).expect("apply_patches");
-
-        // Scramble strategy swaps bytes in place: length is unchanged.
-        assert_eq!(buf.len(), original_len);
-        assert!(count >= 1, "devtoolsw should have been patched");
-        // The literal "devtoolsw" must no longer be present verbatim.
-        assert!(
-            !buf.windows(b"devtoolsw".len()).any(|w| w == b"devtoolsw"),
-            "devtoolsw should have been scrambled"
-        );
-
-        let _ = fs::remove_file(&fake);
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn test_webdriver_literal_is_not_rewritten() {
-        // Scrambling this literal renames Chrome's native
-        // `Navigator.prototype.webdriver` accessor to `ewdbirevr`, which is a
-        // reflection-visible automation marker. The JS evasion handles it.
-        let dir = std::env::temp_dir().join(format!("eoka-patcher-test-wd-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join("fake-chrome");
-        fs::write(&fake, b"placeholder").unwrap();
-        let patcher = ChromePatcher::new(&fake).expect("patcher should construct");
-
-        let mut buf = b"prefix webdriver suffix".to_vec();
-        patcher.apply_patches(&mut buf).expect("apply_patches");
-        assert!(
-            buf.windows(b"webdriver".len()).any(|w| w == b"webdriver"),
-            "webdriver literal must survive binary patching"
-        );
-
-        let _ = fs::remove_file(&fake);
-        let _ = fs::remove_dir_all(&dir);
-    }
-}
-
-#[cfg(all(test, unix))]
-mod cache_directory_tests {
-    use super::*;
-    use crate::cdp::transport::RuntimeDirectory;
-    use std::os::unix::fs::{symlink, PermissionsExt};
-
-    #[test]
-    fn private_cache_root_under_non_sticky_writable_ancestor_is_rejected() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let shared = runtime.path().join("shared");
-        let private_root = shared.join("private-cache-root");
-        fs::create_dir_all(&private_root).unwrap();
-        fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
-        fs::set_permissions(&private_root, fs::Permissions::from_mode(0o700)).unwrap();
-        let executable = runtime.path().join("chrome");
-        let original = b"\x7fELF devtoolsw";
-        fs::write(&executable, original).unwrap();
-
-        assert!(
-            ChromePatcher::new_with_root(&executable, &private_root).is_err(),
-            "a private leaf must not hide a renameable, non-sticky shared ancestor"
-        );
-        assert_eq!(fs::read(&executable).unwrap(), original);
-        assert_eq!(fs::read_dir(private_root).unwrap().count(), 0);
-    }
-
-    #[test]
-    fn symlink_cache_parent_cannot_modify_source() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let source = runtime.path().join("source");
-        fs::create_dir(&source).unwrap();
-        let executable = source.join("chrome");
-        let original = b"\x7fELF devtoolsw";
-        fs::write(&executable, original).unwrap();
-        let patcher = ChromePatcher::new_with_root(&executable, runtime.path()).unwrap();
-        let cache = patcher.cache_directory().unwrap();
-        symlink(&source, cache).unwrap();
-        let mode = fs::metadata(&source).unwrap().permissions().mode();
-
-        assert!(!patcher.is_patched());
-        assert!(patcher.patch().is_err());
-        assert_eq!(fs::read(&executable).unwrap(), original);
-        assert_eq!(fs::metadata(&source).unwrap().permissions().mode(), mode);
-        assert!(fs::symlink_metadata(cache).unwrap().is_symlink());
-    }
-
-    #[test]
-    fn existing_non_private_cache_directory_is_rejected_without_chmod() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let executable = runtime.path().join("chrome");
-        let original = b"\x7fELF devtoolsw";
-        fs::write(&executable, original).unwrap();
-        let patcher = ChromePatcher::new_with_root(&executable, runtime.path()).unwrap();
-        let cache = patcher.cache_directory().unwrap();
-        fs::create_dir(cache).unwrap();
-        fs::set_permissions(cache, fs::Permissions::from_mode(0o755)).unwrap();
-        fs::write(cache.join("keep"), b"existing cache data").unwrap();
-
-        assert!(!patcher.is_patched());
-        assert!(patcher.patch().is_err());
-        assert_eq!(
-            fs::metadata(cache).unwrap().permissions().mode() & 0o777,
-            0o755
-        );
-        assert_eq!(
-            fs::read(cache.join("keep")).unwrap(),
-            b"existing cache data"
-        );
-        assert_eq!(fs::read(executable).unwrap(), original);
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod runtime_tests {
-    use super::*;
-    use crate::cdp::transport::RuntimeDirectory;
-
-    #[test]
-    fn concurrent_runtime_patchers_preserve_source_and_dependencies() {
-        let root = RuntimeDirectory::create(None).unwrap();
-        let source_dir = root.path().join("source");
-        fs::create_dir(&source_dir).unwrap();
-        let source = source_dir.join("chrome");
-        let original = b"\x7fELF prefix devtoolsw suffix";
-        fs::write(&source, original).unwrap();
-        fs::write(source_dir.join("icudtl.dat"), b"dependency").unwrap();
-        let runtimes: Vec<_> = (0..8)
-            .map(|_| RuntimeDirectory::create(root.path().to_str()).unwrap())
-            .collect();
-        let paths = std::thread::scope(|scope| {
-            let workers: Vec<_> = runtimes
-                .iter()
-                .map(|runtime| {
-                    let source = &source;
-                    scope.spawn(move || {
-                        let patcher =
-                            ChromePatcher::new_in_runtime(source, runtime.path()).unwrap();
-                        let path = patcher.get_patched_path().unwrap();
-                        assert!(path.starts_with(runtime.path()));
-                        assert_eq!(
-                            fs::read(path.parent().unwrap().join("icudtl.dat")).unwrap(),
-                            b"dependency"
-                        );
-                        let patched = fs::read(&path).unwrap();
-                        assert_eq!(patched.len(), original.len());
-                        assert_ne!(patched, original);
-                        path
-                    })
-                })
-                .collect();
-            workers
-                .into_iter()
-                .map(|worker| worker.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        assert_eq!(
-            paths.iter().collect::<std::collections::HashSet<_>>().len(),
-            paths.len()
-        );
-        assert_eq!(fs::read(&source).unwrap(), original);
-        drop(runtimes);
-        assert!(paths.iter().all(|path| !path.exists()));
-        assert_eq!(fs::read(&source).unwrap(), original);
-    }
-
-    #[test]
-    fn explicit_wrapper_resolution_does_not_select_an_unrelated_system_chrome() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let wrapper = runtime.path().join("custom-wrapper");
-        fs::write(&wrapper, b"#!/bin/sh\nexit 1\n").unwrap();
-        assert!(ChromePatcher::new_in_runtime(&wrapper, runtime.path()).is_err());
-        let binary = runtime.path().join("chrome");
-        fs::write(&binary, b"\x7fELF devtoolsw").unwrap();
-        assert_eq!(resolve_to_elf(&wrapper, true), binary);
-    }
-}
-
-#[cfg(all(test, target_os = "macos"))]
-mod macos_bundle_tests {
-    use super::*;
-    use crate::cdp::transport::RuntimeDirectory;
-    use std::os::unix::fs::{symlink, MetadataExt};
-
-    #[test]
-    fn symlink_cache_parent_cannot_delete_original_bundle() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let applications = runtime.path().join("Applications");
-        let source = applications.join("Chrome.app");
-        let executable = source.join("Contents/MacOS/Chrome");
-        fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        let original = b"not a Mach-O binary devtoolsw";
-        fs::write(&executable, original).unwrap();
-        let resource = source.join("resource");
-        fs::write(&resource, b"original bundle resource").unwrap();
-        let patcher = ChromePatcher::new_with_root(&executable, runtime.path()).unwrap();
-        let cache = patcher.cache_directory().unwrap();
-        symlink(&applications, cache).unwrap();
-        let mode = fs::metadata(&applications).unwrap().mode();
-        assert_eq!(
-            fs::canonicalize(patcher.patched_bundle.as_ref().unwrap()).unwrap(),
-            fs::canonicalize(&source).unwrap()
-        );
-
-        assert!(!patcher.is_patched());
-        assert!(patcher.patch().is_err());
-        assert_eq!(fs::read(&executable).unwrap(), original);
-        assert_eq!(fs::read(&resource).unwrap(), b"original bundle resource");
-        assert_eq!(fs::metadata(&applications).unwrap().mode(), mode);
-        assert!(fs::symlink_metadata(cache).unwrap().is_symlink());
-    }
-
-    #[test]
-    fn owned_bundle_preserves_internal_links_without_sharing_source_files() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let source = runtime.path().join("source.app");
-        let frameworks = source.join("Contents/Frameworks/Chrome.framework");
-        fs::create_dir_all(frameworks.join("Versions/A")).unwrap();
-        fs::create_dir_all(source.join("Contents/MacOS")).unwrap();
-        fs::write(source.join("Contents/MacOS/Chrome"), b"devtoolsw").unwrap();
-        let resource = frameworks.join("Versions/A/resource");
-        fs::write(&resource, b"verified resource").unwrap();
-        symlink("A", frameworks.join("Versions/Current")).unwrap();
-        symlink("Versions/Current/resource", frameworks.join("resource")).unwrap();
-        symlink(&resource, source.join("Contents/absolute-resource")).unwrap();
-        let destination = runtime.path().join("owned.app");
-        ChromePatcher::copy_owned_bundle(&source, &destination, &source, &destination).unwrap();
-        let destination = fs::canonicalize(destination).unwrap();
-        ChromePatcher::verify_owned_bundle_links(&destination, &destination).unwrap();
-        let owned_resource = destination.join("Contents/Frameworks/Chrome.framework/resource");
-        assert_eq!(fs::read(&owned_resource).unwrap(), b"verified resource");
-        assert_ne!(
-            fs::metadata(&resource).unwrap().ino(),
-            fs::metadata(&owned_resource).unwrap().ino()
-        );
-        assert!(
-            fs::canonicalize(destination.join("Contents/absolute-resource"))
-                .unwrap()
-                .starts_with(&destination)
-        );
-        fs::write(&owned_resource, b"owned signing changes").unwrap();
-        assert_eq!(fs::read(&resource).unwrap(), b"verified resource");
-        fs::remove_dir_all(&destination).unwrap();
-        assert_eq!(fs::read(&resource).unwrap(), b"verified resource");
-    }
-
-    #[test]
-    fn owned_bundle_rejects_links_outside_the_source() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let source = runtime.path().join("source.app");
-        fs::create_dir(&source).unwrap();
-        let outside = runtime.path().join("verified-cache-file");
-        fs::write(&outside, b"must not be signed").unwrap();
-        symlink("../verified-cache-file", source.join("external")).unwrap();
-        let destination = runtime.path().join("owned.app");
-        assert!(
-            ChromePatcher::copy_owned_bundle(&source, &destination, &source, &destination).is_err()
-        );
-        assert_eq!(fs::read(&outside).unwrap(), b"must not be signed");
-    }
-
-    #[test]
-    fn owned_bundle_rejects_external_round_trips_into_source() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let source = runtime.path().join("source.app");
-        fs::create_dir(&source).unwrap();
-        let resource = source.join("resource");
-        fs::write(&resource, b"verified resource").unwrap();
-        symlink(&resource, runtime.path().join("back-in")).unwrap();
-        symlink("../back-in", source.join("indirect")).unwrap();
-        let destination = runtime.path().join("owned.app");
-        assert!(
-            ChromePatcher::copy_owned_bundle(&source, &destination, &source, &destination).is_err()
-        );
-        assert_eq!(fs::read(resource).unwrap(), b"verified resource");
-    }
-
-    #[test]
-    fn owned_bundle_rejects_relocated_links_back_into_source_before_patching() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let source = runtime.path().join("source.app");
-        let executable = source.join("Contents/MacOS/Chrome");
-        fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        let original = b"not a Mach-O binary devtoolsw";
-        fs::write(&executable, original).unwrap();
-        let source = fs::canonicalize(source).unwrap();
-        let resource = source.join("resource");
-        fs::write(&resource, b"must not be signed").unwrap();
-        let patcher =
-            ChromePatcher::new_in_runtime(&fs::canonicalize(&executable).unwrap(), runtime.path())
-                .unwrap();
-        let destination = patcher.patched_bundle.as_ref().unwrap();
-
-        // The directory link resets actual resolution to the bundle root,
-        // while lexical depth still counts all the preceding nested names.
-        let canonical_destination = fs::canonicalize(runtime.path())
-            .unwrap()
-            .join(destination.strip_prefix(runtime.path()).unwrap());
-        let depth = source
-            .components()
-            .count()
-            .max(canonical_destination.components().count());
-        let mut prefix = PathBuf::new();
-        for _ in 1..depth {
-            prefix.push("nested");
-        }
-        fs::create_dir_all(source.join(&prefix)).unwrap();
-        symlink(&source, source.join(&prefix).join("root")).unwrap();
-        let mut target = prefix.join("root");
-        for _ in 0..depth {
-            target.push("..");
-        }
-        target.push(resource.strip_prefix("/").unwrap());
-        symlink(target, source.join("indirect")).unwrap();
-        assert_eq!(fs::canonicalize(source.join("indirect")).unwrap(), resource);
-
-        let error = patcher.patch().unwrap_err();
-        assert!(
-            error.to_string().contains("escapes owned bundle"),
-            "{error}"
-        );
-        assert_eq!(
-            fs::canonicalize(destination.join("indirect")).unwrap(),
-            resource,
-            "relocation must expose the otherwise accepted source-file alias"
-        );
-        assert_eq!(fs::read(&resource).unwrap(), b"must not be signed");
-        assert_eq!(fs::read(&executable).unwrap(), original);
-        assert_eq!(fs::read(&patcher.patched_path).unwrap(), original);
-    }
-
-    #[test]
-    fn signing_failure_is_not_a_successful_patch() {
-        let runtime = RuntimeDirectory::create(None).unwrap();
-        let executable = runtime.path().join("invalid.app/Contents/MacOS/Chrome");
-        fs::create_dir_all(executable.parent().unwrap()).unwrap();
-        let original = b"not a Mach-O binary devtoolsw";
-        fs::write(&executable, original).unwrap();
-        File::options()
-            .write(true)
-            .open(&executable)
-            .unwrap()
-            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1))
-            .unwrap();
-        let patcher = ChromePatcher::new_in_runtime(&executable, runtime.path()).unwrap();
-        assert!(patcher.patch().is_err());
-        assert!(!patcher.is_patched());
-        assert!(patcher.get_patched_path().is_err());
-        assert_eq!(fs::read(&executable).unwrap(), original);
-    }
-}
+mod tests;

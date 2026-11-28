@@ -93,37 +93,3 @@ impl ExceptionDetails {
         )
     }
 }
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeCallFunctionOn {
-    pub function_declaration: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<Vec<CallArgument>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub silent: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub return_by_value: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub await_promise: Option<bool>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CallArgument {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_id: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RuntimeCallFunctionOnResult {
-    #[serde(default)]
-    pub result: RemoteObject,
-    #[serde(default)]
-    pub exception_details: Option<ExceptionDetails>,
-}

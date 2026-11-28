@@ -1,5 +1,9 @@
-use super::*;
+use super::{
+    dispatch_coordinated_key_event, dispatch_coordinated_mouse_event, held_key_from_combo,
+    input_state_error, key_event, sleep_ms, HeldInputState, MouseButton, MouseEventType, Session,
+};
 use crate::action::dispatch::Dispatch;
+use crate::error::Result;
 use serde_json::json;
 use tokio::sync::OwnedMutexGuard;
 
@@ -36,18 +40,28 @@ impl ActionInput {
             .send(
                 &self.session,
                 "Input.dispatchMouseEvent",
-                json!({"type":"mouseMoved","x":x,"y":y,"buttons":0}),
+                json!({"type":"mouseMoved","x":x,"y":y,"buttons":0,"force":0.0}),
                 true,
             )
             .await?;
+        self.state.pointer = Some((x, y));
         Ok(())
     }
 
+    /// Record a pointer position dispatched outside this helper.
+    pub fn record_pointer(&mut self, x: f64, y: f64) {
+        self.state.pointer = Some((x, y));
+    }
+
     pub async fn human_move(&mut self, dispatch: &Dispatch, x: f64, y: f64) -> Result<()> {
-        let start = (
-            (x + fastrand::f64() * 400.0 - 200.0).max(0.0),
-            (y + fastrand::f64() * 200.0 - 100.0).max(0.0),
-        );
+        // Start where the pointer really is; only an untouched page has no
+        // position, and then the path comes in from a nearby point.
+        let start = self.state.pointer.unwrap_or_else(|| {
+            (
+                (x + fastrand::f64() * 400.0 - 200.0).max(0.0),
+                (y + fastrand::f64() * 200.0 - 100.0).max(0.0),
+            )
+        });
         for (px, py) in crate::stealth::human::bezier_curve(start, (x, y), 24) {
             self.move_to(dispatch, px, py).await?;
             sleep_ms(5 + fastrand::u64(0..8)).await;
@@ -67,11 +81,12 @@ impl ActionInput {
             .state
             .reserve_mouse_down(MouseButton::Left, (x, y))
             .map_err(input_state_error)?;
-        dispatch.send(&self.session, "Input.dispatchMouseEvent", json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":buttons,"clickCount":count}), false).await?;
+        dispatch.send(&self.session, "Input.dispatchMouseEvent", json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":buttons,"clickCount":count,"force":0.5}), false).await?;
+        self.state.pointer = Some((x, y));
         if human {
             sleep_ms(50 + fastrand::u64(0..70)).await;
         }
-        dispatch.send(&self.session, "Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":count}), false).await?;
+        dispatch.send(&self.session, "Input.dispatchMouseEvent", json!({"type":"mouseReleased","x":x,"y":y,"button":"left","buttons":0,"clickCount":count,"force":0.0}), false).await?;
         self.state.finish_mouse_up(MouseButton::Left);
         Ok(())
     }
@@ -114,7 +129,43 @@ impl ActionInput {
         mode: crate::InputMode,
         mut before_insert: impl FnMut() -> F,
     ) -> Result<()> {
-        if mode == crate::InputMode::Sequential && !text.is_empty() {
+        if mode == crate::InputMode::Human && !text.is_empty() {
+            for ch in text.chars() {
+                before_insert().await?;
+                // A newline is the Enter key, which Chrome only inserts as "\r".
+                let (key, typed) = if ch == '\n' {
+                    ("Enter".to_string(), "\r".to_string())
+                } else {
+                    (ch.to_string(), ch.to_string())
+                };
+                let (code, virtual_key, shift) = crate::keyboard::char_key(ch);
+                let mut event = json!({"type":"keyDown","key":key,"code":code,"text":typed,"unmodifiedText":typed,
+                    "windowsVirtualKeyCode":virtual_key,"nativeVirtualKeyCode":virtual_key,"modifiers":if shift { 8 } else { 0 }});
+                dispatch
+                    .send(
+                        &self.session,
+                        "Input.dispatchKeyEvent",
+                        event.clone(),
+                        false,
+                    )
+                    .await?;
+                sleep_ms(fastrand::u64(15..45)).await;
+                event["type"] = json!("keyUp");
+                if let Some(fields) = event.as_object_mut() {
+                    fields.remove("text");
+                    fields.remove("unmodifiedText");
+                }
+                dispatch
+                    .send(&self.session, "Input.dispatchKeyEvent", event, false)
+                    .await?;
+                let pause = if ch == ' ' || ch.is_ascii_punctuation() {
+                    fastrand::u64(90..220)
+                } else {
+                    fastrand::u64(50..150)
+                };
+                sleep_ms(pause).await;
+            }
+        } else if mode == crate::InputMode::Sequential && !text.is_empty() {
             for ch in text.chars() {
                 before_insert().await?;
                 dispatch
@@ -153,7 +204,7 @@ impl ActionInput {
         self.state
             .reserve_mouse_down(MouseButton::Left, (x, y))
             .map_err(input_state_error)?;
-        dispatch.send(&self.session,"Input.dispatchMouseEvent",json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1}),false).await?;
+        dispatch.send(&self.session,"Input.dispatchMouseEvent",json!({"type":"mousePressed","x":x,"y":y,"button":"left","buttons":1,"clickCount":1,"force":0.5}),false).await?;
         for step in 1..=24 {
             let t = f64::from(step) / 24.0;
             let shifted = t - 1.0;
@@ -164,14 +215,16 @@ impl ActionInput {
                 .send(
                     &self.session,
                     "Input.dispatchMouseEvent",
-                    json!({"type":"mouseMoved","x":px,"y":py,"buttons":1}),
+                    json!({"type":"mouseMoved","x":px,"y":py,"buttons":1,"force":0.5}),
                     false,
                 )
                 .await?;
+            self.state.pointer = Some((px, py));
             sleep_ms(8).await;
         }
-        dispatch.send(&self.session,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x+dx,"y":y+dy,"button":"left","buttons":0,"clickCount":1}),false).await?;
+        dispatch.send(&self.session,"Input.dispatchMouseEvent",json!({"type":"mouseReleased","x":x+dx,"y":y+dy,"button":"left","buttons":0,"clickCount":1,"force":0.0}),false).await?;
         self.state.finish_mouse_up(MouseButton::Left);
+        self.state.pointer = Some((x + dx, y + dy));
         Ok(())
     }
 

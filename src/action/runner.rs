@@ -12,7 +12,16 @@ use super::{
     perform::{self, Verification},
     *,
 };
-use crate::{cdp::transport::CdpMessage, page::ActionInput, Error, Page, Result};
+use crate::{
+    cdp::transport::CdpMessage,
+    error::classify::{cdp_failure, CdpFailure},
+    page::ActionInput,
+    Error, ErrorCode, Page, Result,
+};
+
+/// How long a filled value must stay unchanged and wrong before fill reports
+/// [`Error::ValueMismatch`].
+const VALUE_SETTLE: Duration = Duration::from_millis(750);
 
 struct Cleanup {
     gate: Option<OwnedMutexGuard<()>>,
@@ -95,13 +104,15 @@ impl Page {
         };
         let execution = async {
             if options.timeout_ms == 0 || options.timeout_ms > 86_400_000 {
-                return Err(Error::cdp_msg(
-                    "invalid_timeout: action timeout must be between 1 and 86400000ms",
+                return Err(Error::coded(
+                    ErrorCode::InvalidTimeout,
+                    "action timeout must be between 1 and 86400000ms",
                 ));
             }
             if action.requires_expectation() && options.expect.is_none() && !exploratory {
-                return Err(Error::cdp_msg(
-                    "expectation_required: action requires an expected result",
+                return Err(Error::coded(
+                    ErrorCode::ExpectationRequired,
+                    "action requires an expected result",
                 ));
             }
             cleanup.gate = Some(state.gate.clone().lock_owned().await);
@@ -112,12 +123,13 @@ impl Page {
             }
             if let Some(expect) = &options.expect {
                 validate_expectation(expect, 0)?;
-            }
-            if let Some(expect) = &options.expect {
                 if options.destination != Destination::NewTab
                     && self.check_expectation(expect).await?
                 {
-                    return Err(Error::cdp_msg("expectation_already_satisfied: choose a condition that proves a new result"));
+                    return Err(Error::coded(
+                        ErrorCode::ExpectationAlreadySatisfied,
+                        "choose a condition that proves a new result",
+                    ));
                 }
             }
             let mut destination_watch = if options.destination != Destination::Current
@@ -185,22 +197,50 @@ impl Page {
             dispatch.note("verification");
             match verification {
                 Verification::Properties { field, expected } => {
+                    // A control that settles on another value (input masks,
+                    // maxlength, trimming) will never match; report that
+                    // once the value has been stable for a while instead of
+                    // waiting out the deadline.
+                    let mut settled: Option<(Value, tokio::time::Instant)> = None;
                     loop {
                         if let Some(node) = node.as_ref() {
                             let properties = node.properties().await?;
                             if properties["connected"] != true {
                                 return Err(Error::cdp_msg("Target detached after dispatch"));
                             }
-                            if super::locator::Node::property(&properties, field) == expected {
+                            let actual = super::locator::Node::property(&properties, field);
+                            if actual == expected {
                                 break;
+                            }
+                            if field == "value" {
+                                match &settled {
+                                    Some((value, since)) if *value == actual => {
+                                        if since.elapsed() >= VALUE_SETTLE {
+                                            return Err(value_mismatch(
+                                                &action, &expected, &actual,
+                                            ));
+                                        }
+                                    }
+                                    _ => settled = Some((actual, tokio::time::Instant::now())),
+                                }
                             }
                         }
                         perform::pause().await;
                     }
                     receipt.verification = Some(field.into());
                 }
-                Verification::Navigation { .. }
+                Verification::Navigation { .. } | Verification::NavigationAborted { .. }
                     if matches!(options.expect, Some(Expectation::DownloadStarted)) => {}
+                Verification::NavigationAborted { download } => {
+                    return Err(Error::coded(
+                        ErrorCode::NavigationAborted,
+                        if download {
+                            "the navigation became a download; expect DownloadStarted to wait for it"
+                        } else {
+                            "Chrome aborted the navigation before it committed"
+                        },
+                    ));
+                }
                 Verification::Navigation { loader } => {
                     loop {
                         let event = match events.recv().await {
@@ -236,7 +276,7 @@ impl Page {
                             method,
                             params,
                             session_id,
-                        } = event
+                        } = &*event
                         {
                             if session_id.as_deref() != Some(self.session().session_id()) {
                                 continue;
@@ -255,7 +295,7 @@ impl Page {
                         }
                     }
                     self.invalidate_document();
-                    while !self.check_expectation(&Expectation::DocumentReady).await? {
+                    while !self.check_settling(&Expectation::DocumentReady).await? {
                         perform::pause().await;
                     }
                     receipt.verification = Some("document_ready".into());
@@ -267,7 +307,7 @@ impl Page {
             }
             if let Some(Expectation::DownloadStarted) = &options.expect {
                 loop {
-                    match events.recv().await.map_err(|error| {
+                    match &*events.recv().await.map_err(|error| {
                         Error::transport_io(
                             "Download event stream lost",
                             std::io::Error::other(error),
@@ -290,7 +330,7 @@ impl Page {
                 loop {
                     let target = if let Some(watch) = destination_watch.as_mut() {
                         watch.check(expect).await?
-                    } else if self.check_expectation(expect).await? {
+                    } else if self.check_settling(expect).await? {
                         Some(self.target_id().into())
                     } else {
                         None
@@ -345,35 +385,7 @@ impl Page {
                         .input
                         .as_ref()
                         .is_some_and(ActionInput::has_held_input);
-                let code = match &source {
-                    Error::Timeout(_) => "action_timeout",
-                    Error::InputState(_) => "input_state",
-                    Error::Cdp { message, .. } if message.starts_with("unsupported_input:") => {
-                        "unsupported_input"
-                    }
-                    Error::Cdp { message, .. } if message.starts_with("invalid_input_value:") => {
-                        "invalid_input_value"
-                    }
-                    Error::ElementNotFound(_) | Error::ElementNotVisible { .. } => {
-                        "target_unavailable"
-                    }
-                    Error::Cdp { message, .. } if message.starts_with("history_unavailable:") => {
-                        "history_unavailable"
-                    }
-                    Error::Cdp { message, .. } if message.starts_with("ambiguous_target:") => {
-                        "ambiguous_target"
-                    }
-                    Error::Cdp { message, .. } if message.starts_with("expectation_required:") => {
-                        "expectation_required"
-                    }
-                    Error::Cdp { message, .. }
-                        if message.starts_with("expectation_already_satisfied:") =>
-                    {
-                        "expectation_already_satisfied"
-                    }
-                    _ => "action_failed",
-                }
-                .into();
+                let code = action_code(&source);
                 Err(Error::Action {
                     code,
                     receipt: Box::new(receipt),
@@ -392,8 +404,9 @@ impl Page {
                 .await,
             Expectation::All { conditions } => {
                 if conditions.is_empty() {
-                    return Err(Error::cdp_msg(
-                        "invalid_expectation: all requires at least one condition",
+                    return Err(Error::coded(
+                        ErrorCode::InvalidExpectation,
+                        "all requires at least one condition",
                     ));
                 }
                 for condition in conditions {
@@ -453,6 +466,24 @@ impl Page {
         })
     }
 
+    /// Checks an expectation after dispatch. Input often starts a navigation,
+    /// which destroys the context the check runs in; that means "not yet",
+    /// not failure, because the next document may satisfy it.
+    async fn check_settling(&self, expect: &Expectation) -> Result<bool> {
+        match self.check_expectation(expect).await {
+            Err(error)
+                if matches!(
+                    cdp_failure(&error),
+                    Some(CdpFailure::ContextLost | CdpFailure::NodeGone)
+                ) =>
+            {
+                tracing::debug!("expectation check raced a document change: {error}");
+                Ok(false)
+            }
+            result => result,
+        }
+    }
+
     /// Wait for observable page state without dispatching input or replaying an action.
     pub async fn wait_for_expectation(
         &self,
@@ -477,15 +508,42 @@ impl Page {
     }
 }
 
+fn value_mismatch(action: &Action, expected: &Value, actual: &Value) -> Error {
+    let chars = |v: &Value| v.as_str().map_or(0, |s| s.chars().count());
+    Error::ValueMismatch {
+        selector: action.target().map_or_else(
+            || "the focused control".into(),
+            |t| format!("{:?}", t.query),
+        ),
+        expected_chars: chars(expected),
+        actual_chars: chars(actual),
+    }
+}
+
+/// The stable code an action failure reports for its underlying cause.
+fn action_code(source: &Error) -> ErrorCode {
+    source.code().unwrap_or(match source {
+        Error::Timeout(_) => ErrorCode::ActionTimeout,
+        Error::InputState(_) => ErrorCode::InputState,
+        Error::ElementNotFound(_) | Error::ElementNotVisible { .. } => ErrorCode::TargetUnavailable,
+        Error::Navigation(_) => ErrorCode::NavigationFailed,
+        _ => ErrorCode::ActionFailed,
+    })
+}
+
 fn validate_expectation(expectation: &Expectation, depth: usize) -> Result<()> {
     if depth > 8 {
-        return Err(Error::cdp_msg("invalid_expectation: nesting exceeds 8"));
+        return Err(Error::coded(
+            ErrorCode::InvalidExpectation,
+            "nesting exceeds 8",
+        ));
     }
     match expectation {
         Expectation::All { conditions } => {
             if conditions.is_empty() || conditions.len() > 16 {
-                return Err(Error::cdp_msg(
-                    "invalid_expectation: all requires 1 through 16 conditions",
+                return Err(Error::coded(
+                    ErrorCode::InvalidExpectation,
+                    "all requires 1 through 16 conditions",
                 ));
             }
             for condition in conditions {
@@ -493,8 +551,9 @@ fn validate_expectation(expectation: &Expectation, depth: usize) -> Result<()> {
             }
         }
         Expectation::DownloadStarted if depth > 0 => {
-            return Err(Error::cdp_msg(
-                "invalid_expectation: download_started must be a standalone event expectation",
+            return Err(Error::coded(
+                ErrorCode::InvalidExpectation,
+                "download_started must be a standalone event expectation",
             ))
         }
         _ => {}

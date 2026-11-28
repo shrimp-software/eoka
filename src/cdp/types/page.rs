@@ -30,8 +30,6 @@ pub struct PageNavigateResult {
 
 pub type PageEnable = Empty;
 
-pub type PageGetNavigationHistory = Empty;
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PageAddScriptToEvaluateOnNewDocument {

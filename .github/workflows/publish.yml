@@ -1,10 +1,12 @@
 name: Publish
 
+# Publishes only commits on main that passed CI. The job is a no-op unless
+# Cargo.toml names a version crates.io does not have yet.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-    paths:
-      - "Cargo.toml"
   workflow_dispatch:
 
 permissions:
@@ -16,7 +18,9 @@ env:
 jobs:
   publish:
     name: Tag & Publish to crates.io
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' && (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -24,6 +28,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          # The commit CI tested, not whatever main points at now.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Get version from Cargo.toml
         id: version

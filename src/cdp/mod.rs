@@ -20,6 +20,7 @@ pub(crate) mod types;
 // generic `send` + accessors public) and `Transport`. The hand-written
 // `cdp::types` structs stay crate-private so adding a CDP field is never a
 // breaking change.
+pub(crate) use connection::ObjectGroup;
 pub use connection::{Connection, Session};
 pub use discover::{auto_connect, discover_browser_ws, discover_pages, PageTarget};
 pub use transport::Transport;

@@ -8,11 +8,12 @@
 //!
 //! ## Features
 //!
-//! - **Stealth by Default** - Binary patching, 15 JS evasions, human-like mouse/typing
+//! - **Stealth by Default** - Native-shaped JS evasions, isolated-world locators,
+//!   CDP command filtering, human-like mouse/typing (binary patching is opt-in)
 //! - **Puppeteer-like API** - `click()`, `type()`, `wait_for()`, `screenshot()`, etc.
 //! - **Direct CDP Transport** - No separate WebDriver server or browser-driver dependency
 //! - **AI-Agent Ready** - PageState introspection, element indexing, text extraction
-//! - **Fast** - Lazy evasion scripts, mmap patching, stack-allocated paths
+//! - **Fast** - Lazy evasion scripts, one CDP writer task, cached isolated worlds
 //!
 //! ## Quick Start
 //!
@@ -21,7 +22,7 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> eoka::Result<()> {
-//!     // Launch browser (patches Chrome, applies evasions)
+//!     // Launch browser (applies evasions)
 //!     let browser = Browser::launch().await?;
 //!
 //!     // Create page and navigate
@@ -104,9 +105,11 @@ pub use download::{
     DownloadBeginning, DownloadEvent, DownloadProgress, DownloadWatch, NativeDownloadState,
 };
 pub use element::{BoundingBox, Element};
-pub use error::{Error, Result};
+pub use error::{Error, ErrorCode, Result};
 pub use fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
-pub use network::{NetworkEvent, NetworkWatcher};
+pub use network::{
+    NetworkEvent, NetworkWatcher, RequestCapture, RequestCaptureOptions, RequestCaptureStats,
+};
 pub use page::{
     CaptureBodyError, CapturedFrameResponse, FrameResponseCapture, FrameResponseCaptureOptions,
     FrameResponseCaptureReport,
@@ -129,9 +132,19 @@ pub struct StealthConfig {
     pub canvas_spoof: bool,
     /// Spoof audio fingerprint
     pub audio_spoof: bool,
-    /// Use human-like mouse movements
+    /// Has no effect. Choose human pointer movement per call with
+    /// `human_click`/`human_hover` or `Action::Click { human: true, .. }`.
+    #[deprecated(
+        since = "0.11.0",
+        note = "has no effect; use human_click/human_hover per call"
+    )]
     pub human_mouse: bool,
-    /// Use human-like typing
+    /// Has no effect. Choose human typing per call with `human_type`,
+    /// `human_fill` or `InputMode::Human`.
+    #[deprecated(
+        since = "0.11.0",
+        note = "has no effect; use human_type/human_fill or InputMode::Human"
+    )]
     pub human_typing: bool,
     /// Custom user agent (None = random realistic)
     pub user_agent: Option<String>,
@@ -146,7 +159,9 @@ pub struct StealthConfig {
     /// environments (some containers/CI) fail without an unsandboxed retry;
     /// set this to false there explicitly.
     pub sandbox: bool,
-    /// Patch Chrome binary to bypass detection
+    /// Opt-in: rewrite ChromeDriver automation markers in a cached private
+    /// copy of Chrome. Defaults to false; stock Chrome has none, so it then
+    /// launches the original binary unchanged. See `stealth::patcher`.
     pub patch_binary: bool,
     /// Viewport width in CSS pixels.
     pub viewport_width: u32,
@@ -154,7 +169,12 @@ pub struct StealthConfig {
     pub viewport_height: u32,
     /// Physical pixels per CSS pixel. Must be finite and positive.
     pub device_scale_factor: f64,
-    /// Debug mode - log actions and save screenshots on error
+    /// Has no effect. Use `tracing` for logs and `Page::debug_screenshot`
+    /// for screenshots; `debug_dir` still sets where those go.
+    #[deprecated(
+        since = "0.11.0",
+        note = "has no effect; use tracing and Page::debug_screenshot"
+    )]
     pub debug: bool,
     /// Directory for debug screenshots (defaults to current directory)
     pub debug_dir: Option<String>,
@@ -191,9 +211,13 @@ pub struct StealthConfig {
     /// Extra Chrome command-line arguments appended after standard stealth args.
     /// E.g. vec!["--use-fake-ui-for-media-stream".into()] to auto-grant camera.
     pub extra_args: Vec<String>,
-    /// Enable legacy, invasive CDP-marker hiding that proxies `window.document`
-    /// and patches Object reflection APIs. It can break modern SPAs, so it is
-    /// disabled by default. Prefer the normal WebDriver and fingerprint evasions.
+    /// Has no effect. It enabled a `window.document` Proxy that hid
+    /// ChromeDriver markers eoka never produces and broke `ownerDocument`
+    /// identity.
+    #[deprecated(
+        since = "0.11.0",
+        note = "has no effect; eoka produces no ChromeDriver markers"
+    )]
     pub aggressive_cdp_evasion: bool,
     /// Treat this as a session attached to a user-owned browser. When true,
     /// `Browser::new_page`/`new_blank_page`/`attach_page` skip injecting the
@@ -234,6 +258,7 @@ impl std::fmt::Debug for Redacted {
     }
 }
 
+#[allow(deprecated)]
 impl std::fmt::Debug for StealthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Exhaustive, so that adding a field forces a decision about printing it.
@@ -311,6 +336,7 @@ impl std::fmt::Debug for StealthConfig {
     }
 }
 
+#[allow(deprecated)] // Default values for deprecated fields.
 impl Default for StealthConfig {
     fn default() -> Self {
         Self {
@@ -324,7 +350,7 @@ impl Default for StealthConfig {
             chrome_path: None,
             runtime_dir: None,
             sandbox: true,
-            patch_binary: true,
+            patch_binary: false,
             viewport_width: 1920,
             viewport_height: 1080,
             device_scale_factor: 1.0,
@@ -348,6 +374,7 @@ impl Default for StealthConfig {
     }
 }
 
+#[allow(deprecated)] // Presets still initialize deprecated fields.
 impl StealthConfig {
     /// Proxy credentials the transport answers `Proxy` challenges with.
     pub(crate) fn proxy_credentials(&self) -> Option<(String, String)> {
@@ -504,6 +531,13 @@ mod tests {
     #[test]
     fn default_config_is_headless() {
         assert!(StealthConfig::default().headless);
+    }
+
+    #[test]
+    fn binary_patching_is_opt_in() {
+        assert!(!StealthConfig::default().patch_binary);
+        assert!(!StealthConfig::visible().patch_binary);
+        assert!(!StealthConfig::debug().patch_binary);
     }
 
     #[test]

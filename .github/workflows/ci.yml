@@ -5,6 +5,9 @@ on:
     branches: [main, master]
     # labeled/unlabeled re-evaluate the downstream-breaking escape hatch.
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  # Merged commits are checked too; Publish runs only after this succeeds.
+  push:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -13,7 +16,8 @@ permissions:
 # A newer push to the same PR supersedes the running checks.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Runs on main gate publishing, so each merged commit finishes its own run.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,6 +34,7 @@ jobs:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-features --all-targets --locked -- -D warnings
+      - run: cargo build --examples --locked
       - name: Minimum Rust version (1.85)
         run: |
           rustup toolchain install 1.85.0 --profile minimal
@@ -49,7 +54,14 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/rust
-      - run: cargo test --all-features --locked
+      # Browser tests are ignored without Chrome and only run on Linux, so
+      # macOS and Windows skip linking every integration-test binary.
+      - if: runner.os == 'Linux'
+        run: cargo test --all-features --locked
+      - if: runner.os != 'Linux'
+        run: cargo test --all-features --locked --lib
+      - if: runner.os != 'Linux'
+        run: cargo test --all-features --locked --doc
 
   # Compile the browser tests once; the shards only run them.
   browser-build:
@@ -98,7 +110,7 @@ jobs:
           set -euo pipefail
           apt=(sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30)
           "${apt[@]}" update
-          "${apt[@]}" install -y xvfb xauth libnss3 libatk-bridge2.0-0 libgbm1 libasound2t64
+          "${apt[@]}" install -y xvfb xauth libnss3 libatk-bridge2.0-0 libgbm1 libasound2t64 fonts-dejavu-core
           dir="$RUNNER_TEMP/eoka-chrome"
           if [ ! -x "$dir/chrome-linux64/chrome" ]; then
             mkdir -p "$dir"
@@ -118,10 +130,13 @@ jobs:
           # the default (sandboxed) launch policy, so lift the restriction.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Run browser tests
+        # Tests that take an explicit Chrome use the pinned ELF; the rest go
+        # through discovery and the /usr/bin/google-chrome wrapper.
+        env:
+          EOKA_TEST_CHROME_PATH: ${{ runner.temp }}/eoka-chrome/chrome-linux64/chrome
         run: |
           xvfb-run -a cargo nextest run --profile ci --archive-file nextest.tar.zst \
-            --workspace-remap . --run-ignored only --partition "hash:${{ matrix.shard }}/2" \
-            -E 'not test(/known_gap/)'
+            --workspace-remap . --run-ignored only --partition "hash:${{ matrix.shard }}/2"
       - name: Upload test report
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -150,8 +165,8 @@ jobs:
           workspaces: downstream
       - run: .github/scripts/downstream.sh downstream
 
-  # The only check branch protection requires. A PR labelled
-  # downstream-breaking may merge with the downstream job red.
+  # The only check branch protection requires, and what Publish waits for on
+  # main. A PR labelled downstream-breaking may merge with downstream red.
   ci-ok:
     name: CI OK
     if: always()
@@ -160,7 +175,9 @@ jobs:
     steps:
       - env:
           NEEDS: ${{ toJSON(needs) }}
-          ALLOW_DOWNSTREAM: ${{ contains(github.event.pull_request.labels.*.name, 'downstream-breaking') }}
+          # Merged commits already passed (or were allowed past) downstream on
+          # their PR; a breaking release must still be able to publish.
+          ALLOW_DOWNSTREAM: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'downstream-breaking') }}
         run: |
           failed=$(jq -r --arg allow "$ALLOW_DOWNSTREAM" 'to_entries
             | map(select(.value.result != "success" and .value.result != "skipped"

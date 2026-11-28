@@ -1,5 +1,3 @@
-mod support;
-
 use serde_json::{json, Value};
 
 #[tokio::test]

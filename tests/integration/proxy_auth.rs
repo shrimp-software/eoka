@@ -1,4 +1,4 @@
-mod support;
+use crate::support;
 
 use base64::Engine;
 use std::sync::{

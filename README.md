@@ -74,7 +74,7 @@ positions and one deadline. `Page::act` and `Locator` require an explicit expect
 result for click, typing, key and drag actions; shorthand methods such as
 `page.click` make it optional. Successful actions and `Error::Action` failures carry
 receipts distinguishing not dispatched, unknown outcome and verified completion.
-No action is replayed after dispatch. [Migration and complete contract](MIGRATION-0.6.md).
+No action is replayed after dispatch.
 Durable operation IDs and download recovery are provided by eoka-tools.
 
 For an agent exploring an unfamiliar page, `page.explore(action, options)` uses
@@ -298,9 +298,9 @@ rules. Visible does not mean enabled or clickable.
 ```rust
 page.fill("#email", "user@example.com").await?;     // clear + type + verify
 page.fill("#volume", "50").await?;                    // range: validates, sets, input/change
-page.human_fill("#email", "user@example.com").await?; // human-like
+page.human_fill("#email", "user@example.com").await?; // key events, irregular pacing
 page.type_into("#search", "query").await?;           // append; proves dispatch only
-page.human_type("#search", "query").await?;
+page.human_type("#search", "query").await?;          // InputMode::Human
 ```
 
 `fill` supports native `date`, `time`, `datetime-local`, `month` and `week`
@@ -563,10 +563,19 @@ page.set_cookie("name", "value", Some("example.com"), None).await?;
 page.delete_cookie("name", None).await?;
 page.clear_all_cookies().await?;
 
-page.enable_request_capture().await?;       // start capturing XHR/fetch
-let body = page.get_response_body(id).await?;
-page.disable_request_capture().await?;
+// Page-scoped, bounded capture; oldest requests are evicted first.
+let capture = page.capture_requests(eoka::RequestCaptureOptions::default()).await?;
+page.goto("https://example.com").await?;
+for request in capture.requests() {
+    println!("{} {}", request.method, request.url);
+}
+let first = capture.requests().into_iter().next().unwrap();
+let body = capture.response_body(&first.request_id).await?;
+let retained = capture.stop().await;
 ```
+
+The Network domain stays enabled after a capture stops (disabling it would also
+drop extra headers). `disable_request_capture()` turns it off.
 
 For bounded text inspection with the page's credentials:
 
@@ -585,8 +594,8 @@ For native files, `browser.watch_downloads(&staging_directory)` exclusively conf
 `allowAndName` and subscribes before the caller triggers input. `DownloadWatch`
 exposes beginning/progress events, cancellation, popup ancestry, and explicit
 `stop()` cleanup. Only owned browsers are supported. Target discovery is enabled
-for the watch and disabled on restoration; this assumes no competing owner of
-browser download or target-discovery settings. Event loss/disconnection fails;
+for the watch and stays enabled afterwards; `stop()` restores only the download
+behavior. This assumes no competing owner of the browser's download settings. Event loss/disconnection fails;
 failed restoration prevents further watchers on that browser. Drop schedules
 bounded restoration but cannot confirm it to the caller.
 
@@ -656,10 +665,19 @@ stealth browsers (see `StealthConfig`):
 ### Managed launch and ownership
 
 `chrome_path` selects an absolute, readable executable. A missing, non-executable,
-or relative explicit path fails without discovering another browser. Linux
-patching resolves an installed wrapper to its associated ELF binary, never to an
-unrelated browser. Patching copies that binary and preserves its companion
-libraries/resources; the source installation is not modified.
+or relative explicit path fails without discovering another browser. On Linux an
+installed wrapper script resolves to its associated ELF binary, never to an
+unrelated browser.
+
+Binary patching is opt-in (`patch_binary: true`). Stock Chrome and Chrome for
+Testing contain no automation markers, so the default launches them unchanged.
+When enabled, the patcher rewrites only ChromeDriver's `$cdc_`, `$wdc_` and
+`$chromeDriver` inside non-executable sections, refuses binaries it cannot parse,
+and uses the original binary when there is nothing to patch. A patched copy keeps
+its companion libraries/resources; the source installation is not modified. On
+Linux copies are cached, verified and published atomically under
+`~/.cache/eoka/patched-chrome`; elsewhere they live in the launch's runtime
+directory.
 
 `runtime_dir` selects an absolute writable parent directory. Each owned launch
 creates a unique child there (0700 on Unix) containing its ephemeral profile,
@@ -713,10 +731,9 @@ For reusable presets or advanced setup, build a `StealthConfig` directly:
 ```rust
 let config = StealthConfig {
     headless: false,
-    patch_binary: true,
-    human_mouse: true,
-    human_typing: true,
-    debug: true,
+    viewport_width: 1366,
+    viewport_height: 768,
+    timezone: Some("Europe/Berlin".into()),
     ..Default::default()
 };
 
@@ -724,7 +741,7 @@ let browser = Browser::launch_with_config(config).await?;
 
 // Presets for advanced config composition
 StealthConfig::visible()   // headless: false
-StealthConfig::debug()     // headless: false, debug: true
+StealthConfig::debug()     // headless: false
 ```
 
 ## Development checks
@@ -739,12 +756,16 @@ xvfb-run -a cargo test --all-features --locked --no-fail-fast --tests -- --ignor
 ```
 
 The last command requires Chrome and Xvfb and runs every ignored browser test.
-CI pins Chrome for Testing 155.0.8059.39 and retains the browser-test log. These
-local HTTP fixtures check browser behavior; they do not establish detector bypass.
+Set `EOKA_TEST_CHROME_PATH` to test a specific Chrome. All browser tests build
+into one binary, `tests/integration.rs`; run one file with
+`cargo test --test integration -- --ignored page_coverage::`. CI pins Chrome for
+Testing (`.github/chrome-version`, currently 156.0.8078.80), runs the browser
+tests with nextest in two shards and uploads a JUnit report. These local HTTP
+fixtures check browser behavior; they do not establish detector bypass.
 
 ## Detection Results
 
-Patches Chrome binary, injects 15 evasion scripts, blocks detectable CDP commands at the transport layer, simulates human input with Bezier curves.
+Injects evasion scripts that patch interface prototypes with native-shaped functions (and leave APIs Chrome already reports correctly alone), resolves locators in an isolated world, blocks detectable CDP commands at the transport layer, and simulates human input with Bezier curves.
 
 - **Passes**: sannysoft, rebrowser bot detector (6/6), areyouheadless, browserleaks
 - **Partial**: creepjs (33% trust score)

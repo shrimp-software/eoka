@@ -1,6 +1,6 @@
 //! Shorthand input methods work without configuration and report what is known.
 
-mod support;
+use crate::support;
 
 use eoka::{Action, ActionOptions, ActionOutcome, DispatchState, Error, Expectation, LocatorSpec};
 use std::future::IntoFuture;
@@ -22,7 +22,7 @@ fn done() -> Expectation {
 }
 
 async fn open() -> (support::HttpFixture, eoka::Browser, eoka::Page) {
-    let server = support::HttpFixture::start(|_| async { support::Response::html(FIXTURE) }).await;
+    let server = support::HttpFixture::html(FIXTURE).await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
     page.wait_for("#result", 2000).await.unwrap();
@@ -186,11 +186,9 @@ async fn handle_defaults_apply_to_shorthand_and_found_elements() {
 #[tokio::test]
 #[ignore = "requires Chrome; local action fixture"]
 async fn type_text_requires_an_editable_focus() {
-    let server = support::HttpFixture::start(|_| async {
-        support::Response::html(
-            "<!doctype html><input id=field><input id=locked readonly><button id=go>Go</button>",
-        )
-    })
+    let server = support::HttpFixture::html(
+        "<!doctype html><input id=field><input id=locked readonly><button id=go>Go</button>",
+    )
     .await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();

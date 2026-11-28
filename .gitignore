@@ -21,3 +21,6 @@ PLAN.md
 
 # GitHub Actions local testing
 .act
+
+# Local workflow runs
+.workflows/

@@ -21,10 +21,12 @@ async fn blocked_reader_write_fails_native_completion(trigger: Message) {
     assert_peer_terminated(&mut peer).await;
     drop(writer);
     transport.close().await.unwrap();
-    assert!(
-        matches!(result, Ok(Err(Error::Transport { .. }))),
-        "reader never failed its stalled write: {result:?}"
-    );
+    let error = result
+        .expect("a stalled writer must fail pending commands")
+        .unwrap_err();
+    assert!(matches!(error, Error::Transport { .. }), "{error:?}");
+    // The writer's own reason, not the EOF its shutdown causes.
+    assert!(error.to_string().contains("stalled"), "{error}");
     assert!(closed, "stalled reader must invalidate the connection");
     assert!(
         dispatch.may_have_been_sent(),

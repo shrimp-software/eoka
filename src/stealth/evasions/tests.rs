@@ -11,13 +11,22 @@ fn test_build_full_script() {
     assert!(!script.contains("const documentProxy"));
 }
 
+// Regression: the opt-in CDP module proxied `window.document` (breaking
+// `ownerDocument === document`) to hide chromedriver markers eoka never
+// produces. The flag still compiles but adds nothing.
 #[test]
-fn test_aggressive_cdp_evasion_is_opt_in() {
+#[allow(deprecated)]
+fn test_aggressive_cdp_evasion_adds_nothing() {
     let config = StealthConfig {
         aggressive_cdp_evasion: true,
         ..StealthConfig::default()
     };
-    assert!(build_evasion_script(&config).contains("const documentProxy"));
+    let script = build_evasion_script(&config);
+    assert!(!script.contains("documentProxy"));
+    assert!(!script.contains("cdcPattern"));
+    #[allow(deprecated)]
+    let cdp = CDP_EVASION;
+    assert!(cdp.is_empty());
 }
 
 #[test]
@@ -92,18 +101,16 @@ fn test_build_script_for_known_windows_fp() {
     );
 }
 
-// Escaping regression: config values with a single quote must be routed
+// Escaping regression: fingerprint values with a single quote must be routed
 // through escape_js_string, producing an escaped `\'` in the output.
 #[test]
 fn test_config_values_are_js_escaped() {
-    let config = StealthConfig {
-        timezone: Some("Foo'Bar".into()),
-        ..StealthConfig::default()
-    };
-    let script = build_evasion_script(&config);
+    let mut fp = Fingerprint::random();
+    fp.languages = vec!["Foo'Bar".into()];
+    let script = build_evasion_script_for(&StealthConfig::default(), &fp);
     assert!(
         script.contains(r"Foo\'Bar"),
-        "timezone single quote must be escaped via escape_js_string"
+        "language single quote must be escaped via escape_js_string"
     );
     assert!(
         !script.contains("'Foo'Bar'"),
@@ -118,12 +125,16 @@ fn test_config_values_are_js_escaped() {
 fn test_chrome_object_matches_stock() {
     let script = build_evasion_script(&StealthConfig::default());
     assert!(
-        script.contains("loadTimes: function"),
-        "chrome.loadTimes must be spoofed (present in stock Chrome)"
+        script.contains("if (!window.chrome) {"),
+        "native window.chrome must be kept; only a missing object is filled"
     );
     assert!(
-        script.contains("csi: function"),
-        "chrome.csi must be spoofed (present in stock Chrome)"
+        script.contains("loadTimes,") && script.contains("csi,"),
+        "the fallback must provide chrome.loadTimes and chrome.csi"
+    );
+    assert!(
+        !script.contains("_eoka_rand"),
+        "loadTimes must derive from navigation timing, not per-call randomness"
     );
     assert!(
         !script.contains("onConnect"),
@@ -154,7 +165,7 @@ fn test_platform_gated_navigator_apis() {
         "Linux script must leave navigator.bluetooth absent"
     );
     assert!(
-        script.contains("deviceMemory: { get: () => "),
+        script.contains("deviceMemory: () => "),
         "Linux Chrome exposes deviceMemory, so the fingerprint value must replace the host's"
     );
     assert!(
@@ -174,7 +185,7 @@ fn test_platform_gated_navigator_apis() {
         "Windows script must fill a missing navigator.bluetooth"
     );
     assert!(
-        windows_script.contains("deviceMemory: { get: () => "),
+        windows_script.contains("deviceMemory: () => "),
         "Windows script must keep the deviceMemory claim"
     );
 }
@@ -320,13 +331,79 @@ fn test_get_image_data_is_noised_with_canvas_spoof() {
     );
 }
 
-// Audit regression: the Intl shim must not mutate the caller's options
-// object (observable side effect).
+// Regression: each fingerprint flag gates only its own surface. They were ORed
+// into one script, so disabling WebGL spoofing alone still patched getParameter.
 #[test]
-fn test_intl_shim_clones_options() {
+fn test_fingerprint_flags_gate_independently() {
+    let build = |webgl_spoof, canvas_spoof, audio_spoof| {
+        build_evasion_script(&StealthConfig {
+            webgl_spoof,
+            canvas_spoof,
+            audio_spoof,
+            ..StealthConfig::default()
+        })
+    };
+    let has = |script: &str| {
+        (
+            script.contains("'getParameter'"),
+            script.contains("'getImageData'"),
+            script.contains("'getChannelData'"),
+        )
+    };
+    assert_eq!(has(&build(true, false, false)), (true, false, false));
+    assert_eq!(has(&build(false, true, false)), (false, true, false));
+    assert_eq!(has(&build(false, false, true)), (false, false, true));
+    assert_eq!(has(&build(true, true, true)), (true, true, true));
+    assert_eq!(has(&build(false, false, false)), (false, false, false));
+}
+
+// Regression: the timezone shim (month-based DST guess, Intl.DateTimeFormat
+// replacement) and the RTCPeerConnection wrapper are gone. Timezone is native
+// (Emulation.setTimezoneOverride) and WebRTC is a launch flag.
+#[test]
+fn test_no_timezone_or_webrtc_shims() {
     let script = build_evasion_script(&StealthConfig::default());
+    for needle in [
+        "getTimezoneOffset",
+        "Intl.DateTimeFormat",
+        "RTCPeerConnection",
+        "iceServers",
+    ] {
+        assert!(!script.contains(needle), "{needle} must not be patched");
+    }
+    #[allow(deprecated)]
+    let removed = [TIMEZONE_EVASION, WEBRTC_EVASION];
+    assert!(removed.iter().all(|script| script.is_empty()));
+}
+
+// Regression: overrides used to be assigned on instances
+// (`navigator.permissions.query = ...`) with constructible function
+// expressions. Every patch must go through the prototype helpers.
+#[test]
+fn test_overrides_use_prototype_helpers() {
+    let script = build_evasion_script(&StealthConfig::default());
+    for instance_assignment in [
+        "navigator.permissions.query =",
+        "speechSynthesis.getVoices =",
+        "navigator.mediaDevices.enumerateDevices =",
+        "navigator.keyboard.getLayoutMap =",
+        "document.fonts.check =",
+        "navigator.userAgentData.getHighEntropyValues =",
+        "Object.defineProperty(navigator.connection",
+        ".prototype.getParameter =",
+        ".prototype.toDataURL =",
+        ".prototype.getImageData =",
+        ".prototype.getChannelData =",
+    ] {
+        assert!(
+            !script.contains(instance_assignment),
+            "{instance_assignment} must use _eoka_patchMethod/_eoka_patchGetter"
+        );
+    }
+    assert!(script.contains("const _eoka_patchMethod"));
+    assert!(script.contains("const _eoka_patchGetter"));
     assert!(
-        script.contains("Object.assign({}, options)"),
-        "Intl.DateTimeFormat shim must clone options before injecting timeZone"
+        script.contains("const _eoka_languages = Object.freeze("),
+        "navigator.languages must return one cached frozen array"
     );
 }

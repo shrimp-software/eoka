@@ -2,6 +2,10 @@
 
 use thiserror::Error;
 
+pub(crate) mod classify;
+mod code;
+pub use code::ErrorCode;
+
 /// Result type for eoka operations
 pub type Result<T> = std::result::Result<T, Error>;
 
@@ -15,13 +19,23 @@ pub enum Error {
     #[error("Action {code}: {source}")]
     Action {
         /// Stable machine-readable action error code.
-        code: String,
+        code: ErrorCode,
         /// Dispatch and verification evidence retained on failure.
         receipt: Box<crate::ActionReceipt>,
         #[source]
         /// Underlying cause of the failure.
         source: Box<Error>,
     },
+    /// A failure eoka raised itself (usage, policy or state), with a stable
+    /// code. Chrome's own protocol errors stay [`Error::Cdp`].
+    #[error("{code}: {message}")]
+    Coded {
+        /// Stable machine-readable code.
+        code: ErrorCode,
+        /// Human-readable detail. Never contains caller-supplied secrets.
+        message: String,
+    },
+
     /// Failed to launch Chrome
     #[error("Failed to launch Chrome: {0}")]
     Launch(String),
@@ -79,15 +93,17 @@ pub enum Error {
     #[error("Invalid screenshot options: {0}")]
     InvalidScreenshotOptions(String),
 
-    /// A form control did not contain the requested value after filling.
-    #[error("Value mismatch for '{selector}': expected '{expected}', got '{actual}'")]
+    /// A form control settled on a different value than requested, for
+    /// example because of a mask, `maxlength` or trimming. Values are not
+    /// included: they may be passwords. Only their lengths are.
+    #[error("Value mismatch for {selector}: the control holds {actual_chars} characters after filling {expected_chars}")]
     ValueMismatch {
-        /// Selector supplied to the fill operation.
+        /// Description of the filled control.
         selector: String,
-        /// Value requested by the caller.
-        expected: String,
-        /// Value read back from the DOM.
-        actual: String,
+        /// Character count of the requested value.
+        expected_chars: usize,
+        /// Character count of the value read back from the DOM.
+        actual_chars: usize,
     },
 
     /// Serialization error
@@ -127,8 +143,11 @@ pub enum Error {
     RetryExhausted {
         /// Number of attempts made before giving up.
         attempts: u32,
-        /// The last error encountered.
+        /// Display text of the last error encountered.
         last_error: String,
+        /// The last error encountered.
+        #[source]
+        source: Box<Error>,
     },
 }
 
@@ -144,9 +163,13 @@ impl Clone for Error {
                 receipt,
                 source,
             } => Self::Action {
-                code: code.clone(),
+                code: *code,
                 receipt: receipt.clone(),
                 source: source.clone(),
+            },
+            Self::Coded { code, message } => Self::Coded {
+                code: *code,
+                message: message.clone(),
             },
             Self::Launch(s) => Self::Launch(s.clone()),
             Self::Transport { context, source } => Self::Transport {
@@ -175,12 +198,12 @@ impl Clone for Error {
             Self::InvalidScreenshotOptions(s) => Self::InvalidScreenshotOptions(s.clone()),
             Self::ValueMismatch {
                 selector,
-                expected,
-                actual,
+                expected_chars,
+                actual_chars,
             } => Self::ValueMismatch {
                 selector: selector.clone(),
-                expected: expected.clone(),
-                actual: actual.clone(),
+                expected_chars: *expected_chars,
+                actual_chars: *actual_chars,
             },
             Self::Serialization(e) => Self::Serialization(serde_json::Error::custom(e.to_string())),
             Self::EvaluationTooLarge { maximum_bytes } => Self::EvaluationTooLarge {
@@ -196,9 +219,11 @@ impl Clone for Error {
             Self::RetryExhausted {
                 attempts,
                 last_error,
+                source,
             } => Self::RetryExhausted {
                 attempts: *attempts,
                 last_error: last_error.clone(),
+                source: source.clone(),
             },
         }
     }
@@ -272,6 +297,46 @@ impl Error {
         }
     }
 
+    /// Create an error eoka raised itself, with a stable code.
+    pub fn coded(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self::Coded {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// The stable code of a [`Error::Coded`] or [`Error::Action`] error.
+    pub fn code(&self) -> Option<ErrorCode> {
+        match self {
+            Self::Coded { code, .. } | Self::Action { code, .. } => Some(*code),
+            Self::ValueMismatch { .. } => Some(ErrorCode::ValueMismatch),
+            _ => None,
+        }
+    }
+
+    /// Whether retrying the same call unchanged can succeed.
+    ///
+    /// Usage errors (invalid URLs, arguments or options, serialization,
+    /// oversized results, a missing Chrome) are permanent. An action error is
+    /// transient only when no input was sent and its code is transient, so a
+    /// retry never repeats input that may have landed.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Action { code, receipt, .. } => {
+                receipt.dispatch == crate::DispatchState::NotSent && code.is_transient()
+            }
+            Self::Coded { code, .. } => code.is_transient(),
+            Self::InvalidUrl(_)
+            | Self::InvalidScreenshotOptions(_)
+            | Self::Serialization(_)
+            | Self::EvaluationTooLarge { .. }
+            | Self::ChromeNotFound
+            | Self::ValueMismatch { .. }
+            | Self::RetryExhausted { .. } => false,
+            _ => true,
+        }
+    }
+
     /// Create a patching error
     pub fn patching(operation: impl Into<String>, message: impl Into<String>) -> Self {
         Self::Patching {
@@ -322,6 +387,38 @@ mod tests {
         );
         let simple = Error::cdp_msg("no value");
         assert_eq!(format!("{simple}"), "CDP error: no value");
+    }
+
+    #[test]
+    fn test_error_codes_compare_with_their_string_form() {
+        let error = Error::coded(ErrorCode::HistoryUnavailable, "no entry");
+        assert_eq!(error.code(), Some(ErrorCode::HistoryUnavailable));
+        assert!(ErrorCode::HistoryUnavailable == "history_unavailable");
+        assert_eq!(error.to_string(), "history_unavailable: no entry");
+        assert_eq!(
+            serde_json::to_value(ErrorCode::ValueMismatch).unwrap(),
+            serde_json::json!("value_mismatch")
+        );
+    }
+
+    #[test]
+    fn test_permanent_errors_are_not_retryable() {
+        assert!(!Error::InvalidUrl("x".into()).is_retryable());
+        assert!(!Error::coded(ErrorCode::AmbiguousTarget, "x").is_retryable());
+        assert!(!Error::ChromeNotFound.is_retryable());
+        assert!(Error::Timeout("x".into()).is_retryable());
+        assert!(Error::coded(ErrorCode::ActionabilityChanged, "x").is_retryable());
+    }
+
+    #[test]
+    fn test_value_mismatch_hides_values() {
+        let error = Error::ValueMismatch {
+            selector: "#password".into(),
+            expected_chars: 8,
+            actual_chars: 6,
+        };
+        let text = error.to_string();
+        assert!(text.contains("#password") && text.contains('8') && text.contains('6'));
     }
 
     #[test]

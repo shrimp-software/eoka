@@ -61,6 +61,24 @@ pub(crate) fn key_for_modifiers(key: &str, modifiers: i32) -> String {
         .to_owned()
 }
 
+/// US-layout `code`, virtual key and Shift state for typing one character.
+/// Characters without a US key get an empty code and key 0; Chrome still
+/// inserts their text.
+pub(crate) fn char_key(ch: char) -> (String, i32, bool) {
+    let mut buffer = [0; 4];
+    let key = if ch == '\n' {
+        "Enter"
+    } else {
+        ch.encode_utf8(&mut buffer)
+    };
+    let (_, code, virtual_key) = key_to_codes(key);
+    let shift = ch.is_ascii_uppercase()
+        || PRINTABLE_KEYS
+            .iter()
+            .any(|(base, shifted, _, _)| *shifted == key && base != shifted);
+    (code.to_owned(), virtual_key.unwrap_or(0), shift)
+}
+
 pub(crate) fn key_text(key: &str) -> Option<&str> {
     if key == "Enter" {
         return Some("\r");
@@ -278,6 +296,18 @@ mod tests {
         }
         assert_eq!(key_text("some text"), None);
         assert_eq!(key_text("\u{0001}"), None);
+    }
+
+    #[test]
+    fn char_key_maps_us_layout_characters() {
+        assert_eq!(char_key('a'), ("KeyA".into(), 65, false));
+        assert_eq!(char_key('A'), ("KeyA".into(), 65, true));
+        assert_eq!(char_key('7'), ("Digit7".into(), 55, false));
+        assert_eq!(char_key('@'), ("Digit2".into(), 50, true));
+        assert_eq!(char_key(' '), ("Space".into(), 32, false));
+        assert_eq!(char_key('?'), ("Slash".into(), 191, true));
+        assert_eq!(char_key('\n'), ("Enter".into(), 13, false));
+        assert_eq!(char_key('é'), (String::new(), 0, false));
     }
 
     #[test]

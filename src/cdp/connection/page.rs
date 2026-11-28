@@ -66,18 +66,12 @@ impl ViewportState {
             }
         }
         let session_id: Arc<str> = if self.controller.is_some() {
-            let attached: TargetAttachToTargetResult = session
+            let attached = session
                 .transport
-                .send(
-                    "Target.attachToTarget",
-                    &TargetAttachToTarget {
-                        target_id: session.target_id.clone(),
-                        flatten: Some(true),
-                    },
-                )
+                .attach_to_target(&session.target_id)
                 .await?;
             self.metrics = None;
-            attached.session_id.into()
+            attached.into()
         } else {
             session.session_id.as_str().into()
         };

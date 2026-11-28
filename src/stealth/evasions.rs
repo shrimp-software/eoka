@@ -7,24 +7,34 @@ use crate::page::escape_js_string;
 use crate::stealth::fingerprint::{Fingerprint, GENERIC_FONTS};
 use crate::StealthConfig;
 
-/// Native-function masking: makes `_eoka_mark`ed functions report native code from `.toString()`.
+/// Prelude: native-function masking (`_eoka_mark`), the shared prototype patch
+/// helpers (`_eoka_patchMethod`/`_eoka_patchGetter`/`_eoka_instance`) and the
+/// noise PRNG step (`_eoka_lcg`).
 pub const NATIVE_TOSTRING_EVASION: &str = include_str!("evasions/scripts/native_tostring.js");
 
-/// Core WebDriver evasion - define webdriver=false on prototype (more realistic)
+/// WebDriver evasion: `navigator.webdriver` is false on `Navigator.prototype`
+/// (only replaced where the native getter still reports true).
 pub const WEBDRIVER_EVASION: &str = include_str!("evasions/scripts/webdriver.js");
 
-/// CDP marker cleanup - simple and effective approach from chaser-oxide
-pub const CDP_EVASION: &str = include_str!("evasions/scripts/cdp.js");
+/// Formerly proxied `window.document` to hide chromedriver markers. Now empty.
+#[deprecated(
+    since = "0.11.0",
+    note = "eoka produces no CDP markers; the script is empty"
+)]
+pub const CDP_EVASION: &str = "";
 
-/// Chrome runtime object. Matches a real, extension-less Chrome page context:
-/// `Object.keys(window.chrome)` is `["loadTimes", "csi", "app"]` and
-/// `chrome.runtime` is undefined (verified against stock Chrome 152).
+/// Chrome runtime object. Stock Chrome (headless/new included) provides
+/// `window.chrome` natively; this only fills it where missing, matching a
+/// real, extension-less page: `Object.keys(window.chrome)` is
+/// `["loadTimes", "csi", "app"]` and `chrome.runtime` is undefined.
 pub const CHROME_RUNTIME_EVASION: &str = include_str!("evasions/scripts/chrome_runtime.js");
 
-/// Permissions API consistency fix
+/// Permissions API consistency: repairs `Notification.permission` "denied"
+/// versus `permissions.query` "prompt" only where a browser reports that pair.
 pub const PERMISSIONS_EVASION: &str = include_str!("evasions/scripts/permissions.js");
 
-/// Plugins spoofing - defined on Navigator.prototype with a stable cached reference.
+/// Plugins: fills an empty `navigator.plugins` on `Navigator.prototype` with a
+/// stable cached reference. Stock Chrome ships the PDF plugins natively.
 pub const PLUGINS_EVASION: &str = include_str!("evasions/scripts/plugins.js");
 
 /// Navigator properties (languages, platform, hardware) filled from the fingerprint.
@@ -41,11 +51,28 @@ pub const BATTERY_EVASION: &str = include_str!("evasions/scripts/battery.js");
 /// Navigator connection + userAgentData hygiene
 pub const NAVIGATOR_EXTRA_EVASION: &str = include_str!("evasions/scripts/navigator_extra.js");
 
-/// Combined fingerprint evasion (WebGL + Canvas + Audio).
-pub const FINGERPRINT_EVASION: &str = include_str!("evasions/scripts/fingerprint.js");
+/// WebGL vendor/renderer spoof, gated by `StealthConfig::webgl_spoof`.
+pub const WEBGL_EVASION: &str = include_str!("evasions/scripts/webgl.js");
 
-/// WebRTC leak protection - prevent real IP from leaking via public STUN.
-pub const WEBRTC_EVASION: &str = include_str!("evasions/scripts/webrtc.js");
+/// Canvas readback/export noise, gated by `StealthConfig::canvas_spoof`.
+pub const CANVAS_EVASION: &str = include_str!("evasions/scripts/canvas.js");
+
+/// Audio buffer noise, gated by `StealthConfig::audio_spoof`.
+pub const AUDIO_EVASION: &str = include_str!("evasions/scripts/audio.js");
+
+/// Combined fingerprint evasion (WebGL + Canvas + Audio).
+pub const FINGERPRINT_EVASION: &str = concat!(
+    include_str!("evasions/scripts/webgl.js"),
+    include_str!("evasions/scripts/canvas.js"),
+    include_str!("evasions/scripts/audio.js"),
+);
+
+/// Formerly stripped STUN/TURN servers from `RTCPeerConnection`. Now empty.
+#[deprecated(
+    since = "0.11.0",
+    note = "WebRTC is handled by a Chrome launch flag; the script is empty"
+)]
+pub const WEBRTC_EVASION: &str = "";
 
 /// Speech synthesis - headless Chrome has 0 voices, real Chrome has many.
 /// The fallback list is fingerprint data (`__EOKA_SPEECH_VOICES__`, JSON):
@@ -75,10 +102,12 @@ pub const FONTS_EVASION: &str = include_str!("evasions/scripts/fonts.js");
 /// US ANSI, matching the identity's en-US locale.
 pub const KEYBOARD_EVASION: &str = include_str!("evasions/scripts/keyboard.js");
 
-/// Timezone consistency - ensure Date timezone matches claimed location.
-/// The `__EOKA_TIMEZONE__` placeholder is replaced at build time with the
-/// actual IANA timezone from StealthConfig.
-pub const TIMEZONE_EVASION: &str = include_str!("evasions/scripts/timezone.js");
+/// Formerly approximated the timezone in `Date` and `Intl`. Now empty.
+#[deprecated(
+    since = "0.11.0",
+    note = "the timezone is applied natively by Emulation.setTimezoneOverride; the script is empty"
+)]
+pub const TIMEZONE_EVASION: &str = "";
 
 /// Common timezones for random selection (balanced across regions)
 pub(crate) const COMMON_TIMEZONES: &[&str] = &[
@@ -101,13 +130,8 @@ pub(crate) const COMMON_TIMEZONES: &[&str] = &[
 
 /// Build the complete evasion script for the given config and fingerprint.
 pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> String {
-    let timezone = config
-        .timezone
-        .clone()
-        .unwrap_or_else(|| fp.timezone.clone());
-
     let mut scripts = vec![
-        NATIVE_TOSTRING_EVASION, // must be first: defines _eoka_mark / _eoka_rand
+        NATIVE_TOSTRING_EVASION, // must be first: defines the _eoka_* helpers
         WEBDRIVER_EVASION,
         CHROME_RUNTIME_EVASION,
         PERMISSIONS_EVASION,
@@ -116,24 +140,23 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
         HEADLESS_EVASION,
         BATTERY_EVASION,
         NAVIGATOR_EXTRA_EVASION,
-        WEBRTC_EVASION,
         SPEECH_EVASION,
         MEDIA_DEVICES_EVASION,
         FONTS_EVASION,
         KEYBOARD_EVASION,
         BLUETOOTH_EVASION,
-        TIMEZONE_EVASION,
     ];
 
-    // This legacy module globally proxies `window.document` and patches Object
-    // reflection methods. Keep it available for callers that explicitly need
-    // it, but do not make a page's core DOM behavior depend on it by default.
-    if config.aggressive_cdp_evasion {
-        scripts.push(CDP_EVASION);
-    }
-
-    if config.webgl_spoof || config.canvas_spoof || config.audio_spoof {
-        scripts.push(FINGERPRINT_EVASION);
+    // Each fingerprint flag gates only its own surface.
+    // `aggressive_cdp_evasion` no longer adds anything (see `CDP_EVASION`).
+    for (enabled, script) in [
+        (config.webgl_spoof, WEBGL_EVASION),
+        (config.canvas_spoof, CANVAS_EVASION),
+        (config.audio_spoof, AUDIO_EVASION),
+    ] {
+        if enabled {
+            scripts.push(script);
+        }
     }
 
     let languages_json = format!(
@@ -153,7 +176,6 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
     // (or config). No placeholder may survive this fold — guarded by
     // `test_placeholders_are_filled`.
     let placeholders: Vec<(&str, String)> = vec![
-        ("__EOKA_TIMEZONE__", escape_js_string(&timezone)),
         ("__EOKA_PLATFORM__", escape_js_string(fp.nav_platform())),
         ("__EOKA_LANGUAGES__", languages_json),
         ("__EOKA_LANGUAGE__", escape_js_string(&language)),
