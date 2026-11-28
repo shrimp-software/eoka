@@ -3,7 +3,11 @@ use super::{
     locator::{resolve, Node},
     Action,
 };
-use crate::{page::ActionInput, Error, ErrorCode, Page, Result};
+use crate::{
+    error::classify::{cdp_failure, CdpFailure},
+    page::ActionInput,
+    Error, ErrorCode, Page, Result,
+};
 use serde_json::{json, Value};
 
 pub(super) enum Verification {
@@ -136,8 +140,8 @@ pub(super) async fn point(page: &Page, node: &Node, require_enabled: bool) -> Re
         page.frame_point_for_input(frame, x, y)
             .await
             .map_err(|error| match error {
-                Error::Cdp { ref message, .. }
-                    if message == "Frame input point is covered by another element" =>
+                Error::Cdp { ref message, .. } | Error::Coded { ref message, .. }
+                    if message == FRAME_POINT_COVERED =>
                 {
                     actionability_changed("an iframe owner is covered")
                 }
@@ -147,6 +151,10 @@ pub(super) async fn point(page: &Page, node: &Node, require_enabled: bool) -> Re
         Ok((x, y))
     }
 }
+
+/// The message `Page::frame_point_for_input` reports when an iframe owner is
+/// covered at the input point.
+const FRAME_POINT_COVERED: &str = "Frame input point is covered by another element";
 
 fn actionability_changed(message: &str) -> Error {
     Error::coded(ErrorCode::ActionabilityChanged, message)
@@ -170,21 +178,16 @@ pub(super) fn retryable_preparation(action: &Action, error: &Error) -> bool {
         Error::Cdp {
             method: Some(method),
             code: Some(-32000),
-            message,
+            ..
         } if matches!(
             method.as_str(),
             "Runtime.evaluate" | "Runtime.callFunctionOn" | "DOM.resolveNode"
         ) =>
         {
-            [
-                "Cannot find context",
-                "Execution context was destroyed",
-                "Could not find object",
-                "Cannot find object",
-                "No node with given id",
-            ]
-            .iter()
-            .any(|text| message.contains(text))
+            matches!(
+                cdp_failure(error),
+                Some(CdpFailure::ContextLost | CdpFailure::NodeGone)
+            )
         }
         _ => false,
     }
@@ -266,7 +269,10 @@ pub(super) async fn perform(
         }
         Action::Drag { dx, dy, .. } => {
             if !dx.is_finite() || !dy.is_finite() {
-                return Err(Error::cdp_msg("Invalid drag offset"));
+                return Err(Error::coded(
+                    ErrorCode::InvalidArgument,
+                    "drag offset must be finite",
+                ));
             }
             let (x, y) = point(page, required()?, true).await?;
             input.drag(dispatch, x, y, *dx, *dy).await?;
@@ -276,7 +282,10 @@ pub(super) async fn perform(
             let node = required()?;
             let values = node.call("function(t,byValue){const options=Array.from(this.options || []).filter(o=>!o.disabled&&!o.closest('optgroup[disabled]'));const values=byValue?options.filter(o=>o.value===t):[];return (values.length?values:options.filter(o=>o.text.trim()===t)).map(o=>o.value)}", vec![json!(text),json!(matches!(action,Action::SelectOption { .. }))]).await?;
             let values = values.as_array().filter(|v| v.len() == 1).ok_or_else(|| {
-                Error::cdp_msg("Select label must match exactly one enabled option")
+                Error::coded(
+                    ErrorCode::TargetUnavailable,
+                    "select label must match exactly one enabled option",
+                )
             })?;
             let expected = json!([values[0]]);
             if node.properties().await?["selected"] == expected {
@@ -354,7 +363,10 @@ pub(super) async fn perform(
             let node = required()?;
             let valid = node.call("function(v){return this instanceof HTMLSelectElement && (this.multiple || v.length<=1) && v.every(x=>Array.from(this.options).some(o=>o.value===x&&!o.disabled&&!o.closest('optgroup[disabled]')))}",vec![json!(values)]).await?;
             if valid != true {
-                return Err(Error::cdp_msg("Requested select options are unavailable"));
+                return Err(Error::coded(
+                    ErrorCode::TargetUnavailable,
+                    "requested select options are unavailable",
+                ));
             }
             let mut expected = values.clone();
             expected.sort();
@@ -372,7 +384,10 @@ pub(super) async fn perform(
             let node = required()?;
             let valid = node.call("function(n){return this instanceof HTMLInputElement && this.type==='file' && (this.multiple || n<=1)}",vec![json!(files.len())]).await?;
             if valid != true {
-                return Err(Error::cdp_msg("Target does not accept these files"));
+                return Err(Error::coded(
+                    ErrorCode::UnsupportedInput,
+                    "target does not accept these files",
+                ));
             }
             let paths = files.clone();
             let (files, expected) =
@@ -383,16 +398,23 @@ pub(super) async fn perform(
                         let path = std::fs::canonicalize(path)?;
                         let metadata = path.metadata()?;
                         if !metadata.is_file() {
-                            return Err(Error::cdp_msg("Upload requires regular files"));
+                            return Err(Error::coded(
+                                ErrorCode::InvalidArgument,
+                                "upload requires regular files",
+                            ));
                         }
-                        let name = path
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .ok_or_else(|| Error::cdp_msg("Upload path is not UTF-8"))?;
+                        let name = path.file_name().and_then(|n| n.to_str()).ok_or_else(|| {
+                            Error::coded(ErrorCode::InvalidArgument, "upload path is not UTF-8")
+                        })?;
                         evidence.push(json!({"name":name,"size":metadata.len()}));
                         paths_out.push(
                             path.to_str()
-                                .ok_or_else(|| Error::cdp_msg("Upload path is not UTF-8"))?
+                                .ok_or_else(|| {
+                                    Error::coded(
+                                        ErrorCode::InvalidArgument,
+                                        "upload path is not UTF-8",
+                                    )
+                                })?
                                 .into(),
                         );
                     }

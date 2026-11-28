@@ -206,7 +206,10 @@ impl Page {
                         if let Some(node) = node.as_ref() {
                             let properties = node.properties().await?;
                             if properties["connected"] != true {
-                                return Err(Error::cdp_msg("Target detached after dispatch"));
+                                return Err(Error::coded(
+                                    ErrorCode::TargetStale,
+                                    "target detached after dispatch",
+                                ));
                             }
                             let actual = super::locator::Node::property(&properties, field);
                             if actual == expected {
@@ -491,11 +494,17 @@ impl Page {
         timeout_ms: u64,
     ) -> Result<()> {
         validate_expectation(expectation, 0)?;
-        if timeout_ms == 0
-            || timeout_ms > 86_400_000
-            || matches!(expectation, Expectation::DownloadStarted)
-        {
-            return Err(Error::cdp_msg("Invalid observation wait"));
+        if timeout_ms == 0 || timeout_ms > 86_400_000 {
+            return Err(Error::coded(
+                ErrorCode::InvalidTimeout,
+                "observation timeout must be between 1 and 86400000ms",
+            ));
+        }
+        if matches!(expectation, Expectation::DownloadStarted) {
+            return Err(Error::coded(
+                ErrorCode::InvalidExpectation,
+                "download_started cannot be observed without an action",
+            ));
         }
         tokio::time::timeout(Duration::from_millis(timeout_ms), async {
             while !self.check_expectation(expectation).await? {
