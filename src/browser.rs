@@ -2,6 +2,7 @@
 //!
 //! Handles Chrome discovery, launching with stealth flags, and binary patching.
 
+pub(crate) mod discovery;
 mod geo;
 mod launch;
 
