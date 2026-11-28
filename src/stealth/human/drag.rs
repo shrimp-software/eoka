@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin, sync::Mutex, task::Poll, time::Duration};
 
-use super::{bezier_curve, random_point_in, random_range, Human};
+use super::{approach_start, bezier_curve, random_range, Human};
 use crate::error::{Error, Result};
 use crate::page::DragInput;
 
@@ -147,8 +147,8 @@ impl Human<'_> {
     pub(super) async fn approach_drag(&self, x: f64, y: f64) -> Result<DragRelease<'_>> {
         self.finish_drag_cleanup().await?;
         // Approach from the real pointer, like Human::move_to. Read before
-        // taking the input lock, which pointer_or also needs.
-        let start = self.pointer_or(random_point_in).await;
+        // taking the input lock, which pointer_point also needs.
+        let start = self.pointer_point(approach_start).await;
         let input = DragInput::acquire(self.session).await?;
         self.finish_drag_cleanup().await?;
         let mut release = DragRelease {

@@ -206,20 +206,16 @@ impl ChromePatcher {
 
         tracing::info!("Re-signing {:?} with ad-hoc signature...", sign_path);
 
-        // The copied bundle keeps extended attributes (quarantine, Finder
-        // info) from the installed Chrome, and codesign rejects any bundle
-        // carrying them. Strip them from the private copy first.
+        // codesign rejects the copied bundle's extended attributes
+        // (quarantine, Finder info).
         let _ = Command::new("/usr/bin/xattr")
             .arg("-cr")
             .arg(sign_path)
             .output();
 
-        // Sign without the original entitlements and hardened-runtime flags.
-        // Google Chrome's entitlements include Apple-restricted ones
-        // (application identifier, keychain groups, developer entitlements)
-        // that only Google's signature may claim; macOS kills an ad-hoc
-        // binary carrying them before it prints anything. Without the
-        // hardened runtime, V8's JIT and helper loading need no entitlements.
+        // Drop the original entitlements and hardened runtime: Chrome's include
+        // Apple-restricted ones that macOS kills an ad-hoc binary for, and
+        // without the hardened runtime V8's JIT needs none.
         let output = Command::new("/usr/bin/codesign")
             .args(["--sign", "-", "--force", "--deep"])
             .arg(sign_path)

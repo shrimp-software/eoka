@@ -1,27 +1,16 @@
 //! Chrome binary patcher (opt-in through `StealthConfig::patch_binary`).
 //!
-//! The patcher rewrites ChromeDriver's injected automation markers
-//! (`$cdc_`, `$wdc_`, `$chromeDriver`) in a private copy of the browser.
-//! Eoka never runs ChromeDriver, and stock Chrome contains none of these
-//! markers (a scan of Chrome for Testing 155 and 156 finds zero), so on a
-//! stock build the patcher only scans: it records a "clean" marker and
-//! launches the original executable without copying it. Custom or forked
-//! builds that do embed the markers get a patched copy.
+//! Rewrites ChromeDriver's automation markers (`$cdc_`, `$wdc_`,
+//! `$chromeDriver`) inside non-executable data sections of a private copy of
+//! the browser; unparseable headers fail closed. Stock Chrome has none of
+//! these markers, so it is only scanned, recorded as clean and launched as is.
 //!
-//! Rewrites are confined to non-executable, file-backed data sections (ELF
-//! section headers, Mach-O sections, PE section table). A binary whose
-//! headers cannot be parsed is not patched; that fails closed with an error.
-//!
-//! On Linux and other non-macOS Unix systems, patched copies live in a
-//! persistent private cache (`$XDG_CACHE_HOME/eoka/patched-chrome` or
-//! `~/.cache/eoka/patched-chrome`) keyed by the source's canonical path,
-//! size, modification time and the patcher schema. Each entry is staged in
-//! a temporary directory and published with one atomic rename, so concurrent
-//! launches never see a partially written binary, and every reuse verifies
-//! the full file length and content hash against the entry's manifest.
-//! Older entries for the same source are pruned after a successful publish.
-//! macOS (signed app bundles) and Windows patch into the per-launch runtime
-//! directory instead, which is removed with the browser.
+//! On non-macOS Unix, patched copies live in a persistent private cache
+//! (`$XDG_CACHE_HOME/eoka/patched-chrome` or `~/.cache/eoka/patched-chrome`)
+//! keyed by the source's canonical path, size, mtime and the patcher schema.
+//! Entries are staged and published with one atomic rename, and every reuse
+//! verifies length and content hash against the manifest. macOS and Windows
+//! patch into the per-launch runtime directory instead.
 
 use std::path::{Path, PathBuf};
 
@@ -97,7 +86,7 @@ impl ChromePatcher {
         Self::new_in_runtime(chrome_path, runtime)
     }
 
-    pub(crate) fn new_in_runtime(chrome_path: &Path, runtime: &Path) -> Result<Self> {
+    fn new_in_runtime(chrome_path: &Path, runtime: &Path) -> Result<Self> {
         #[cfg(target_os = "linux")]
         let chrome_path = &resolve_elf_for_patching(chrome_path)?;
         let root = runtime.join("patch");

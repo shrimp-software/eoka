@@ -124,17 +124,20 @@ pub(crate) fn bezier_curve(start: Point, end: Point, num_points: usize) -> Vec<P
     points
 }
 
-/// Where a path starts on an untouched page: a random point in the viewport.
-fn random_point_in(viewport: Point) -> Point {
-    (
-        random_f64_range(0.0, viewport.0.max(1.0)),
-        random_f64_range(0.0, viewport.1.max(1.0)),
-    )
+/// Where a human path starts: the real pointer, or for an untouched page a
+/// random point inside the viewport.
+fn approach_start(pointer: Option<Point>, viewport: Point) -> Point {
+    pointer.unwrap_or_else(|| {
+        (
+            random_f64_range(0.0, viewport.0.max(1.0)),
+            random_f64_range(0.0, viewport.1.max(1.0)),
+        )
+    })
 }
 
-/// Where wheel events land on an untouched page: the viewport centre.
-fn centre_of(viewport: Point) -> Point {
-    (viewport.0 / 2.0, viewport.1 / 2.0)
+/// Where wheel events land: the real pointer, or the viewport centre.
+fn scroll_origin(pointer: Option<Point>, viewport: Point) -> Point {
+    pointer.unwrap_or((viewport.0 / 2.0, viewport.1 / 2.0))
 }
 
 /// Human-like interaction helpers
@@ -165,14 +168,16 @@ impl<'a> Human<'a> {
         self
     }
 
-    /// Last dispatched pointer position on this target (shared with Page
-    /// input), or `fallback` applied to the viewport when there is none.
-    async fn pointer_or(&self, fallback: fn(Point) -> Point) -> Point {
+    /// `choose` applied to the last dispatched pointer position on this
+    /// target (shared with Page input) and the viewport, which is only
+    /// measured when no pointer position is known.
+    async fn pointer_point(&self, choose: fn(Option<Point>, Point) -> Point) -> Point {
         let pointer = self.held_input.lock().await.pointer();
-        match pointer {
-            Some(pointer) => pointer,
-            None => fallback(self.viewport().await),
-        }
+        let viewport = match pointer {
+            Some(_) => (0.0, 0.0),
+            None => self.viewport().await,
+        };
+        choose(pointer, viewport)
     }
 
     /// CSS layout viewport size; a desktop default when metrics are unavailable.
@@ -197,7 +202,7 @@ impl<'a> Human<'a> {
     /// Move mouse to target position with human-like Bezier curve, starting
     /// from the last dispatched pointer position.
     pub async fn move_to(&self, target_x: f64, target_y: f64) -> Result<()> {
-        let (start_x, start_y) = self.pointer_or(random_point_in).await;
+        let (start_x, start_y) = self.pointer_point(approach_start).await;
 
         let distance = ((target_x - start_x).powi(2) + (target_y - start_y).powi(2)).sqrt();
         let num_points = self.speed.mouse_points(distance);
@@ -404,7 +409,7 @@ impl<'a> Human<'a> {
     pub async fn scroll(&self, delta_y: f64) -> Result<()> {
         let num_scrolls = random_range(3, 8);
         let per_scroll = delta_y / num_scrolls as f64;
-        let (x, y) = self.pointer_or(centre_of).await;
+        let (x, y) = self.pointer_point(scroll_origin).await;
 
         for _ in 0..num_scrolls {
             let jitter = random_f64_range(-20.0, 20.0);
@@ -458,16 +463,19 @@ mod tests {
         }
     }
 
-    // Regression: without a known pointer, paths started within 300px of the
-    // target and wheel events landed at random coordinates (up to 800x600),
-    // regardless of the viewport.
+    // Regression: paths started at a random point within 300px of the target
+    // instead of the real pointer, so consecutive moves teleported, and wheel
+    // events landed at random coordinates regardless of pointer or viewport.
     #[test]
-    fn test_pointer_fallbacks_stay_inside_the_viewport() {
+    fn test_paths_and_scrolls_start_at_the_known_pointer() {
+        let viewport = (800.0, 600.0);
+        assert_eq!(approach_start(Some((12.0, 34.0)), viewport), (12.0, 34.0));
         for _ in 0..200 {
-            let (x, y) = random_point_in((800.0, 600.0));
+            let (x, y) = approach_start(None, viewport);
             assert!((0.0..800.0).contains(&x) && (0.0..600.0).contains(&y));
         }
-        assert_eq!(centre_of((640.0, 360.0)), (320.0, 180.0));
+        assert_eq!(scroll_origin(Some((5.0, 6.0)), viewport), (5.0, 6.0));
+        assert_eq!(scroll_origin(None, (640.0, 360.0)), (320.0, 180.0));
     }
 
     #[test]
