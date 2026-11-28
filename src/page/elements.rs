@@ -100,7 +100,7 @@ impl Page {
             "#,
         );
 
-        let result = self.session.evaluate_for_remote_object(&js).await?;
+        let (result, _objects) = self.session.evaluate_for_remote_object(&js).await?;
         let remote = self.check_js_result(result)?;
 
         if remote.subtype.as_deref() == Some("null") {
@@ -150,7 +150,7 @@ impl Page {
         );
 
         // Evaluate without returnByValue to get remote object references
-        let result = self.session.evaluate_for_remote_object(&js).await?;
+        let (result, _objects) = self.session.evaluate_for_remote_object(&js).await?;
 
         let remote = self.check_js_result(result)?;
 

@@ -147,6 +147,7 @@ impl Browser {
                     &prepared.ws_url,
                     config.proxy_credentials(),
                     config.cdp_timeout,
+                    config.filter_cdp,
                     config.strip_x_client_data,
                     prepared.runtime.take(),
                 )

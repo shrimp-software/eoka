@@ -10,33 +10,29 @@ impl Transport {
         mut source: WsSource,
         pending: Arc<PendingMap>,
         completion_state: ReaderCompletionState,
-        event_tx: broadcast::Sender<CdpMessage>,
-        writer: SharedSink,
+        event_tx: broadcast::Sender<Arc<CdpMessage>>,
+        replies: WriteQueue,
         idle_routes: IdleRoutes,
         interception: FetchInterceptor,
     ) {
         let ReaderCompletionState {
             closed,
-            routes: completion_routes,
-            write_timeout,
+            reason,
             shutdown,
+            lifecycle,
         } = completion_state;
-        let exit_reason;
-        // Separate command ID space for auth/interception auto-responses (won't
-        // collide with main IDs for the first ~2 billion commands). Must stay
+        let mut exit_reason;
+        // Automatic replies use their own id range, disjoint from commands and
         // within int32: DevTools silently drops commands with ids outside it.
-        let mut auth_cmd_id: u64 = 1_000_000_000;
+        let mut auto_id: u64 = AUTO_ID_MAX;
 
         loop {
             let message = match source.next().await {
                 Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => message,
                 Some(Ok(Message::Ping(payload))) => {
-                    // Split streams don't auto-pong; reply via the shared sink.
-                    if let Err(error) =
-                        write_automatic(&writer, Message::Pong(payload), write_timeout).await
-                    {
-                        exit_reason = format!("WebSocket pong write failed: {}", error);
-                        tracing::debug!("{}", exit_reason);
+                    // Split streams don't auto-pong; the writer sends it first.
+                    if queue_automatic(&replies, Message::Pong(payload)).is_err() {
+                        exit_reason = "CDP writer stopped before a pong".to_string();
                         break;
                     }
                     continue;
@@ -100,20 +96,17 @@ impl Transport {
 
             // Check if response or event
             if let Some(id) = msg.get("id").and_then(|v| v.as_u64()) {
-                let Some(sender) = lock_pending(&pending).remove(&id) else {
+                let Some(request) = lock_pending(&pending).remove(&id) else {
                     tracing::trace!("Response for unknown id: {}", id);
                     continue;
                 };
+                let sender = request.sender;
                 let result = if let Some(error) = msg.get("error") {
                     // CDP replies omit the method; `CommandResponse::wait` adds it.
                     Err(Error::Cdp {
                         method: None,
                         code: Some(error.get("code").and_then(|c| c.as_i64()).unwrap_or(-1)),
-                        message: error
-                            .get("message")
-                            .and_then(|m| m.as_str())
-                            .unwrap_or("unknown")
-                            .to_owned(),
+                        message: error_message(error),
                     })
                 } else {
                     Ok(msg
@@ -133,19 +126,14 @@ impl Transport {
                     _ => None,
                 };
 
-                if method == "Target.detachedFromTarget" {
-                    if let Some(session) = params.get("sessionId").and_then(Value::as_str) {
-                        let id = lock_completions(&completion_routes).remove(session);
-                        if let Some(id) = id {
-                            let sender = lock_pending(&pending).remove(&id);
-                            if let Some(sender) = sender {
-                                drop(sender.send(Err(Error::transport(
-                                    "Native command session detached before completion",
-                                ))));
-                            }
-                        }
-                    }
-                }
+                // Before private routing, which consumes monitor-session events.
+                session_lifecycle(
+                    &pending,
+                    &lifecycle,
+                    &method,
+                    session_id.as_deref(),
+                    &params,
+                );
 
                 if network_idle::route_event(&idle_routes, session_id.as_deref(), &method, &params)
                 {
@@ -156,19 +144,16 @@ impl Transport {
                     EventAction::Consumed => continue,
                     EventAction::Forward => {}
                     EventAction::Reply { method, params } => {
-                        auth_cmd_id += 1;
+                        auto_id = wrapping_next(auto_id, AUTO_ID_MIN, AUTO_ID_MAX);
                         let response = serde_json::to_string(&CdpCommand {
-                            id: auth_cmd_id,
+                            id: auto_id,
                             method,
                             params: &params,
                             session_id: session_id.as_deref(),
                         })
                         .expect("CDP automatic reply contains only serializable JSON values");
-                        if let Err(error) =
-                            write_automatic(&writer, Message::Text(response.into()), write_timeout)
-                                .await
-                        {
-                            exit_reason = format!("Automatic {method} write failed: {error}");
+                        if queue_automatic(&replies, Message::Text(response.into())).is_err() {
+                            exit_reason = format!("CDP writer stopped before automatic {method}");
                             break;
                         }
                         continue;
@@ -176,17 +161,22 @@ impl Transport {
                 }
 
                 // Publish event; ignore "no active receivers" errors.
-                drop(event_tx.send(CdpMessage::Event {
+                drop(event_tx.send(Arc::new(CdpMessage::Event {
                     method,
                     params,
                     session_id,
-                }));
+                })));
             }
         }
         closed.store(true, Ordering::Release);
+        // A stalled writer shuts the socket down; report its reason, not EOF.
+        if let Some(writer_reason) = reason.lock().unwrap_or_else(|e| e.into_inner()).clone() {
+            exit_reason = writer_reason;
+        }
         // Do not acquire the writer or flush frames on terminal failure: either
         // can be indefinitely blocked while the retained sink owns the socket.
         drop(shutdown);
+        lifecycle.lock().unwrap_or_else(|e| e.into_inner()).take();
         interception.shutdown();
 
         // Drain all pending requests so callers fail immediately instead of
@@ -205,14 +195,81 @@ impl Transport {
     }
 }
 
-/// Automatic replies run on the reader itself. Bound both writer admission and
-/// socket flushing so backpressure cannot stop delivery of unrelated replies or
-/// teardown events forever.
-async fn write_automatic(writer: &SharedSink, message: Message, timeout: Duration) -> Result<()> {
-    tokio::time::timeout(timeout, async { writer.lock().await.send(message).await })
-        .await
-        .map_err(|_| Error::Timeout("Automatic CDP write exceeded its deadline".into()))?
-        .map_err(|error| Error::transport(format!("WebSocket write failed: {error}")))
+/// Queue an automatic reply on the writer's priority lane without waiting.
+/// The writer's deadline detects a stalled socket; the reader keeps reading.
+fn queue_automatic(replies: &WriteQueue, message: Message) -> std::result::Result<(), ()> {
+    replies
+        .send(WriteItem {
+            message,
+            claim: None,
+            ack: None,
+        })
+        .map_err(|_| ())
+}
+
+/// CDP error text, keeping the optional `data` detail Chrome attaches.
+fn error_message(error: &Value) -> String {
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    match error.get("data") {
+        None | Some(Value::Null) => message.to_owned(),
+        Some(Value::String(data)) if data.is_empty() => message.to_owned(),
+        Some(Value::String(data)) => format!("{message}: {data}"),
+        Some(data) => format!("{message}: {data}"),
+    }
+}
+
+/// Fail commands whose session can no longer answer, and tell the connection
+/// about detached or destroyed targets.
+fn session_lifecycle(
+    pending: &PendingMap,
+    lifecycle: &LifecycleSink,
+    method: &str,
+    session: Option<&str>,
+    params: &Value,
+) {
+    let notify = |event: TargetLifecycle| {
+        if let Some(sender) = lifecycle.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            drop(sender.send(event));
+        }
+    };
+    match method {
+        "Target.detachedFromTarget" => {
+            if let Some(detached) = params["sessionId"].as_str() {
+                fail_session_pending(
+                    pending,
+                    detached,
+                    "CDP session detached before the command completed",
+                );
+            }
+            if let Some(target_id) = params["targetId"].as_str() {
+                notify(TargetLifecycle::Detached {
+                    target_id: target_id.to_owned(),
+                });
+            }
+        }
+        "Target.targetDestroyed" => {
+            if let Some(target_id) = params["targetId"].as_str() {
+                notify(TargetLifecycle::Destroyed {
+                    target_id: target_id.to_owned(),
+                });
+            }
+        }
+        "Inspector.detached" => {
+            if let Some(session) = session {
+                fail_session_pending(
+                    pending,
+                    session,
+                    "CDP session detached before the command completed",
+                );
+            }
+        }
+        // Inspector.targetCrashed is deliberately not handled: the target and
+        // session survive a crash, and browser-side commands still reply.
+        _ => {}
+    }
 }
 
 /// Chrome can serialize binary postData as ill-formed UTF-16 escapes. Repair

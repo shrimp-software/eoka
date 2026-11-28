@@ -62,10 +62,7 @@ async fn shuts_down_streams(shutdown: Shutdown) {
     assert!(transport.is_closed());
 
     assert!(
-        matches!(events.recv().await, Ok(CdpMessage::Event { method, .. }) if method == "Test.queued")
-    );
-    assert!(
-        matches!(transport.recv_event().await, Some(CdpMessage::Event { method, .. }) if method == "Test.queued")
+        matches!(events.recv().await.as_deref(), Ok(CdpMessage::Event { method, .. }) if method == "Test.queued")
     );
     assert_eq!(
         requests.recv().await.unwrap().params["requestId"],
@@ -78,7 +75,6 @@ async fn shuts_down_streams(shutdown: Shutdown) {
             events.recv().await,
             Err(broadcast::error::RecvError::Closed)
         ));
-        assert!(transport.recv_event().await.is_none());
         assert!(requests.recv().await.is_none());
         assert!(responses.recv().await.is_none());
         assert!(matches!(
@@ -179,23 +175,4 @@ async fn transport_drop_shuts_down_socket_with_writer_retained() {
     let _writer = writer.lock().await;
     drop(transport);
     assert_peer_terminated(&mut peer).await;
-}
-
-#[tokio::test]
-async fn try_recv_event_does_not_wait_for_a_blocked_recv_event() {
-    let (transport, _peer) = pending_test_peer().await;
-    let mut waiting = Box::pin(transport.recv_event());
-    poll_fn(|cx| {
-        assert!(matches!(waiting.as_mut().poll(cx), Poll::Pending));
-        Poll::Ready(())
-    })
-    .await;
-    assert!(
-        tokio::time::timeout(Duration::from_secs(1), transport.try_recv_event())
-            .await
-            .expect("nonblocking receive must not wait for the persistent receiver mutex")
-            .is_none()
-    );
-    drop(waiting);
-    transport.close().await.unwrap();
 }

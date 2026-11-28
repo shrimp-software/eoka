@@ -1,6 +1,7 @@
 use super::*;
 
 mod malformed_frames;
+mod queue_and_lifecycle;
 mod reader_writes;
 mod stream_shutdown;
 
@@ -86,7 +87,7 @@ async fn auth_without_proxy_credentials_is_left_to_the_caller() {
         .await
         .unwrap()
         .unwrap();
-    assert!(matches!(event, CdpMessage::Event { method, .. } if method == "Fetch.authRequired"));
+    assert!(matches!(&*event, CdpMessage::Event { method, .. } if method == "Fetch.authRequired"));
     transport.close().await.unwrap();
 }
 
@@ -491,7 +492,13 @@ async fn pending_registration_cleans_cancelled_writer_and_reply_waits() {
     let (transport, mut peer) = pending_test_peer().await;
     let writer = transport.writer.lock().await;
     let (unrelated, _receiver) = oneshot::channel();
-    lock_pending(&transport.pending).insert(9999, unrelated);
+    lock_pending(&transport.pending).insert(
+        9999,
+        PendingRequest {
+            sender: unrelated,
+            session: None,
+        },
+    );
     for _ in 0..8 {
         assert!(tokio::time::timeout(
             Duration::from_millis(10),
@@ -806,7 +813,7 @@ async fn closing_transport_times_out_writer_and_cleans_owned_runtime() {
     let runtime_path = runtime.path().to_owned();
     *transport.runtime.get_mut().unwrap() = Some(runtime);
     let (_, response) = transport
-        .prepare_command(None, "Fixture.pendingAtClose", &json!({}), None)
+        .prepare_command(None, "Fixture.pendingAtClose", &json!({}), false)
         .unwrap();
     let writer = transport.writer.lock().await;
     // Socket setup needs real time; only the contended close uses virtual time.
@@ -851,14 +858,14 @@ async fn binary_frames_preserve_event_payloads_and_command_replies() {
         .await
         .unwrap()
         .unwrap();
-    match event {
+    match &*event {
         CdpMessage::Event {
             method,
             params: received,
             session_id,
         } => {
             assert_eq!(method, "Fixture.binary");
-            assert_eq!(received, params);
+            assert_eq!(received, &params);
             assert_eq!(session_id.as_deref(), Some("binary-session"));
         }
         _ => panic!("expected binary event"),

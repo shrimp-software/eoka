@@ -63,7 +63,7 @@ pub enum DownloadEvent {
 /// Dropping schedules bounded restoration; a failed restore blocks future watchers.
 pub struct DownloadWatch {
     transport: Arc<Transport>,
-    events: broadcast::Receiver<CdpMessage>,
+    events: broadcast::Receiver<std::sync::Arc<CdpMessage>>,
     permit: Option<OwnedSemaphorePermit>,
     openers: HashMap<String, String>,
 }
@@ -114,7 +114,7 @@ impl DownloadWatch {
                     }
                     Ok(Ok(message)) => message,
                 };
-            if let CdpMessage::Event { method, params, .. } = message {
+            if let CdpMessage::Event { method, params, .. } = &*message {
                 match method.as_str() {
                     "Target.targetCreated" | "Target.targetInfoChanged" => {
                         if let (Some(target), Some(opener)) = (
@@ -130,10 +130,14 @@ impl DownloadWatch {
                         }
                     }
                     "Browser.downloadWillBegin" => {
-                        return Ok(DownloadEvent::Beginning(serde_json::from_value(params)?))
+                        return Ok(DownloadEvent::Beginning(serde::Deserialize::deserialize(
+                            params,
+                        )?))
                     }
                     "Browser.downloadProgress" => {
-                        return Ok(DownloadEvent::Progress(serde_json::from_value(params)?))
+                        return Ok(DownloadEvent::Progress(serde::Deserialize::deserialize(
+                            params,
+                        )?))
                     }
                     _ => {}
                 }
@@ -233,7 +237,7 @@ mod tests {
                     stream.send(Message::Text(json!({"method":"Browser.downloadWillBegin","params":{"frameId":"frame","guid":"guid","url":"https://example.test/file","suggestedFilename":"../../unsafe"}}).to_string().into())).await.unwrap();
                 }
                 if command["params"]["guid"] == "flood" {
-                    for _ in 0..2048 {
+                    for _ in 0..crate::cdp::transport::EVENT_CHANNEL_CAPACITY * 2 {
                         stream.send(Message::Text(json!({"method":"Browser.downloadProgress","params":{"guid":"guid","receivedBytes":1,"totalBytes":2,"state":"inProgress"}}).to_string().into())).await.unwrap();
                     }
                 }

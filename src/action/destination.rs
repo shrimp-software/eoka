@@ -9,7 +9,7 @@ use crate::{cdp::transport::CdpMessage, Destination, Error, Expectation, Page, R
 pub(super) struct DestinationWatch {
     origin: Page,
     scope: Destination,
-    events: broadcast::Receiver<CdpMessage>,
+    events: broadcast::Receiver<std::sync::Arc<CdpMessage>>,
     existing: HashSet<String>,
     candidates: HashMap<String, Option<Page>>,
     origin_closed: bool,
@@ -46,7 +46,7 @@ impl DestinationWatch {
 
     pub async fn check(&mut self, expect: &Expectation) -> Result<Option<String>> {
         loop {
-            match self.events.try_recv() {
+            match self.events.try_recv().as_deref() {
                 Ok(CdpMessage::Event { method, params, .. })
                     if method == "Target.targetCreated" || method == "Target.targetInfoChanged" =>
                 {
@@ -135,7 +135,7 @@ async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
     let mut events = page.session().transport().subscribe();
     let destroyed = async {
         loop {
-            match events.recv().await {
+            match events.recv().await.as_deref() {
                 Ok(CdpMessage::Event { method, params, .. })
                     if method == "Target.targetDestroyed"
                         && params["targetId"] == page.target_id() =>

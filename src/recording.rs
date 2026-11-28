@@ -239,7 +239,7 @@ impl RecordingState {
                         "Recording connection disconnected",
                     )))
                 } else {
-                    match event {
+                    match event.as_ref().map(|event| event.as_deref()) {
                         Ok(Ok(CdpMessage::Event {
                             method,
                             params,

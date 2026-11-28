@@ -254,15 +254,10 @@ impl NetworkMonitor {
     }
 
     async fn start_owned(transport: &Arc<Transport>, target: &str, fresh: bool) -> Result<Self> {
-        let attached: super::types::TargetAttachToTargetResult = transport
-            .send(
-                "Target.attachToTarget",
-                &json!({"targetId":target,"flatten":true}),
-            )
-            .await?;
+        let session = transport.attach_to_target(target).await?;
         let monitor = Self {
             transport: Arc::downgrade(transport),
-            session: attached.session_id,
+            session,
             state: Arc::new(IdleState::new(target.into(), String::new(), fresh)),
         };
         transport.install_idle_route(&monitor.session, &monitor.state);
@@ -319,6 +314,16 @@ impl NetworkMonitor {
 
     pub(crate) fn closed(&self) {
         self.state.fail("Network idle target closed");
+    }
+
+    /// Whether monitoring has failed permanently and must be recreated.
+    pub(crate) fn failed(&self) -> bool {
+        self.state
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .failure
+            .is_some()
     }
 }
 
