@@ -168,9 +168,16 @@ impl<'a> Human<'a> {
         self
     }
 
-    /// Last dispatched pointer position on this target, shared with Page input.
-    async fn pointer(&self) -> Option<Point> {
-        self.held_input.lock().await.pointer()
+    /// `choose` applied to the last dispatched pointer position on this
+    /// target (shared with Page input) and the viewport, which is only
+    /// measured when no pointer position is known.
+    async fn pointer_point(&self, choose: fn(Option<Point>, Point) -> Point) -> Point {
+        let pointer = self.held_input.lock().await.pointer();
+        let viewport = match pointer {
+            Some(_) => (0.0, 0.0),
+            None => self.viewport().await,
+        };
+        choose(pointer, viewport)
     }
 
     /// CSS layout viewport size; a desktop default when metrics are unavailable.
@@ -195,10 +202,7 @@ impl<'a> Human<'a> {
     /// Move mouse to target position with human-like Bezier curve, starting
     /// from the last dispatched pointer position.
     pub async fn move_to(&self, target_x: f64, target_y: f64) -> Result<()> {
-        let (start_x, start_y) = match self.pointer().await {
-            Some(pointer) => pointer,
-            None => approach_start(None, self.viewport().await),
-        };
+        let (start_x, start_y) = self.pointer_point(approach_start).await;
 
         let distance = ((target_x - start_x).powi(2) + (target_y - start_y).powi(2)).sqrt();
         let num_points = self.speed.mouse_points(distance);
@@ -405,10 +409,7 @@ impl<'a> Human<'a> {
     pub async fn scroll(&self, delta_y: f64) -> Result<()> {
         let num_scrolls = random_range(3, 8);
         let per_scroll = delta_y / num_scrolls as f64;
-        let (x, y) = match self.pointer().await {
-            Some(pointer) => pointer,
-            None => scroll_origin(None, self.viewport().await),
-        };
+        let (x, y) = self.pointer_point(scroll_origin).await;
 
         for _ in 0..num_scrolls {
             let jitter = random_f64_range(-20.0, 20.0);
@@ -463,24 +464,17 @@ mod tests {
     }
 
     // Regression: paths started at a random point within 300px of the target
-    // instead of the real pointer, so consecutive moves teleported.
+    // instead of the real pointer, so consecutive moves teleported, and wheel
+    // events landed at random coordinates regardless of pointer or viewport.
     #[test]
-    fn test_paths_start_at_the_known_pointer() {
-        assert_eq!(
-            approach_start(Some((12.0, 34.0)), (800.0, 600.0)),
-            (12.0, 34.0)
-        );
+    fn test_paths_and_scrolls_start_at_the_known_pointer() {
+        let viewport = (800.0, 600.0);
+        assert_eq!(approach_start(Some((12.0, 34.0)), viewport), (12.0, 34.0));
         for _ in 0..200 {
-            let (x, y) = approach_start(None, (800.0, 600.0));
+            let (x, y) = approach_start(None, viewport);
             assert!((0.0..800.0).contains(&x) && (0.0..600.0).contains(&y));
         }
-    }
-
-    // Regression: wheel events landed at random coordinates (up to 800x600)
-    // regardless of the pointer or viewport.
-    #[test]
-    fn test_scroll_lands_at_pointer_or_viewport_centre() {
-        assert_eq!(scroll_origin(Some((5.0, 6.0)), (800.0, 600.0)), (5.0, 6.0));
+        assert_eq!(scroll_origin(Some((5.0, 6.0)), viewport), (5.0, 6.0));
         assert_eq!(scroll_origin(None, (640.0, 360.0)), (320.0, 180.0));
     }
 

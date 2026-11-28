@@ -44,10 +44,7 @@ pub fn find_chrome() -> Result<PathBuf> {
         let path = Path::new(candidate);
         if path.exists() {
             #[cfg(target_os = "linux")]
-            {
-                let resolved = resolve_to_elf(path, false);
-                return Ok(resolved);
-            }
+            return Ok(resolve_to_elf(path, false));
             #[cfg(not(target_os = "linux"))]
             return Ok(path.to_path_buf());
         }

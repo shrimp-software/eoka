@@ -1,9 +1,32 @@
 //! Persistent, verified patch cache and atomic publication (non-macOS).
 
-#[allow(unused_imports)]
-use super::*;
+use std::fs;
+#[cfg(not(target_os = "macos"))]
+use std::fs::{File, OpenOptions};
+use std::path::{Path, PathBuf};
 
-pub(super) fn fnv1a(state: u64, bytes: &[u8]) -> u64 {
+#[cfg(not(target_os = "macos"))]
+use memmap2::{Mmap, MmapMut};
+
+#[cfg(not(target_os = "macos"))]
+use super::sections::{apply_patches, count_patchable_in_file};
+use super::PATCHER_SCHEMA_VERSION;
+#[cfg(not(target_os = "macos"))]
+use super::{random_string, ChromePatcher};
+#[cfg(target_os = "linux")]
+use crate::browser::discovery::{is_elf, resolve_to_elf};
+use crate::error::{Error, Result};
+
+/// Manifest file inside each published cache entry.
+#[cfg(not(target_os = "macos"))]
+const MANIFEST_NAME: &str = "eoka-patch.manifest";
+
+/// Staging and trash leftovers from crashed processes older than this are
+/// removed when another entry is published.
+#[cfg(not(target_os = "macos"))]
+const LEFTOVER_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+fn fnv1a(state: u64, bytes: &[u8]) -> u64 {
     bytes.iter().fold(state, |hash, byte| {
         (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01b3)
     })
@@ -13,7 +36,7 @@ pub(super) fn fnv1a(state: u64, bytes: &[u8]) -> u64 {
 /// Fast, stable 64-bit content hash used to detect truncated or corrupted
 /// cache entries. Not a cryptographic digest: entries live in a private
 /// directory owned by the current user.
-pub(super) fn content_hash(data: &[u8]) -> u64 {
+fn content_hash(data: &[u8]) -> u64 {
     const MULTIPLIER: u64 = 0x9e37_79b9_7f4a_7c15;
     let mut hash = 0xcbf2_9ce4_8422_2325 ^ data.len() as u64;
     let mut words = data.chunks_exact(8);
@@ -27,7 +50,7 @@ pub(super) fn content_hash(data: &[u8]) -> u64 {
     hash ^ (hash >> 29)
 }
 
-pub(super) fn path_bytes(path: &Path) -> Vec<u8> {
+fn path_bytes(path: &Path) -> Vec<u8> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -40,7 +63,7 @@ pub(super) fn path_bytes(path: &Path) -> Vec<u8> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn hex(bytes: &[u8]) -> String {
+fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
@@ -68,6 +91,12 @@ impl SourceIdentity {
         })
     }
 
+    /// Hex of the canonical source path, as stored in manifests.
+    #[cfg(not(target_os = "macos"))]
+    fn path_hex(&self) -> String {
+        hex(&path_bytes(&self.path))
+    }
+
     pub(super) fn cache_key(&self) -> String {
         let mut hash = fnv1a(0xcbf2_9ce4_8422_2325, &PATCHER_SCHEMA_VERSION.to_le_bytes());
         hash = fnv1a(hash, &path_bytes(&self.path));
@@ -82,13 +111,13 @@ impl SourceIdentity {
 #[cfg(not(target_os = "macos"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Manifest {
-    pub(super) schema: u64,
-    pub(super) source: String,
-    pub(super) source_len: u64,
-    pub(super) source_mtime_ns: u128,
-    pub(super) patched_len: u64,
-    pub(super) patched_hash: u64,
-    pub(super) patches: usize,
+    schema: u64,
+    source: String,
+    source_len: u64,
+    source_mtime_ns: u128,
+    patched_len: u64,
+    patched_hash: u64,
+    patches: usize,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -96,7 +125,7 @@ impl Manifest {
     pub(super) fn for_source(identity: &SourceIdentity, patched_hash: u64, patches: usize) -> Self {
         Self {
             schema: PATCHER_SCHEMA_VERSION,
-            source: hex(&path_bytes(&identity.path)),
+            source: identity.path_hex(),
             source_len: identity.len,
             source_mtime_ns: identity.mtime_ns,
             patched_len: identity.len,
@@ -140,7 +169,7 @@ impl Manifest {
         })
     }
 
-    pub(super) fn read(path: &Path) -> Option<Self> {
+    fn read(path: &Path) -> Option<Self> {
         let metadata = fs::symlink_metadata(path).ok()?;
         if !metadata.is_file() || metadata.len() > 64 * 1024 {
             return None;
@@ -150,15 +179,11 @@ impl Manifest {
 
     pub(super) fn describes(&self, identity: &SourceIdentity) -> bool {
         self.schema == PATCHER_SCHEMA_VERSION
-            && self.source == hex(&path_bytes(&identity.path))
+            && self.source == identity.path_hex()
             && self.source_len == identity.len
             && self.source_mtime_ns == identity.mtime_ns
     }
 }
-
-// ---------------------------------------------------------------------------
-// Cache directories
-// ---------------------------------------------------------------------------
 
 /// Persistent cache root from `XDG_CACHE_HOME` (absolute) or `HOME`.
 /// Pure so tests never consult or mutate the real environment.
@@ -203,12 +228,6 @@ pub(super) fn create_cache_root(path: &Path) -> Result<()> {
     }
     #[cfg(not(unix))]
     fs::create_dir_all(path)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-pub(super) fn create_dir_secure(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir)?;
     Ok(())
 }
 
@@ -285,10 +304,28 @@ impl ChromePatcher {
             .expect("entry directory always has a name")
     }
 
-    pub(super) fn clean_marker_path(&self) -> PathBuf {
+    fn clean_marker_path(&self) -> PathBuf {
         let mut name = self.entry_name().to_os_string();
         name.push(".clean");
         self.root.join(name)
+    }
+
+    /// A fresh name for a staging directory or temporary file in the root.
+    fn staging_path(&self) -> PathBuf {
+        self.root.join(format!(
+            ".staging-{}-{}",
+            std::process::id(),
+            random_string(12)
+        ))
+    }
+
+    /// Move an entry aside and delete it. Never delete in place: a running
+    /// browser may still use the entry.
+    fn discard_entry(&self, entry: &Path) -> std::io::Result<()> {
+        let trash = self.root.join(format!(".trash-{}", random_string(12)));
+        fs::rename(entry, &trash)?;
+        let _ = fs::remove_dir_all(&trash);
+        Ok(())
     }
 
     #[cfg(all(test, unix))]
@@ -316,7 +353,7 @@ impl ChromePatcher {
 
     /// Check a published (or staged) entry: private directory, manifest for
     /// this exact source, full file length and full content hash.
-    pub(super) fn validate_entry(&self, directory: &Path) -> Result<()> {
+    fn validate_entry(&self, directory: &Path) -> Result<()> {
         #[cfg(unix)]
         validate_private_cache_directory(directory)?;
         let invalid = |reason: &str| {
@@ -352,11 +389,7 @@ impl ChromePatcher {
             return Ok(self.original_path.clone());
         }
         for _ in 0..2 {
-            let staging = self.root.join(format!(
-                ".staging-{}-{}",
-                std::process::id(),
-                random_string(12)
-            ));
+            let staging = self.staging_path();
             #[cfg(unix)]
             create_private_cache_directory(&staging)?;
             #[cfg(not(unix))]
@@ -366,15 +399,10 @@ impl ChromePatcher {
                 tracing::info!("Patched {patches} occurrences; publishing cache entry");
                 self.publish(&staging)
             });
-            if fs::symlink_metadata(&staging).is_ok() {
-                let _ = fs::remove_dir_all(&staging);
-            }
-            match published? {
-                Some(path) => {
-                    self.prune_stale_entries();
-                    return Ok(path);
-                }
-                None => continue,
+            let _ = fs::remove_dir_all(&staging);
+            if let Some(path) = published? {
+                self.prune_stale_entries();
+                return Ok(path);
             }
         }
         Err(Error::patching(
@@ -384,7 +412,7 @@ impl ChromePatcher {
     }
 
     /// Write the patched copy, its companions and manifest into `staging`.
-    pub(super) fn build_entry(&self, staging: &Path) -> Result<usize> {
+    fn build_entry(&self, staging: &Path) -> Result<usize> {
         let binary = staging.join(self.patched_path.file_name().expect("binary file name"));
         let mut source = File::open(&self.original_path)?;
         let mut destination = OpenOptions::new()
@@ -436,7 +464,7 @@ impl ChromePatcher {
 
     /// Atomically move `staging` into place. `Ok(None)` asks the caller to
     /// rebuild after a corrupt entry was moved aside.
-    pub(super) fn publish(&self, staging: &Path) -> Result<Option<PathBuf>> {
+    fn publish(&self, staging: &Path) -> Result<Option<PathBuf>> {
         let entry = self.entry_directory();
         match fs::rename(staging, entry) {
             Ok(()) => {
@@ -455,20 +483,13 @@ impl ChromePatcher {
         #[cfg(unix)]
         validate_private_cache_directory(entry)?;
         tracing::warn!("Replacing corrupt Chrome cache entry {:?}", entry);
-        let trash = self.root.join(format!(".trash-{}", random_string(12)));
-        // Never delete in place: a running browser may still use the entry.
-        fs::rename(entry, &trash)?;
-        let _ = fs::remove_dir_all(&trash);
+        self.discard_entry(entry)?;
         Ok(None)
     }
 
-    pub(super) fn write_clean_marker(&self) -> Result<()> {
+    fn write_clean_marker(&self) -> Result<()> {
         let marker = self.clean_marker_path();
-        let temporary = self.root.join(format!(
-            ".staging-{}-{}",
-            std::process::id(),
-            random_string(12)
-        ));
+        let temporary = self.staging_path();
         let manifest = Manifest::for_source(&self.identity, 0, 0);
         let written = write_synced(&temporary, manifest.render().as_bytes()).and_then(|()| {
             match fs::symlink_metadata(&marker) {
@@ -489,13 +510,13 @@ impl ChromePatcher {
 
     /// Remove entries and markers for this source with another key (an older
     /// Chrome build or schema), and leftovers from crashed processes.
-    pub(super) fn prune_stale_entries(&self) {
+    fn prune_stale_entries(&self) {
         let Ok(entries) = fs::read_dir(&self.root) else {
             return;
         };
         let own_entry = self.entry_name().to_os_string();
         let own_marker = self.clean_marker_path();
-        let source = hex(&path_bytes(&self.identity.path));
+        let source = self.identity.path_hex();
         for entry in entries.flatten() {
             let path = entry.path();
             let Ok(metadata) = fs::symlink_metadata(&path) else {
@@ -524,10 +545,7 @@ impl ChromePatcher {
             }
             if metadata.is_dir() {
                 tracing::debug!("Pruning stale Chrome cache entry {:?}", path);
-                let trash = self.root.join(format!(".trash-{}", random_string(12)));
-                if fs::rename(&path, &trash).is_ok() {
-                    let _ = fs::remove_dir_all(&trash);
-                }
+                let _ = self.discard_entry(&path);
             } else {
                 let _ = fs::remove_file(&path);
             }
@@ -537,7 +555,7 @@ impl ChromePatcher {
     /// Link (Unix) or copy (Windows) every sibling of the original binary into
     /// `directory`. Chromium resolves shared libraries and data files
     /// (icudtl.dat, V8 snapshots, locale paks) relative to its executable.
-    pub(super) fn link_companion_files(&self, directory: &Path) -> Result<()> {
+    fn link_companion_files(&self, directory: &Path) -> Result<()> {
         let source_directory = self.original_path.parent().ok_or_else(|| {
             Error::patching("dependencies", "Chrome binary has no parent directory")
         })?;
@@ -562,7 +580,7 @@ impl ChromePatcher {
 
 /// Verify the complete file: exact length and content hash.
 #[cfg(not(target_os = "macos"))]
-pub(super) fn verify_binary(path: &Path, expected_len: u64, expected_hash: u64) -> Result<()> {
+fn verify_binary(path: &Path, expected_len: u64, expected_hash: u64) -> Result<()> {
     let invalid = |reason: &str| {
         Error::patching(
             "verify",
@@ -593,7 +611,7 @@ pub(super) fn verify_binary(path: &Path, expected_len: u64, expected_hash: u64) 
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(super) fn write_synced(path: &Path, contents: &[u8]) -> Result<()> {
+fn write_synced(path: &Path, contents: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(contents)?;
@@ -603,7 +621,7 @@ pub(super) fn write_synced(path: &Path, contents: &[u8]) -> Result<()> {
 
 /// Best-effort fsync of a directory so a rename into it survives a crash.
 #[cfg(not(target_os = "macos"))]
-pub(super) fn sync_directory(directory: &Path) {
+fn sync_directory(directory: &Path) {
     #[cfg(unix)]
     if let Ok(directory) = File::open(directory) {
         let _ = directory.sync_all();
@@ -625,7 +643,7 @@ pub(super) fn resolve_elf_for_patching(chrome_path: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(windows)]
-pub(super) fn copy_dependency(source: &Path, destination: &Path) -> Result<()> {
+fn copy_dependency(source: &Path, destination: &Path) -> Result<()> {
     if source.is_dir() {
         fs::create_dir_all(destination)?;
         for entry in fs::read_dir(source)? {

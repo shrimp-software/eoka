@@ -662,8 +662,7 @@ mod try_attach_existing_tests {
     }
 
     // Regression: Chromium keeps only the last occurrence of a switch, so a
-    // user's --disable-features/--blink-settings used to drop eoka's
-    // AutomationControlled and pointer/hover pinning. Lists are merged.
+    // user's list switch used to drop eoka's entries.
     #[test]
     fn stealth_args_merge_user_list_switches() {
         let fp = Fingerprint::random();
@@ -713,9 +712,8 @@ mod try_attach_existing_tests {
             .any(|a| a.contains("site-per-process") || a.contains("IsolateOrigins")));
     }
 
-    // Regression: WebRTC UDP bypasses a configured proxy and reveals the host
-    // IP through STUN. Only proxied sessions restrict it, so WebRTC keeps
-    // working without one.
+    // Regression: WebRTC UDP bypassed a configured proxy (STUN leaks the host
+    // IP); only proxied sessions are restricted.
     #[test]
     fn stealth_args_keep_webrtc_behind_a_proxy() {
         let fp = Fingerprint::random();

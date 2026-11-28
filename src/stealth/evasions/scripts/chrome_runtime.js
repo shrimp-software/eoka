@@ -1,10 +1,8 @@
 
-// Stock Chrome, headless/new included, already exposes `window.chrome` with
-// native `loadTimes`, `csi` and `app` (verified against Chrome 156), so this
-// fallback only runs where the object is missing. Native `loadTimes`/`csi`
-// are anonymous, constructible functions, so they stay function expressions.
-// Values derive from the document's own navigation timing: stable for the
-// page, and consistent with `performance`.
+// Stock Chrome (headless/new included) has a native `window.chrome`; this only
+// fills a missing one. Native `loadTimes`/`csi` are anonymous, constructible
+// functions, so they stay function expressions. Values come from the page's
+// own navigation timing, consistent with `performance`.
 if (!window.chrome) {
     const _eoka_sec = (ms) => ms / 1000;
     const _eoka_nav = () => performance.getEntriesByType('navigation')[0] || {};

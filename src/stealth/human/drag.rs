@@ -146,12 +146,9 @@ impl Human<'_> {
 
     pub(super) async fn approach_drag(&self, x: f64, y: f64) -> Result<DragRelease<'_>> {
         self.finish_drag_cleanup().await?;
-        // Read before taking the input lock, which pointer() also needs.
-        let pointer = self.pointer().await;
-        let viewport = match pointer {
-            Some(_) => (0.0, 0.0), // unused: the pointer is the start
-            None => self.viewport().await,
-        };
+        // Approach from the real pointer, like Human::move_to. Read before
+        // taking the input lock, which pointer_point also needs.
+        let start = self.pointer_point(approach_start).await;
         let input = DragInput::acquire(self.session).await?;
         self.finish_drag_cleanup().await?;
         let mut release = DragRelease {
@@ -161,8 +158,6 @@ impl Human<'_> {
             y,
             armed: false,
         };
-        // Approach from the real pointer, like Human::move_to.
-        let start = approach_start(pointer, viewport);
         let distance = ((x - start.0).powi(2) + (y - start.1).powi(2)).sqrt();
         let path = bezier_curve(start, (x, y), self.speed.mouse_points(distance));
         let (min, max) = self.speed.move_delay_ms();

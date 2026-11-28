@@ -8,15 +8,15 @@ use crate::stealth::fingerprint::{Fingerprint, GENERIC_FONTS};
 use crate::StealthConfig;
 
 /// Prelude: native-function masking (`_eoka_mark`), the shared prototype patch
-/// helpers (`_eoka_patchMethod`/`_eoka_patchGetter`) and the seeded PRNG.
+/// helpers (`_eoka_patchMethod`/`_eoka_patchGetter`/`_eoka_instance`) and the
+/// noise PRNG step (`_eoka_lcg`).
 pub const NATIVE_TOSTRING_EVASION: &str = include_str!("evasions/scripts/native_tostring.js");
 
 /// WebDriver evasion: `navigator.webdriver` is false on `Navigator.prototype`
 /// (only replaced where the native getter still reports true).
 pub const WEBDRIVER_EVASION: &str = include_str!("evasions/scripts/webdriver.js");
 
-/// Formerly hid chromedriver `cdc_` markers, which eoka never produces, by
-/// proxying `window.document` (breaking `ownerDocument` identity). Now empty.
+/// Formerly proxied `window.document` to hide chromedriver markers. Now empty.
 #[deprecated(
     since = "0.11.0",
     note = "eoka produces no CDP markers; the script is empty"
@@ -67,10 +67,7 @@ pub const FINGERPRINT_EVASION: &str = concat!(
     include_str!("evasions/scripts/audio.js"),
 );
 
-/// Formerly stripped STUN/TURN servers from `RTCPeerConnection` configs, which
-/// mutated the caller's object without stopping the leak. When a proxy is
-/// configured, Chrome's `--webrtc-ip-handling-policy=disable_non_proxied_udp`
-/// launch flag now stops WebRTC from bypassing it. Now empty.
+/// Formerly stripped STUN/TURN servers from `RTCPeerConnection`. Now empty.
 #[deprecated(
     since = "0.11.0",
     note = "WebRTC is handled by a Chrome launch flag; the script is empty"
@@ -105,10 +102,7 @@ pub const FONTS_EVASION: &str = include_str!("evasions/scripts/fonts.js");
 /// US ANSI, matching the identity's en-US locale.
 pub const KEYBOARD_EVASION: &str = include_str!("evasions/scripts/keyboard.js");
 
-/// Formerly replaced `Date.prototype.getTimezoneOffset` and
-/// `Intl.DateTimeFormat` with approximations. Every non-live session applies
-/// the timezone natively with `Emulation.setTimezoneOverride`, which is exact
-/// for DST transitions and keeps native functions intact. Now empty.
+/// Formerly approximated the timezone in `Date` and `Intl`. Now empty.
 #[deprecated(
     since = "0.11.0",
     note = "the timezone is applied natively by Emulation.setTimezoneOverride; the script is empty"
@@ -137,7 +131,7 @@ pub(crate) const COMMON_TIMEZONES: &[&str] = &[
 /// Build the complete evasion script for the given config and fingerprint.
 pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> String {
     let mut scripts = vec![
-        NATIVE_TOSTRING_EVASION, // must be first: defines _eoka_mark / _eoka_rand
+        NATIVE_TOSTRING_EVASION, // must be first: defines the _eoka_* helpers
         WEBDRIVER_EVASION,
         CHROME_RUNTIME_EVASION,
         PERMISSIONS_EVASION,

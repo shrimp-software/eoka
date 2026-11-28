@@ -10,10 +10,8 @@ const navProps = {
     maxTouchPoints: () => 0
 };
 
-// `navigator.deviceMemory` is [SecureContext]: stock Chrome (Linux included)
-// exposes it on https/localhost/file pages and omits it on http ones. Only
-// spoof it where the native attribute exists, so an insecure page never gains
-// a property stock Chrome would not have there.
+// `navigator.deviceMemory` is [SecureContext]; never add it where stock Chrome
+// omits it (http pages).
 if (!('deviceMemory' in Navigator.prototype)) {
     delete navProps.deviceMemory;
 }
@@ -22,10 +20,8 @@ for (const [prop, value] of Object.entries(navProps)) {
     _eoka_patchGetter(Navigator.prototype, prop, () => value);
 }
 
-// `navigator.cookieEnabled` is native and truthful. Only repair the impossible
-// pair "cookies disabled but a cookie write succeeds" (some embedded/automation
-// contexts report false while the cookie jar works); never override a browser
-// where cookies are genuinely disabled.
+// `navigator.cookieEnabled` stays native unless it reports false while a
+// cookie write succeeds, as some embedded/automation contexts do.
 try {
     if (navigator.cookieEnabled === false) {
         const probe = '__eoka_cookie_probe__';

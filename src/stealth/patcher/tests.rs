@@ -98,8 +98,11 @@ pub(crate) mod fixtures {
 
 #[cfg(test)]
 mod engine {
-    use super::super::*;
+    use super::super::cache::SourceIdentity;
+    use super::super::random_string;
+    use super::super::sections::{apply_patches, pattern_matcher};
     use super::fixtures::{contains, elf, macho, pe};
+    use std::path::PathBuf;
 
     #[test]
     fn test_random_string() {
@@ -191,6 +194,8 @@ mod engine {
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn manifest_round_trips_and_rejects_garbage() {
+        use super::super::cache::Manifest;
+
         let identity = SourceIdentity {
             path: PathBuf::from("/opt/chrome/chrome"),
             len: 42,
@@ -238,6 +243,7 @@ mod engine {
     #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
     fn persistent_cache_root_prefers_absolute_xdg_then_home() {
+        use super::super::cache::persistent_cache_root_from;
         use std::ffi::OsString;
         let root = |xdg: Option<&str>, home: Option<&str>| {
             persistent_cache_root_from(xdg.map(OsString::from), home.map(OsString::from))
@@ -260,6 +266,7 @@ mod cache_tests {
     use super::super::*;
     use super::fixtures::{contains, elf};
     use crate::cdp::transport::RuntimeDirectory;
+    use std::fs::{self, File, OpenOptions};
     use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
 
     struct Fixture {
@@ -499,7 +506,9 @@ mod cache_tests {
 mod runtime_tests {
     use super::super::*;
     use super::fixtures::elf;
+    use crate::browser::discovery::resolve_to_elf;
     use crate::cdp::transport::RuntimeDirectory;
+    use std::fs;
 
     #[test]
     fn concurrent_runtime_patchers_preserve_source_and_dependencies() {
@@ -568,6 +577,7 @@ mod macos_bundle_tests {
     use super::super::*;
     use super::fixtures::macho;
     use crate::cdp::transport::RuntimeDirectory;
+    use std::fs::{self, File};
     use std::os::unix::fs::{symlink, MetadataExt};
 
     #[test]

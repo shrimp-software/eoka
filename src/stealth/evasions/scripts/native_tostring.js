@@ -58,10 +58,14 @@ const _eoka_patchGetter = (target, name, make) => {
     });
 };
 
-// Deterministic per-session PRNG (LCG), seeded from Rust.
-const _eoka_lcg = (s) => (Math.imul(s >>> 0, 1664525) + 1013904223) >>> 0;
-let _eoka_seed = (__EOKA_NOISE_SEED__ >>> 0) || 1;
-const _eoka_rand = () => {
-    _eoka_seed = _eoka_lcg(_eoka_seed);
-    return _eoka_seed / 4294967296;
+// An object of a native interface carrying read-only enumerable `fields`.
+const _eoka_instance = (proto, fields) => {
+    const object = Object.create(proto);
+    for (const [key, value] of Object.entries(fields)) {
+        Object.defineProperty(object, key, { value, enumerable: true });
+    }
+    return object;
 };
+
+// One step of the deterministic noise PRNG (LCG); streams are seeded from Rust.
+const _eoka_lcg = (s) => (Math.imul(s >>> 0, 1664525) + 1013904223) >>> 0;

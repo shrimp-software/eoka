@@ -164,14 +164,19 @@ fn test_native_chrome_user_agent_uses_supplied_version() {
     assert!(Fingerprint::native_chrome_user_agent("not-a-version").is_none());
 }
 
-#[test]
-fn test_profile_identity_is_stable_across_launches() {
+fn temp_profile() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "eoka-fingerprint-test-{}-{}",
         std::process::id(),
         fastrand::u64(..)
     ));
     std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn test_profile_identity_is_stable_across_launches() {
+    let dir = temp_profile();
     let first =
         Fingerprint::resolve_for_profile(None, Some("America/Los_Angeles"), Some(&dir)).unwrap();
     let second =
@@ -186,12 +191,7 @@ fn test_profile_identity_is_stable_across_launches() {
 
 #[test]
 fn test_profile_identity_rejects_conflicting_user_agent() {
-    let dir = std::env::temp_dir().join(format!(
-        "eoka-fingerprint-test-{}-{}",
-        std::process::id(),
-        fastrand::u64(..)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = temp_profile();
     Fingerprint::resolve_for_profile(Some("Mozilla/5.0 first"), None, Some(&dir)).unwrap();
     assert!(
         Fingerprint::resolve_for_profile(Some("Mozilla/5.0 second"), None, Some(&dir)).is_err()
@@ -453,12 +453,7 @@ fn test_webgl_vendor_matches_renderer() {
 
 #[test]
 fn test_persisted_software_renderer_is_replaced_once() {
-    let dir = std::env::temp_dir().join(format!(
-        "eoka-fingerprint-test-{}-{}",
-        std::process::id(),
-        fastrand::u64(..)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = temp_profile();
     let ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.182 Safari/537.36";
     let mut stored = Fingerprint::resolve(Some(ua), None);
     stored.webgl_vendor = "Google Inc. (Google)".into();
@@ -476,16 +471,6 @@ fn test_persisted_software_renderer_is_replaced_once() {
     let second = Fingerprint::resolve_for_profile(Some(ua), None, Some(&dir)).unwrap();
     assert_eq!(first.webgl_renderer, second.webgl_renderer);
     std::fs::remove_dir_all(dir).unwrap();
-}
-
-fn temp_profile() -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "eoka-fingerprint-test-{}-{}",
-        std::process::id(),
-        fastrand::u64(..)
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
 }
 
 #[test]

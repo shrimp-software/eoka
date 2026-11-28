@@ -173,12 +173,9 @@ impl Fingerprint {
     /// launching. This avoids advertising an obsolete Chrome release while
     /// the browser exposes a newer TLS and JavaScript surface.
     pub fn native_chrome_user_agent(chrome_full_version: &str) -> Option<String> {
-        let major = chrome_full_version.split('.').next()?;
-        if major.is_empty()
-            || !major.bytes().all(|byte| byte.is_ascii_digit())
-            || chrome_full_version
-                .split('.')
-                .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+        if chrome_full_version
+            .split('.')
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
         {
             return None;
         }
@@ -251,17 +248,10 @@ impl Fingerprint {
                 } else {
                     Platform::Windows
                 };
-                let (major, full) = ua
-                    .split("Chrome/")
-                    .nth(1)
-                    .and_then(|rest| rest.split(' ').next())
-                    .filter(|v| !v.is_empty())
-                    .map(|v| (v.split('.').next().unwrap_or(v).to_string(), v.to_string()))
-                    .unwrap_or_else(|| {
-                        let (m, f) = *choose(CHROME_VERSIONS);
-                        (m.to_string(), f.to_string())
-                    });
-                let mut fp = Self::build(platform, major, full);
+                let (major, full) = chrome_full_version_of(ua)
+                    .map(|full| (chrome_major_of(full), full))
+                    .unwrap_or_else(|| *choose(CHROME_VERSIONS));
+                let mut fp = Self::build(platform, major.to_string(), full.to_string());
                 fp.user_agent = ua.to_string();
                 fp
             }
@@ -296,9 +286,11 @@ impl Fingerprint {
         timezone: Option<&str>,
         profile_dir: Option<&Path>,
     ) -> io::Result<Self> {
-        let user_agent = configured_user_agent;
         let Some(profile_dir) = profile_dir else {
-            return Ok(Self::resolve(user_agent.or(detected_user_agent), timezone));
+            return Ok(Self::resolve(
+                configured_user_agent.or(detected_user_agent),
+                timezone,
+            ));
         };
 
         let path = profile_dir.join(PERSISTED_FINGERPRINT_FILE);
@@ -313,24 +305,20 @@ impl Fingerprint {
                     ),
                 )
             })?;
-            if let Some(user_agent) = user_agent {
-                if user_agent != fingerprint.user_agent {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "configured user agent conflicts with persisted browser identity",
-                    ));
-                }
+            if configured_user_agent.is_some_and(|ua| ua != fingerprint.user_agent) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "configured user agent conflicts with persisted browser identity",
+                ));
             }
-            if let Some(timezone) = timezone {
-                if timezone != fingerprint.timezone {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "configured timezone conflicts with persisted browser identity",
-                    ));
-                }
+            if timezone.is_some_and(|tz| tz != fingerprint.timezone) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "configured timezone conflicts with persisted browser identity",
+                ));
             }
             let mut changed = false;
-            if user_agent.is_none() {
+            if configured_user_agent.is_none() {
                 if let Some(version) = detected_user_agent.and_then(chrome_full_version_of) {
                     changed |= fingerprint.follow_chrome_version(version);
                 }
@@ -351,7 +339,7 @@ impl Fingerprint {
             return Ok(fingerprint);
         }
 
-        let fingerprint = Self::resolve(user_agent.or(detected_user_agent), timezone);
+        let fingerprint = Self::resolve(configured_user_agent.or(detected_user_agent), timezone);
         fingerprint.persist(profile_dir)?;
         Ok(fingerprint)
     }
@@ -400,11 +388,7 @@ impl Fingerprint {
         } else {
             self.user_agent = ua_for(self.platform, full_version);
         }
-        self.chrome_major = full_version
-            .split('.')
-            .next()
-            .unwrap_or(full_version)
-            .to_string();
+        self.chrome_major = chrome_major_of(full_version).to_string();
         self.chrome_full_version = full_version.to_string();
         true
     }
@@ -539,6 +523,11 @@ fn chrome_full_version_of(user_agent: &str) -> Option<&str> {
         .nth(1)
         .and_then(|rest| rest.split(' ').next())
         .filter(|version| !version.is_empty())
+}
+
+/// The major version of a full Chrome version, e.g. `156`.
+fn chrome_major_of(full_version: &str) -> &str {
+    full_version.split('.').next().unwrap_or(full_version)
 }
 
 /// Whether the renderer is one the platform's catalog could have produced.
