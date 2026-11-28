@@ -3,6 +3,7 @@
 //! Manages browser and page sessions over the CDP transport.
 
 mod document;
+pub(crate) use document::ObjectGroup;
 mod input;
 mod network;
 mod page;

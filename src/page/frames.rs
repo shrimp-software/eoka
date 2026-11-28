@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use super::{FrameInfo, Page, ShadowClickReceipt};
+use crate::cdp::ObjectGroup;
 use crate::cdp::{Frame, FrameTree, RuntimeEvaluateResult, Session, TargetGetTargets};
 use crate::error::{Error, Result};
 
@@ -42,58 +43,6 @@ impl Drop for AttachedFrame {
                     tracing::debug!("Frame session detach failed: {error}");
                 }
             });
-        }
-    }
-}
-
-struct FrameObjects {
-    session: Session,
-    group: String,
-    active: bool,
-}
-
-impl FrameObjects {
-    fn new(session: Session) -> Self {
-        static NEXT_GROUP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-        Self {
-            session,
-            group: format!(
-                "eoka-frame-objects-{}",
-                NEXT_GROUP.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            ),
-            active: true,
-        }
-    }
-
-    async fn release(mut self) -> Result<()> {
-        release_frame_objects(&self.session, &self.group).await?;
-        self.active = false;
-        Ok(())
-    }
-}
-
-async fn release_frame_objects(session: &Session, group: &str) -> Result<()> {
-    tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        session.send::<_, Value>("Runtime.releaseObjectGroup", &json!({"objectGroup":group})),
-    )
-    .await
-    .map_err(|_| Error::cdp_msg("Frame object cleanup timed out"))??;
-    Ok(())
-}
-
-impl Drop for FrameObjects {
-    fn drop(&mut self) {
-        if self.active {
-            let session = self.session.clone();
-            let group = self.group.clone();
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn(async move {
-                    if release_frame_objects(&session, &group).await.is_err() {
-                        tracing::debug!("Frame object cleanup unconfirmed");
-                    }
-                });
-            }
         }
     }
 }
@@ -327,10 +276,10 @@ impl Page {
                 .send("DOM.getFrameOwner", &json!({"frameId": id}))
                 .await?;
             let parent_context = parent.session.create_isolated_world(parent_id).await?;
-            let objects = FrameObjects::new(parent.session.clone());
+            let objects = ObjectGroup::new(&parent.session);
             let resolved: Value = parent.session.send("DOM.resolveNode", &json!({
                 "backendNodeId": owner.backend_node_id, "executionContextId": parent_context,
-                "objectGroup":objects.group,
+                "objectGroup":objects.name,
             })).await?;
             let object_id = resolved["object"]["objectId"]
                 .as_str()
@@ -427,7 +376,7 @@ impl Page {
         }
         let root = self.session.get_frame_tree().await?.frame.id;
         let context = self.session.create_isolated_world(&root).await?;
-        let objects = FrameObjects::new(self.session.clone());
+        let objects = ObjectGroup::new(&self.session);
         let selector = serde_json::to_string(frame_selector)?;
         let selection = format!("(() => {{ const matches=document.querySelectorAll({selector}); if(matches.length!==1 || !['iframe','frame'].includes(matches[0].localName)) throw new Error('Frame selector must match exactly one iframe or frame element'); return matches[0]; }})()");
         let remote: RuntimeEvaluateResult = self
@@ -435,7 +384,7 @@ impl Page {
             .send(
                 "Runtime.evaluate",
                 &json!({
-                    "expression":selection, "contextId":context, "objectGroup":objects.group,
+                    "expression":selection, "contextId":context, "objectGroup":objects.name,
                     "returnByValue":false, "awaitPromise":false,
                 }),
             )
@@ -498,7 +447,7 @@ impl Page {
         let snapshot = Snapshot::capture(self).await?;
         let entry = snapshot.get(frame_id)?;
         let context = entry.session.create_isolated_world(frame_id).await?;
-        let objects = FrameObjects::new(entry.session.clone());
+        let objects = ObjectGroup::new(&entry.session);
         let selector = serde_json::to_string(selector)?;
         let expression = format!("(() => {{ const matches=document.querySelectorAll({selector}); if(matches.length>64 || !matches[{index}] || matches[{index}].getClientRects().length!==1) throw new Error('Unsupported frame quad selection'); return matches[{index}]; }})()");
         let remote: RuntimeEvaluateResult = entry
@@ -506,7 +455,7 @@ impl Page {
             .send(
                 "Runtime.evaluate",
                 &json!({
-                    "expression":expression, "contextId":context, "objectGroup":objects.group,
+                    "expression":expression, "contextId":context, "objectGroup":objects.name,
                     "returnByValue":false, "awaitPromise":false,
                 }),
             )

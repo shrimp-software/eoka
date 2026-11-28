@@ -9,17 +9,39 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// objects do not accumulate in the page for the document's lifetime.
 pub(crate) struct ObjectGroup {
     session: Session,
-    name: String,
+    pub(crate) name: String,
+    active: bool,
 }
 
 impl ObjectGroup {
-    fn new(session: &Session) -> Self {
+    pub(crate) fn new(session: &Session) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self {
             session: session.clone(),
             name: format!("eoka-{}", NEXT.fetch_add(1, Ordering::Relaxed)),
+            active: true,
         }
     }
+
+    /// Release now and report the outcome; dropping releases in the background.
+    pub(crate) async fn release(mut self) -> Result<()> {
+        release_group(&self.session, &self.name).await?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+async fn release_group(session: &Session, name: &str) -> Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        session.send::<_, serde_json::Value>(
+            "Runtime.releaseObjectGroup",
+            &serde_json::json!({ "objectGroup": name }),
+        ),
+    )
+    .await
+    .map_err(|_| crate::Error::cdp_msg("Object group cleanup timed out"))??;
+    Ok(())
 }
 
 impl Drop for ObjectGroup {
@@ -27,14 +49,13 @@ impl Drop for ObjectGroup {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        if !self.active {
+            return;
+        }
         let session = self.session.clone();
-        let params = serde_json::json!({"objectGroup": std::mem::take(&mut self.name)});
-        runtime.spawn(async move {
-            // A navigated or closed page has already discarded the group.
-            let _ = session
-                .send::<_, serde_json::Value>("Runtime.releaseObjectGroup", &params)
-                .await;
-        });
+        let name = std::mem::take(&mut self.name);
+        // A navigated or closed page has already discarded the group.
+        runtime.spawn(async move { drop(release_group(&session, &name).await) });
     }
 }
 

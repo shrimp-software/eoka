@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{frame_discovery_raced, FrameObjects, Page, ShadowClickReceipt, Snapshot};
+use super::{frame_discovery_raced, Page, ShadowClickReceipt, Snapshot};
+use crate::cdp::ObjectGroup;
 use crate::cdp::Session;
 use crate::error::{Error, Result};
 use crate::stealth::human::Human;
@@ -275,7 +276,7 @@ impl Page {
     /// runs in the frame's isolated world, so a same-process sibling or parent
     /// node cannot be mistaken for the requested frame's node.
     async fn node_in_frame(frame: &ShadowFrame, node_id: i32) -> Result<bool> {
-        let objects = FrameObjects::new(frame.session.clone());
+        let objects = ObjectGroup::new(&frame.session);
         let resolved = match frame
             .session
             .send::<_, Value>(
@@ -283,7 +284,7 @@ impl Page {
                 &json!({
                     "nodeId": node_id,
                     "executionContextId": frame.context,
-                    "objectGroup": objects.group,
+                    "objectGroup": objects.name,
                 }),
             )
             .await
