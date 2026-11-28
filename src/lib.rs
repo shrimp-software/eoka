@@ -146,7 +146,9 @@ pub struct StealthConfig {
     /// environments (some containers/CI) fail without an unsandboxed retry;
     /// set this to false there explicitly.
     pub sandbox: bool,
-    /// Patch Chrome binary to bypass detection
+    /// Opt-in: rewrite ChromeDriver automation markers in a cached private
+    /// copy of Chrome. Defaults to false; stock Chrome has none, so it then
+    /// launches the original binary unchanged. See `stealth::patcher`.
     pub patch_binary: bool,
     /// Viewport width in CSS pixels.
     pub viewport_width: u32,
@@ -324,7 +326,7 @@ impl Default for StealthConfig {
             chrome_path: None,
             runtime_dir: None,
             sandbox: true,
-            patch_binary: true,
+            patch_binary: false,
             viewport_width: 1920,
             viewport_height: 1080,
             device_scale_factor: 1.0,
@@ -504,6 +506,13 @@ mod tests {
     #[test]
     fn default_config_is_headless() {
         assert!(StealthConfig::default().headless);
+    }
+
+    #[test]
+    fn binary_patching_is_opt_in() {
+        assert!(!StealthConfig::default().patch_binary);
+        assert!(!StealthConfig::visible().patch_binary);
+        assert!(!StealthConfig::debug().patch_binary);
     }
 
     #[test]

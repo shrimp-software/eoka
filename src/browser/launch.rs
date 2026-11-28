@@ -348,7 +348,7 @@ pub(super) fn prepare_browser_launch(
     // Patching a browser binary is not appropriate for a durable user-owned
     // profile. Let that profile provide continuity instead of fresh spoofing.
     let chrome_path = if config.patch_binary && profile.owned {
-        ChromePatcher::new_in_runtime(&chrome_path, runtime.path())?.get_patched_path()?
+        ChromePatcher::for_launch(&chrome_path, runtime.path())?.get_patched_path()?
     } else {
         chrome_path
     };
