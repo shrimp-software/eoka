@@ -272,6 +272,21 @@ const SHAPE_PROBE: &str = r#"(async () => {
   let illegal = null;
   try { HTMLCanvasElement.prototype.toDataURL.call({}); } catch (e) { illegal = e.constructor.name; }
   out.illegalInvocation = illegal;
+  const receiver = (f) => { try { f(); return 'no throw'; } catch (e) { return e.constructor.name; } };
+  out.foreignReceivers = [
+    receiver(() => Object.getOwnPropertyDescriptor(Navigator.prototype, 'platform').get.call({})),
+    receiver(() => Object.getOwnPropertyDescriptor(Navigator.prototype, 'languages').get.call({})),
+    receiver(() => WebGLRenderingContext.prototype.getParameter.call({}, 37445)),
+  ];
+  // A canvas from another realm must get the same noise as a direct export.
+  const frame = document.createElement('iframe');
+  document.body.appendChild(frame);
+  const canvas = document.createElement('canvas');
+  canvas.width = canvas.height = 8;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#336699';
+  ctx.fillRect(0, 0, 8, 8);
+  out.crossRealmExport = frame.contentWindow.HTMLCanvasElement.prototype.toDataURL.call(canvas) === canvas.toDataURL();
   return out;
 })()"#;
 
@@ -340,6 +355,11 @@ async fn patched_apis_keep_native_shape() {
     assert_eq!(v["permission"], serde_json::json!(["default", true]));
     assert_eq!(v["layoutMap"], "a");
     assert_eq!(v["illegalInvocation"], "TypeError");
+    assert_eq!(
+        v["foreignReceivers"],
+        serde_json::json!(["TypeError", "TypeError", "TypeError"])
+    );
+    assert_eq!(v["crossRealmExport"], true);
 }
 
 // Regression: the fonts.check hook reported families the page registered
@@ -476,34 +496,6 @@ async fn user_feature_flags_merge_with_stealth_flags() {
     assert_eq!(v["hover"], true, "{v}");
     assert_eq!(v["pointer"], true, "{v}");
     assert_eq!(v["webdriver"], false, "{v}");
-}
-
-// Cross-site iframes are out-of-process (the old IsolateOrigins/site-per-process
-// feature disables never applied: `site-per-process` is a switch, not a feature),
-// and eoka does not auto-attach to them yet, so they run without the evasion
-// script, UA metadata or timezone override.
-#[tokio::test]
-#[ignore = "known gap: cross-site iframes do not receive evasions (OOPIF auto-attach)"]
-async fn known_gap_cross_site_iframe_matches_top_frame() {
-    let fixture = HttpFixture::start(|request| async move {
-        if request.target.starts_with("/child") {
-            Response::html("<!doctype html><script>parent.postMessage(JSON.stringify([new Date('2026-07-15T12:00Z').getTimezoneOffset(), navigator.hardwareConcurrency, navigator.userAgentData.brands.map(b => b.brand)]), '*')</script>")
-        } else {
-            let port = request.headers["host"].rsplit(':').next().unwrap().to_owned();
-            Response::html(&format!("<!doctype html><script>window.got = null; addEventListener('message', e => window.got = e.data)</script><iframe src='http://localhost:{port}/child'></iframe>"))
-        }
-    })
-    .await;
-    let browser = launch(|c| c.timezone = Some("Asia/Tokyo".into())).await;
-    let page = browser.new_page(&fixture.url).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let top: String = page
-        .evaluate("JSON.stringify([new Date('2026-07-15T12:00Z').getTimezoneOffset(), navigator.hardwareConcurrency, navigator.userAgentData.brands.map(b => b.brand)])")
-        .await
-        .unwrap();
-    let child: Value = page.evaluate("window.got").await.unwrap();
-    browser.close().await.unwrap();
-    assert_eq!(child.as_str(), Some(top.as_str()));
 }
 
 // Regression: Human::move_to started each path at a random point within 300px

@@ -32,8 +32,7 @@ const _eoka_noiseCanvas = (canvas) => {
 
 for (const name of ['toDataURL', 'toBlob']) {
     _eoka_patchMethod(HTMLCanvasElement.prototype, name, (original) => function(...args) {
-        // Keep native receiver checks: a non-canvas `this` throws natively.
-        if (!(this instanceof HTMLCanvasElement)) return original.apply(this, args);
+        // A non-canvas receiver has no size, passes through and throws natively.
         return original.apply(_eoka_noiseCanvas(this), args);
     });
 }

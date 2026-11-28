@@ -42,8 +42,13 @@ const _eoka_patchMethod = (target, name, make) => {
 };
 const _eoka_patchGetter = (target, name, make) => {
     const desc = Object.getOwnPropertyDescriptor(target, name);
-    const impl = make(desc && desc.get);
-    const get = Object.getOwnPropertyDescriptor({ get [name]() { return impl.call(this); } }, name).get;
+    const original = desc && desc.get;
+    const impl = make(original);
+    // Run the native getter first so a foreign receiver still throws natively.
+    const get = Object.getOwnPropertyDescriptor({ get [name]() {
+        if (original) original.call(this);
+        return impl.call(this);
+    } }, name).get;
     _eoka_mark(get, 'get ' + name);
     Object.defineProperty(target, name, {
         get,
