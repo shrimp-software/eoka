@@ -545,7 +545,7 @@ fn test_persisted_identity_is_owner_only() {
     let leftovers: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
         .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+        .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
         .collect();
     assert!(leftovers.is_empty());
     std::fs::remove_dir_all(dir).unwrap();

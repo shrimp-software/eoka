@@ -337,12 +337,13 @@ fn header_safe(cookie: &SessionCookie) -> bool {
         && !cookie.value.bytes().any(unsafe_byte)
 }
 
-fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+/// Atomically writes `contents` to `path`, readable only by the owner.
+pub(crate) fn write_private(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
     let name = path
         .file_name()
-        .ok_or_else(|| std::io::Error::other("Session path has no file name"))?
+        .ok_or_else(|| std::io::Error::other("Path has no file name"))?
         .to_string_lossy();
     let temporary = path.with_file_name(format!(".{name}.{:016x}.tmp", fastrand::u64(..)));
     let mut options = std::fs::OpenOptions::new();

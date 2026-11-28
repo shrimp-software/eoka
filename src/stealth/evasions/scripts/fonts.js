@@ -14,7 +14,7 @@ if (typeof FontFaceSet !== 'undefined' && FontFaceSet.prototype.check) {
     _eoka_patchMethod(FontFaceSet.prototype, 'check', (original) => function(...args) {
         const font = args[0];
         if (typeof font !== 'string' || font === '') return original.apply(this, args);
-        const sizeMatch = font.match(/(?:\d+(?:\.\d+)?(?:px|pt|em|rem|ex|ch|vh|vw|%)|[xx]-?small|medium|[xx]-?large)\s*(.*)$/i);
+        const sizeMatch = font.match(/(?:\d+(?:\.\d+)?(?:px|pt|em|rem|ex|ch|vh|vw|%)|smaller|larger|(?:x{1,2}-)?small|medium|(?:x{1,2}-)?large)\s*(.*)$/i);
         const familyList = sizeMatch ? sizeMatch[1] : font;
         if (!familyList.trim()) return original.apply(this, args);
         const families = familyList.split(',').map(unquote);

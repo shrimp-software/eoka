@@ -347,31 +347,8 @@ impl Fingerprint {
     /// Atomically stores this identity beside the profile, readable only by
     /// the owner.
     fn persist(&self, profile_dir: &Path) -> io::Result<()> {
-        use std::io::Write;
-        let temporary = profile_dir.join(format!(
-            "{PERSISTED_FINGERPRINT_FILE}.tmp-{}-{:016x}",
-            std::process::id(),
-            fastrand::u64(..)
-        ));
         let encoded = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let written = options.open(&temporary).and_then(|mut out| {
-            out.write_all(&encoded)?;
-            out.sync_all()
-        });
-        if let Err(error) = written
-            .and_then(|()| fs::rename(&temporary, profile_dir.join(PERSISTED_FINGERPRINT_FILE)))
-        {
-            let _ = fs::remove_file(&temporary);
-            return Err(error);
-        }
-        Ok(())
+        crate::session::write_private(&profile_dir.join(PERSISTED_FINGERPRINT_FILE), &encoded)
     }
 
     /// Moves this identity to another Chrome full version, keeping the rest.
