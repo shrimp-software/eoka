@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use super::{FrameInfo, Page, ShadowClickReceipt};
+use super::{is_navigation_race, FrameInfo, Page, ShadowClickReceipt};
 use crate::cdp::{Frame, FrameTree, RuntimeEvaluateResult, Session, TargetGetTargets};
 use crate::error::{Error, Result};
 use crate::stealth::human::Human;
@@ -60,14 +60,11 @@ impl Drop for HeldInputGuard {
 /// retried until the shadow deadline; protocol errors such as an invalid
 /// selector propagate immediately.
 fn shadow_retryable(error: &Error) -> bool {
-    if frame_discovery_raced(error) {
+    if frame_discovery_raced(error) || is_navigation_race(error) {
         return true;
     }
     match error {
         Error::Cdp { message, .. } => [
-            "Cannot find context with specified id",
-            "Execution context was destroyed",
-            "Inspected target navigated or closed",
             "Node with given id does not belong to the document",
             "Frame point is outside a viewport in its ancestor chain",
             "Frame owner could not be resolved",

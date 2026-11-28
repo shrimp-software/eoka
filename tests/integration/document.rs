@@ -1,3 +1,4 @@
+use crate::support;
 use eoka::Browser;
 
 #[tokio::test]
@@ -239,6 +240,86 @@ async fn test_wait_for_element_timeout() {
     // Should timeout
     let result = page.wait_for("#never-exists", 500).await;
     assert!(result.is_err());
+
+    browser.close().await.expect("Failed to close browser");
+}
+
+/// Serves a page whose `go()` navigates it to `/dest` after a delay, so the
+/// navigation starts in the page rather than through Eoka.
+async fn self_navigating_fixture() -> support::HttpFixture {
+    support::HttpFixture::start(|request| async move {
+        if request.target == "/dest" {
+            support::Response::html("<a href='#'>Destination link</a><p>Destination text</p>")
+        } else {
+            support::Response::html(
+                "<p>Origin</p><script>window.go = () => setTimeout(() => location = '/dest', 300)</script>",
+            )
+        }
+    })
+    .await
+}
+
+/// Load the origin, cache its document node by finding text on it, then start
+/// the page's own navigation.
+async fn load_origin(page: &eoka::Page, fixture: &support::HttpFixture) {
+    page.goto(&fixture.url).await.expect("Failed to navigate");
+    page.find_by_text("Origin").await.expect("origin text");
+    page.execute("go()").await.expect("start navigation");
+}
+
+/// Wait until the page has navigated itself to the loaded destination, without
+/// touching the cached document node.
+async fn wait_for_destination(page: &eoka::Page) {
+    for _ in 0..100 {
+        let loaded = page
+            .evaluate::<bool>("location.pathname === '/dest' && document.readyState === 'complete'")
+            .await
+            .unwrap_or(false);
+        if loaded {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("page did not navigate itself to /dest");
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_text_lookup_after_page_initiated_navigation() {
+    let browser = support::browser().await;
+    let page = browser.new_page("about:blank").await.unwrap();
+    let fixture = self_navigating_fixture().await;
+
+    load_origin(&page, &fixture).await;
+    let link = page
+        .wait_for_text("Destination link", 5000)
+        .await
+        .expect("wait_for_text across a page-initiated navigation");
+    assert!(link
+        .outer_html()
+        .await
+        .unwrap()
+        .contains("Destination link"));
+
+    load_origin(&page, &fixture).await;
+    wait_for_destination(&page).await;
+    let link = page
+        .find_by_text("Destination link")
+        .await
+        .expect("find_by_text after a page-initiated navigation");
+    assert!(link
+        .outer_html()
+        .await
+        .unwrap()
+        .contains("Destination link"));
+
+    load_origin(&page, &fixture).await;
+    wait_for_destination(&page).await;
+    let matches = page
+        .find_all_by_text("Destination")
+        .await
+        .expect("find_all_by_text after a page-initiated navigation");
+    assert!(!matches.is_empty(), "find_all_by_text returned no elements");
 
     browser.close().await.expect("Failed to close browser");
 }
