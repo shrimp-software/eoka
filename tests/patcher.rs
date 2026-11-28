@@ -87,3 +87,61 @@ async fn opt_in_patching_launches_a_working_browser() {
     );
     browser.close().await.unwrap();
 }
+
+/// A build that does embed a ChromeDriver marker gets a patched copy from the
+/// cache, and that copy (with symlinked companions) runs. Built hermetically
+/// by planting `$cdc_` over a log string in a copy of real Chrome's .rodata.
+#[cfg(target_os = "linux")]
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn patched_copy_from_the_cache_launches() {
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
+    let chrome = std::fs::canonicalize(chrome()).unwrap();
+    let scratch = Directory::new();
+    let install = scratch.0.join("install");
+    std::fs::create_dir(&install).unwrap();
+    for entry in std::fs::read_dir(chrome.parent().unwrap()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.path() != chrome {
+            symlink(entry.path(), install.join(entry.file_name())).unwrap();
+        }
+    }
+    let mut bytes = std::fs::read(&chrome).unwrap();
+    let anchor = b"--enable-automation not set";
+    let at = bytes
+        .windows(anchor.len())
+        .position(|window| window == anchor)
+        .expect("log string present in this Chrome build");
+    bytes[at..at + 5].copy_from_slice(b"$cdc_");
+    let source = install.join("chrome");
+    std::fs::write(&source, &bytes).unwrap();
+    std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o755)).unwrap();
+    drop(bytes);
+
+    let cache = scratch.0.join("cache");
+    let patcher = ChromePatcher::with_cache_dir(&source, &cache).unwrap();
+    let patched = patcher.get_patched_path().unwrap();
+    assert_ne!(patched, source);
+    assert!(patched.starts_with(std::fs::canonicalize(&cache).unwrap()));
+    let copy = std::fs::read(&patched).unwrap();
+    assert!(!copy.windows(5).any(|window| window == b"$cdc_"));
+    drop(copy);
+    assert!(ChromePatcher::with_cache_dir(&source, &cache)
+        .unwrap()
+        .is_patched());
+
+    let config = eoka::StealthConfig {
+        chrome_path: Some(patched.to_string_lossy().into_owned()),
+        patch_binary: false,
+        ..Default::default()
+    };
+    let browser = eoka::Browser::launch_with_config(config).await.unwrap();
+    let page = browser.new_blank_page().await.unwrap();
+    let user_agent = page
+        .evaluate::<String>("navigator.userAgent")
+        .await
+        .unwrap();
+    assert!(user_agent.contains("Chrome/"), "{user_agent}");
+    browser.close().await.unwrap();
+}

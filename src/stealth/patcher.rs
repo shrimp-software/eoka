@@ -27,7 +27,9 @@ use aho_corasick::AhoCorasick;
 #[cfg(not(target_os = "macos"))]
 use memmap2::Mmap;
 use memmap2::MmapMut;
-use std::fs::{self, File, OpenOptions};
+#[cfg(any(test, not(target_os = "macos")))]
+use std::fs::File;
+use std::fs::{self, OpenOptions};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -352,6 +354,7 @@ fn fnv1a(state: u64, bytes: &[u8]) -> u64 {
     })
 }
 
+#[cfg(not(target_os = "macos"))]
 /// Fast, stable 64-bit content hash used to detect truncated or corrupted
 /// cache entries. Not a cryptographic digest: entries live in a private
 /// directory owned by the current user.
@@ -484,7 +487,7 @@ impl Manifest {
 
     fn read(path: &Path) -> Option<Self> {
         let metadata = fs::symlink_metadata(path).ok()?;
-        if !metadata.is_file() || metadata.len() > 4096 {
+        if !metadata.is_file() || metadata.len() > 64 * 1024 {
             return None;
         }
         Self::parse(&fs::read_to_string(path).ok()?)
@@ -845,8 +848,11 @@ impl ChromePatcher {
         validate_cache_root(&self.root)?;
         if count_patchable_in_file(&self.original_path)? == 0 {
             // Nothing to hide: launch the original and remember the result.
-            self.write_clean_marker()?;
-            self.prune_stale_entries();
+            // Failing to record that only costs a rescan next launch.
+            match self.write_clean_marker() {
+                Ok(()) => self.prune_stale_entries(),
+                Err(error) => tracing::warn!("Could not record clean Chrome scan: {}", error),
+            }
             tracing::info!("Chrome binary has no automation markers; using it unpatched");
             return Ok(self.original_path.clone());
         }
@@ -1594,6 +1600,7 @@ mod tests {
         assert!(apply_patches(&mut binary.clone()).is_err());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn manifest_round_trips_and_rejects_garbage() {
         let identity = SourceIdentity {
