@@ -36,12 +36,9 @@ impl Transport {
             .await
             {
                 futures_util::future::Either::Left((next, _)) => next,
+                // The writer recorded its reason; it replaces this after the loop.
                 futures_util::future::Either::Right(((), _)) => {
-                    exit_reason = reason
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .clone()
-                        .unwrap_or_else(|| "CDP writer stopped".to_string());
+                    exit_reason = "CDP writer stopped".to_string();
                     break;
                 }
             };
@@ -49,7 +46,7 @@ impl Transport {
                 Some(Ok(message @ (Message::Text(_) | Message::Binary(_)))) => message,
                 Some(Ok(Message::Ping(payload))) => {
                     // Split streams don't auto-pong; the writer sends it first.
-                    if queue_automatic(&replies, Message::Pong(payload)).is_err() {
+                    if !queue_automatic(&replies, Message::Pong(payload)) {
                         exit_reason = "CDP writer stopped before a pong".to_string();
                         break;
                     }
@@ -118,7 +115,6 @@ impl Transport {
                     tracing::trace!("Response for unknown id: {}", id);
                     continue;
                 };
-                let sender = request.sender;
                 let result = if let Some(error) = msg.get("error") {
                     // CDP replies omit the method; `CommandResponse::wait` adds it.
                     Err(Error::Cdp {
@@ -133,7 +129,7 @@ impl Transport {
                         .unwrap_or_else(|| json!({})))
                 };
 
-                drop(sender.send(result));
+                drop(request.sender.send(result));
             } else if let Some(Value::String(method)) = msg.get_mut("method").map(Value::take) {
                 let mut params = msg
                     .get_mut("params")
@@ -170,7 +166,7 @@ impl Transport {
                             session_id: session_id.as_deref(),
                         })
                         .expect("CDP automatic reply contains only serializable JSON values");
-                        if queue_automatic(&replies, Message::Text(response.into())).is_err() {
+                        if !queue_automatic(&replies, Message::Text(response.into())) {
                             exit_reason = format!("CDP writer stopped before automatic {method}");
                             break;
                         }
@@ -213,16 +209,16 @@ impl Transport {
     }
 }
 
-/// Queue an automatic reply on the writer's priority lane without waiting.
-/// The writer's deadline detects a stalled socket; the reader keeps reading.
-fn queue_automatic(replies: &WriteQueue, message: Message) -> std::result::Result<(), ()> {
+/// Queue an automatic reply on the writer's priority lane without waiting;
+/// false once the writer has stopped.
+fn queue_automatic(replies: &WriteQueue, message: Message) -> bool {
     replies
         .send(WriteItem {
             message,
             claim: None,
             ack: None,
         })
-        .map_err(|_| ())
+        .is_ok()
 }
 
 /// CDP error text, keeping the optional `data` detail Chrome attaches.

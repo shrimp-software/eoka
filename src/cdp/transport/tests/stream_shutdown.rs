@@ -53,7 +53,7 @@ async fn shuts_down_streams(shutdown: Shutdown) {
         Shutdown::ExplicitClose => transport.close().await.unwrap(),
     }
     tokio::time::timeout(Duration::from_secs(1), async {
-        while !transport.reader_handle.as_ref().unwrap().is_finished() {
+        while !transport.reader_handle.is_finished() {
             tokio::task::yield_now().await;
         }
     })
@@ -134,7 +134,7 @@ async fn reader_abort_shuts_down_socket_before_first_poll_with_writer_retained()
     let transport = Transport::build(None, stream, None, 1, false, false).unwrap();
     // No await between build and abort: this current-thread runtime cannot poll
     // the spawned reader before its abort request. Keep both socket owners.
-    transport.reader_handle.as_ref().unwrap().abort();
+    transport.reader_handle.abort();
     let _writer = transport.writer.lock().await;
     assert_peer_terminated(&mut peer).await;
     assert!(transport.is_closed());

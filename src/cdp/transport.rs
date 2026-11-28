@@ -335,9 +335,7 @@ fn fail_session_pending(pending: &PendingMap, session: &str) -> usize {
 /// cannot skip an oversized message, so exceeding this closes the connection.
 const MAX_CDP_MESSAGE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Broadcast capacity for CDP events. Events are shared as `Arc`s, so a slot
-/// costs one pointer per subscriber; a subscriber that falls this far behind
-/// observes `RecvError::Lagged`.
+/// Broadcast capacity for CDP events; see [`Transport::subscribe`] for lag.
 pub const EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 /// Check if a command should be blocked (highly detectable by anti-bot)
@@ -381,7 +379,7 @@ pub struct Transport {
     writer: SharedSink,
     /// Normal-priority lane to the writer task (automatic replies use their own).
     commands: WriteQueue,
-    writer_handle: Option<tokio::task::JoinHandle<()>>,
+    writer_handle: tokio::task::JoinHandle<()>,
     lifecycle: LifecycleSink,
     /// Duplicated socket for lock-independent shutdown, even under backpressure.
     shutdown_socket: Arc<std::net::TcpStream>,
@@ -400,7 +398,7 @@ pub struct Transport {
     /// Timeout for CDP commands
     cmd_timeout: std::time::Duration,
     /// Reader task handle — checked for exit before sending commands.
-    reader_handle: Option<tokio::task::JoinHandle<()>>,
+    reader_handle: tokio::task::JoinHandle<()>,
     /// When true, refuse "detectable" commands (`Runtime.enable`, etc.) with an
     /// error instead of sending them. Defaults to true. Disable when you own the
     /// browser session and need full DevTools-equivalent control.
@@ -453,14 +451,8 @@ impl Transport {
     /// Whether the WebSocket reader or writer has exited.
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
-            || self
-                .reader_handle
-                .as_ref()
-                .is_none_or(|reader| reader.is_finished())
-            || self
-                .writer_handle
-                .as_ref()
-                .is_none_or(|writer| writer.is_finished())
+            || self.reader_handle.is_finished()
+            || self.writer_handle.is_finished()
     }
 
     /// Attach to a target with a flattened session and return the session id.
@@ -596,7 +588,7 @@ impl Transport {
             closed,
             writer,
             commands,
-            writer_handle: Some(writer_handle),
+            writer_handle,
             lifecycle,
             shutdown_socket,
             next_id: AtomicU64::new(COMMAND_ID_MIN),
@@ -609,7 +601,7 @@ impl Transport {
             request_base_auth,
             request_base_strip: strip_x_client_data,
             cmd_timeout,
-            reader_handle: Some(reader_handle),
+            reader_handle,
             filter_cdp,
         })
     }
@@ -710,8 +702,7 @@ impl Transport {
         Ok(transport)
     }
 
-    /// Refuse commands the stealth filter blocks. Callers see an error instead
-    /// of a fabricated empty result that would hide the missing domain.
+    /// Refuse commands the stealth filter blocks with an error, not an empty result.
     fn check_filter(&self, method: &str) -> Result<()> {
         if self.filter_cdp && is_blocked(method) {
             tracing::debug!("Blocked CDP command: {}", method);
@@ -756,7 +747,7 @@ impl Transport {
         })
         .await
         .map_err(|_| {
-            // Transport, as before: callers treat a dead command as a
+            // Transport, not Timeout: callers treat a dead command as a
             // connection-level failure, not as an action or wait timeout.
             Error::transport(format!(
                 "CDP command {method} (id={id}) exceeded its {:?} deadline",
@@ -827,6 +818,7 @@ impl Transport {
         Ok((data, response))
     }
 
+    /// `next_id` starts at `COMMAND_ID_MIN` and only ever holds in-range ids.
     fn next_command_id(&self) -> u64 {
         let mut current = self.next_id.load(Ordering::Relaxed);
         loop {
@@ -837,9 +829,7 @@ impl Transport {
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             ) {
-                // Normalize a stored value outside the range (never expected).
-                Ok(_) if (COMMAND_ID_MIN..=COMMAND_ID_MAX).contains(&current) => return current,
-                Ok(_) => current = next,
+                Ok(_) => return current,
                 Err(actual) => current = actual,
             }
         }
@@ -879,12 +869,11 @@ impl Transport {
         let id = response.registration.id;
         let written = tokio::time::timeout(self.cmd_timeout, self.write_command(data, claim))
             .await
-            .map_err(|_| {
-                Error::Timeout(format!(
+            .unwrap_or_else(|_| {
+                Err(Error::Timeout(format!(
                     "CDP command {method} (id={id}) write exceeded its deadline"
-                ))
-            })
-            .and_then(|result| result);
+                )))
+            });
         // Withdraw before deciding, so the writer cannot send it afterwards.
         drop(withdraw);
         match written {
@@ -953,7 +942,7 @@ impl Transport {
 
     /// Subscribe to CDP events. Each subscriber gets its own receiver; events
     /// published after subscribing are delivered to all live receivers as
-    /// shared `Arc`s, so subscribers do not copy payloads.
+    /// shared `Arc`s.
     ///
     /// A subscriber more than [`EVENT_CHANNEL_CAPACITY`] events behind receives
     /// `RecvError::Lagged(n)` once, then resumes with the oldest retained event.
@@ -1093,17 +1082,15 @@ impl Transport {
             }
         }
         drop(shutdown);
-
-        if let Some(handle) = &self.reader_handle {
-            handle.abort();
-        }
-        if let Some(handle) = &self.writer_handle {
-            handle.abort();
-        }
-        network_idle::disconnect(&self.idle_routes);
-        fail_pending(&self.pending, "CDP transport closed");
-
+        self.stop_tasks("CDP transport closed");
         self.cleanup_owned_blocking().await
+    }
+
+    fn stop_tasks(&self, context: &str) {
+        self.reader_handle.abort();
+        self.writer_handle.abort();
+        network_idle::disconnect(&self.idle_routes);
+        fail_pending(&self.pending, context);
     }
 
     /// Move owned cleanup off the async runtime; leftovers are restored on failure
@@ -1174,14 +1161,7 @@ impl Drop for Transport {
         self.closed.store(true, Ordering::Release);
         interception::close_routes(&self.request_routes, &self.response_routes);
         let _ = self.shutdown_socket.shutdown(std::net::Shutdown::Both);
-        if let Some(handle) = self.reader_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.writer_handle.take() {
-            handle.abort();
-        }
-        network_idle::disconnect(&self.idle_routes);
-        fail_pending(&self.pending, "CDP transport dropped");
+        self.stop_tasks("CDP transport dropped");
 
         if let Err(error) = self.cleanup_owned() {
             tracing::warn!(

@@ -1,6 +1,5 @@
 //! Dom domain protocol types.
 
-use super::runtime::RemoteObject;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -53,13 +52,6 @@ pub struct DOMQuerySelectorAllResult {
     pub node_ids: Vec<i32>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DOMGetBoxModel {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<i32>,
-}
-
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct DOMGetBoxModelResult {
     #[serde(default)]
@@ -92,20 +84,6 @@ impl BoxModel {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DOMGetOuterHTML {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<i32>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DOMGetOuterHTMLResult {
-    #[serde(rename = "outerHTML")]
-    pub outer_html: String,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DOMRequestNode {
@@ -117,20 +95,4 @@ pub struct DOMRequestNode {
 pub struct DOMRequestNodeResult {
     #[serde(default)]
     pub node_id: i32,
-}
-
-#[derive(Debug, Clone, Default, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DOMResolveNode {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub node_id: Option<i32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub object_group: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DOMResolveNodeResult {
-    #[serde(default)]
-    pub object: RemoteObject,
 }
