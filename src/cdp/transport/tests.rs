@@ -10,6 +10,16 @@ async fn pending_test_peer() -> (Transport, WebSocketStream<TcpStream>) {
 }
 
 async fn test_peer_with_proxy_credentials() -> (Transport, WebSocketStream<TcpStream>) {
+    let credentials = ("fixture-user".into(), "fixture-password".into());
+    test_peer(Some(credentials), 2, false, false).await
+}
+
+async fn test_peer(
+    proxy_auth: Option<(String, String)>,
+    timeout_secs: u64,
+    filter_cdp: bool,
+    strip: bool,
+) -> (Transport, WebSocketStream<TcpStream>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("ws://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
@@ -19,16 +29,19 @@ async fn test_peer_with_proxy_credentials() -> (Transport, WebSocketStream<TcpSt
     let stream = Transport::ws_connect(&url, Duration::from_secs(30))
         .await
         .unwrap();
-    let transport = Transport::build(
-        None,
-        stream,
-        Some(("fixture-user".into(), "fixture-password".into())),
-        2,
-        false,
-        false,
-    )
-    .unwrap();
+    let transport =
+        Transport::build(None, stream, proxy_auth, timeout_secs, filter_cdp, strip).unwrap();
     (transport, server.await.unwrap())
+}
+
+/// The next frame the transport sent, parsed as a CDP command.
+async fn next_command(peer: &mut WebSocketStream<TcpStream>) -> Value {
+    let message = tokio::time::timeout(Duration::from_secs(2), peer.next())
+        .await
+        .expect("command must reach the peer")
+        .unwrap()
+        .unwrap();
+    serde_json::from_str(message.to_text().unwrap()).unwrap()
 }
 
 #[tokio::test]
@@ -92,19 +105,7 @@ async fn auth_without_proxy_credentials_is_left_to_the_caller() {
 }
 
 async fn test_peer_with_header_policy(strip: bool) -> (Transport, WebSocketStream<TcpStream>) {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("ws://{}", listener.local_addr().unwrap());
-    let server = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.unwrap();
-        tokio_tungstenite::accept_async(socket).await.unwrap()
-    });
-    let stream = Transport::ws_connect(&url, Duration::from_secs(30))
-        .await
-        .unwrap();
-    (
-        Transport::build(None, stream, None, 30, false, strip).unwrap(),
-        server.await.unwrap(),
-    )
+    test_peer(None, 30, false, strip).await
 }
 
 async fn assert_peer_terminated(peer: &mut WebSocketStream<TcpStream>) {
@@ -233,15 +234,6 @@ mod unicode_post_data {
         .unwrap();
     }
 
-    async fn command(peer: &mut WebSocketStream<TcpStream>) -> Value {
-        let message = tokio::time::timeout(Duration::from_secs(2), peer.next())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        serde_json::from_str(message.to_text().unwrap()).unwrap()
-    }
-
     #[tokio::test]
     async fn repaired_unowned_pauses_preserve_session_and_header_policy() {
         for strip in [false, true] {
@@ -249,7 +241,7 @@ mod unicode_post_data {
             for (index, (raw, _)) in CASES.iter().enumerate() {
                 let id = format!("binary-{index}-\"quoted\"");
                 pause(&mut peer, "unowned-binary", &id, raw, false).await;
-                let reply = command(&mut peer).await;
+                let reply = next_command(&mut peer).await;
                 assert_eq!(reply["method"], "Fetch.continueRequest");
                 assert_eq!(reply["sessionId"], "unowned-binary");
                 let mut expected = json!({"requestId":id});
@@ -288,7 +280,7 @@ mod unicode_post_data {
                 .await
                 .is_err());
             let reply = async {
-                let continuation = command(&mut peer).await;
+                let continuation = next_command(&mut peer).await;
                 assert_eq!(continuation["method"], "Fetch.continueRequest");
                 assert_eq!(continuation["sessionId"], "owned-binary");
                 assert_eq!(
@@ -351,7 +343,7 @@ mod unicode_post_data {
             true,
         )
         .await;
-        let continuation = command(&mut peer).await;
+        let continuation = next_command(&mut peer).await;
         assert_eq!(continuation["method"], "Fetch.continueRequest");
         assert_eq!(continuation["sessionId"], "response-binary");
         assert_eq!(
@@ -378,15 +370,6 @@ mod repaired_adjacent_messages {
         }
     }
 
-    async fn command(peer: &mut WebSocketStream<TcpStream>) -> Value {
-        let message = tokio::time::timeout(Duration::from_secs(2), peer.next())
-            .await
-            .expect("transport must promptly answer repaired messages")
-            .unwrap()
-            .unwrap();
-        serde_json::from_str(message.to_text().unwrap()).unwrap()
-    }
-
     #[tokio::test]
     async fn repaired_success_and_error_replies_complete_text_and_binary_commands() {
         let (transport, mut peer) = pending_test_peer().await;
@@ -394,7 +377,7 @@ mod repaired_adjacent_messages {
             for surrogate in [r"\uD800", r"\uDC00"] {
                 for error in [false, true] {
                     let reply = async {
-                        let sent = command(&mut peer).await;
+                        let sent = next_command(&mut peer).await;
                         assert_eq!(sent["method"], "Fixture.repaired");
                         assert_eq!(sent["sessionId"], "reply-session");
                         let id = &sent["id"];
@@ -469,7 +452,7 @@ mod repaired_adjacent_messages {
                     json!(request)
                 );
                 peer.send(frame(binary, text)).await.unwrap();
-                let reply = command(&mut peer).await;
+                let reply = next_command(&mut peer).await;
                 assert_eq!(reply["method"], "Fetch.continueWithAuth");
                 assert_eq!(reply["sessionId"], session);
                 let expected = if source == Some("Proxy") {
@@ -520,7 +503,7 @@ async fn pending_registration_cleans_cancelled_writer_and_reply_waits() {
         assert_eq!(lock_pending(&transport.pending).len(), 1);
         assert!(peer.next().await.unwrap().is_ok());
     }
-    assert!(!transport.reader_handle.as_ref().unwrap().is_finished());
+    assert!(!transport.reader_handle.is_finished());
     let reply = async {
         let message = peer.next().await.unwrap().unwrap();
         let command: Value = serde_json::from_str(message.to_text().unwrap()).unwrap();

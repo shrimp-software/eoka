@@ -51,6 +51,21 @@ fn state_for_target(
     state
 }
 
+async fn attach_session(
+    transport: &Arc<Transport>,
+    targets: &TargetRegistry,
+    target_id: &str,
+) -> Result<Session> {
+    let session_id = transport.attach_to_target(target_id).await?;
+    Ok(Session {
+        transport: Arc::clone(transport),
+        session_id,
+        target_id: target_id.to_string(),
+        target: state_for_target(targets, target_id, transport),
+        targets: Arc::clone(targets),
+    })
+}
+
 /// Release retained state for a target that no longer exists.
 async fn remove_target_state(registry: &TargetRegistry, target_id: &str) {
     let state = registry
@@ -67,8 +82,7 @@ async fn remove_target_state(registry: &TargetRegistry, target_id: &str) {
 /// Upper bound for the existence probe after a session detaches.
 const TARGET_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Remove per-target state when Chrome destroys a target, including tabs the
-/// site closes, crashed-and-closed tabs and removed out-of-process frames.
+/// Remove per-target state when Chrome destroys a target, whoever closed it.
 /// A detached session alone does not prove the target is gone (eoka detaches
 /// its own helper sessions), so detachment of a known target is confirmed with
 /// `Target.getTargetInfo`. Holds only weak references.
@@ -171,14 +185,7 @@ impl Connection {
 
     /// Attach to a target and get a session
     pub(crate) async fn attach_to_target(&self, target_id: &str) -> Result<Session> {
-        let session_id = self.transport.attach_to_target(target_id).await?;
-        Ok(Session {
-            transport: Arc::clone(&self.transport),
-            session_id,
-            target_id: target_id.to_string(),
-            target: state_for_target(&self.targets, target_id, &self.transport),
-            targets: Arc::clone(&self.targets),
-        })
+        attach_session(&self.transport, &self.targets, target_id).await
     }
 
     /// Close a target
@@ -202,7 +209,7 @@ impl Connection {
         match result {
             Ok(result) => {
                 if result.success {
-                    self.remove_target(target_id).await;
+                    remove_target_state(&self.targets, target_id).await;
                 }
                 cleanup?;
                 Ok(result.success)
@@ -223,10 +230,6 @@ impl Connection {
             .send("Target.getTargets", &TargetGetTargets {})
             .await?;
         Ok(result.target_infos)
-    }
-
-    async fn remove_target(&self, target_id: &str) {
-        remove_target_state(&self.targets, target_id).await;
     }
 
     /// Activate (focus) a target
@@ -429,14 +432,7 @@ impl Session {
     }
 
     pub(crate) async fn attach_frame_target(&self, target_id: &str) -> Result<Session> {
-        let session_id = self.transport.attach_to_target(target_id).await?;
-        Ok(Session {
-            transport: Arc::clone(&self.transport),
-            session_id,
-            target_id: target_id.to_string(),
-            target: state_for_target(&self.targets, target_id, &self.transport),
-            targets: Arc::clone(&self.targets),
-        })
+        attach_session(&self.transport, &self.targets, target_id).await
     }
 
     pub(crate) async fn detach(&self) -> Result<()> {
