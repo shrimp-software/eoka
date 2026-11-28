@@ -83,8 +83,9 @@ impl Browser {
     /// Only supported for owned processes. The directory must already exist.
     pub async fn watch_downloads(&self, directory: &Path) -> Result<crate::DownloadWatch> {
         if !self.owns_process() {
-            return Err(Error::cdp_msg(
-                "download_unsupported: attached browsers are not supported",
+            return Err(Error::coded(
+                crate::ErrorCode::DownloadUnsupported,
+                "attached browsers are not supported",
             ));
         }
         crate::DownloadWatch::begin(

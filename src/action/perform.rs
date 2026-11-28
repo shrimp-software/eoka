@@ -14,6 +14,11 @@ pub(super) enum Verification {
     Navigation {
         loader: Option<String>,
     },
+    /// Chrome answered `net::ERR_ABORTED`: the navigation became a download
+    /// or another navigation replaced it, so no commit will follow.
+    NavigationAborted {
+        download: bool,
+    },
     Explicit,
     Noop,
 }
@@ -58,8 +63,9 @@ pub(super) async fn prepare(
             && (props["fillMode"].is_null()
                 || (matches!(action, Action::Type { .. }) && props["fillMode"] != "text"))
         {
-            return Err(Error::cdp_msg(
-                "unsupported_input: target does not support this input action; use fill for native date/time controls",
+            return Err(Error::coded(
+                crate::ErrorCode::UnsupportedInput,
+                "target does not support this input action; use fill for native date/time controls",
             ));
         }
         let pointer = matches!(
@@ -118,8 +124,9 @@ pub(super) async fn prepare(
 pub(super) async fn point(page: &Page, node: &Node, require_enabled: bool) -> Result<(f64, f64)> {
     let props = node.properties().await?;
     if props["receives"] != true || (require_enabled && props["disabled"] == true) {
-        return Err(Error::cdp_msg(
-            "actionability_changed: target no longer receives input",
+        return Err(Error::coded(
+            crate::ErrorCode::ActionabilityChanged,
+            "target no longer receives input",
         ));
     }
     let x = props["x"]
@@ -135,7 +142,10 @@ pub(super) async fn point(page: &Page, node: &Node, require_enabled: bool) -> Re
                 Error::Cdp { ref message, .. }
                     if message == "Frame input point is covered by another element" =>
                 {
-                    Error::cdp_msg("actionability_changed: an iframe owner is covered")
+                    Error::coded(
+                        crate::ErrorCode::ActionabilityChanged,
+                        "an iframe owner is covered",
+                    )
                 }
                 other => other,
             })
@@ -155,7 +165,10 @@ pub(super) fn retryable_preparation(action: &Action, error: &Error) -> bool {
         return false;
     }
     match error {
-        Error::Cdp { message, .. } if message.starts_with("actionability_changed:") => true,
+        Error::Coded {
+            code: crate::ErrorCode::ActionabilityChanged,
+            ..
+        } => true,
         Error::Cdp {
             method: Some(method),
             code: Some(-32000),
@@ -203,8 +216,9 @@ async fn require_focused_editable(node: &Node) -> Result<()> {
         || properties["focused"] != true
         || properties["editable"] != true
     {
-        return Err(Error::cdp_msg(
-            "actionability_changed: input target detached, lost focus or became readonly",
+        return Err(Error::coded(
+            crate::ErrorCode::ActionabilityChanged,
+            "input target detached, lost focus or became readonly",
         ));
     }
     Ok(())
@@ -287,8 +301,9 @@ pub(super) async fn perform(
             }
             let (checked_x, checked_y) = point(page, node, true).await?;
             if (x - checked_x).abs() > 0.5 || (y - checked_y).abs() > 0.5 {
-                return Err(Error::cdp_msg(
-                    "actionability_changed: target moved before input",
+                return Err(Error::coded(
+                    crate::ErrorCode::ActionabilityChanged,
+                    "target moved before input",
                 ));
             }
             input.click(dispatch, x, y, 1, *human).await?;
@@ -307,8 +322,9 @@ pub(super) async fn perform(
                     .call(include_str!("normalize_fill.js"), vec![json!(value)])
                     .await?;
                 if normalized.is_null() {
-                    return Err(Error::cdp_msg(
-                        "invalid_input_value: value cannot be represented by this native input",
+                    return Err(Error::coded(
+                        crate::ErrorCode::InvalidInputValue,
+                        "value cannot be represented by this native input",
                     ));
                 }
                 normalized
@@ -423,8 +439,9 @@ pub(super) async fn perform(
                 || properties["focused"] != true
                 || properties["disabled"] == true
             {
-                return Err(Error::cdp_msg(
-                    "actionability_changed: submit target did not retain focus",
+                return Err(Error::coded(
+                    crate::ErrorCode::ActionabilityChanged,
+                    "submit target did not retain focus",
                 ));
             }
             input.key(dispatch, "Enter").await?;
@@ -515,9 +532,13 @@ async fn navigate(page: &Page, dispatch: &Dispatch, params: Value) -> Result<Ver
     let result = dispatch
         .send(page.session(), "Page.navigate", params, false)
         .await?;
+    let download = result["isDownload"] == true;
+    if download || result["errorText"] == "net::ERR_ABORTED" {
+        return Ok(Verification::NavigationAborted { download });
+    }
     if result["errorText"]
         .as_str()
-        .is_some_and(|e| e != "net::ERR_HTTP_RESPONSE_CODE_FAILURE" && e != "net::ERR_ABORTED")
+        .is_some_and(|e| e != "net::ERR_HTTP_RESPONSE_CODE_FAILURE")
     {
         return Err(Error::Navigation(
             result["errorText"]
@@ -546,9 +567,10 @@ async fn navigate_history(page: &Page, dispatch: &Dispatch, offset: i64) -> Resu
         .and_then(|i| history["entries"].get(i));
     // Nothing to navigate to: fail before dispatch rather than claim success.
     let Some(entry) = entry else {
-        return Err(Error::cdp_msg(format!(
-            "history_unavailable: no history entry at offset {offset}"
-        )));
+        return Err(Error::coded(
+            crate::ErrorCode::HistoryUnavailable,
+            format!("no history entry at offset {offset}"),
+        ));
     };
     dispatch
         .send(

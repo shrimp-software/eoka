@@ -74,9 +74,12 @@ impl DownloadWatch {
         slot: Arc<Semaphore>,
         directory: &Path,
     ) -> Result<Self> {
-        let permit = slot
-            .try_acquire_owned()
-            .map_err(|_| Error::cdp_msg("download_busy: download configuration unavailable"))?;
+        let permit = slot.try_acquire_owned().map_err(|_| {
+            Error::coded(
+                crate::ErrorCode::DownloadBusy,
+                "download configuration unavailable",
+            )
+        })?;
         let directory = std::fs::canonicalize(directory)?;
         if !directory.is_dir() {
             return Err(Error::cdp_msg("Download directory is not a directory"));

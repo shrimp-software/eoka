@@ -1,7 +1,24 @@
-use super::{escape_js_string, Element, Page, TextMatch};
+use super::{Element, Page, TextMatch};
 use crate::action::{ActionCall, TryActionCall};
 use crate::error::{Error, Result};
 use crate::{Action, LocatorSpec};
+
+/// A JavaScript expression evaluating to the elements `text` matches, in
+/// priority order. Arguments are JSON literals, never spliced as source.
+fn text_candidates_expression(text: &str, match_type: TextMatch, all: bool) -> Result<String> {
+    let mode = match match_type {
+        TextMatch::Exact => "exact",
+        TextMatch::Contains => "contains",
+        TextMatch::StartsWith => "starts_with",
+        TextMatch::EndsWith => "ends_with",
+    };
+    Ok(format!(
+        "({})({}, {}, {all})",
+        include_str!("text_candidates.js"),
+        serde_json::to_string(text)?,
+        serde_json::to_string(mode)?
+    ))
+}
 
 impl Page {
     /// Drag horizontally from the selected element's center.
@@ -62,44 +79,15 @@ impl Page {
 
     /// Find an element by text with specific matching strategy
     ///
-    /// Prioritizes interactive elements (a, button, input) over static elements.
-    /// Uses Runtime.callFunctionOn to avoid mutating the DOM (no marker attributes).
+    /// Interactive elements (a, button, input) win over static ones; among
+    /// static elements the innermost match is returned, never a container
+    /// that merely includes the text. Matching is the same as
+    /// [`Page::locator_text`]. The DOM is not mutated.
     pub async fn find_by_text_match(&self, text: &str, match_type: TextMatch) -> Result<Element> {
-        let escaped_text = escape_js_string(text);
-        let match_js = match match_type {
-            TextMatch::Exact => format!("t.trim() === '{}'", escaped_text),
-            TextMatch::Contains => format!(
-                "t.toLowerCase().includes('{}')",
-                escaped_text.to_lowercase()
-            ),
-            TextMatch::StartsWith => format!(
-                "t.toLowerCase().startsWith('{}')",
-                escaped_text.to_lowercase()
-            ),
-            TextMatch::EndsWith => format!(
-                "t.toLowerCase().endsWith('{}')",
-                escaped_text.to_lowercase()
-            ),
-        };
-
         let js = format!(
-            r#"
-            (() => {{
-                const interactive = 'a, button, input[type="submit"], input[type="button"], [role="button"], [onclick]';
-                for (const el of document.querySelectorAll(interactive)) {{
-                    const t = el.innerText || el.textContent || el.value || '';
-                    if ({match_js}) return el;
-                }}
-                const secondary = 'label, span, div, p, h1, h2, h3, h4, h5, h6, li, td, th';
-                for (const el of document.querySelectorAll(secondary)) {{
-                    const t = el.innerText || el.textContent || el.value || '';
-                    if ({match_js}) return el;
-                }}
-                return null;
-            }})()
-            "#,
+            "({})[0] ?? null",
+            text_candidates_expression(text, match_type, false)?
         );
-
         let result = self.session.evaluate_for_remote_object(&js).await?;
         let remote = self.check_js_result(result)?;
 
@@ -130,24 +118,7 @@ impl Page {
 
     /// Find all elements matching the given text
     pub async fn find_all_by_text(&self, text: &str) -> Result<Vec<Element>> {
-        let escaped_text = escape_js_string(text).to_lowercase();
-
-        let js = format!(
-            r#"
-            (() => {{
-                const selectors = 'a, button, input, label, span, div, p, h1, h2, h3, h4, h5, h6, li, td, th';
-                const elements = document.querySelectorAll(selectors);
-                const matches = [];
-                for (const el of elements) {{
-                    const t = (el.innerText || el.textContent || el.value || '').toLowerCase();
-                    if (t.includes('{escaped_text}')) {{
-                        matches.push(el);
-                    }}
-                }}
-                return matches;
-            }})()
-            "#,
-        );
+        let js = text_candidates_expression(text, TextMatch::Contains, true)?;
 
         // Evaluate without returnByValue to get remote object references
         let result = self.session.evaluate_for_remote_object(&js).await?;

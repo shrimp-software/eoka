@@ -281,7 +281,12 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
         let result: Value = node.session.send("DOM.resolveNode", &params).await?;
         node.object = result["object"]["objectId"]
             .as_str()
-            .ok_or_else(|| Error::cdp_msg("Pinned node is stale"))?
+            .ok_or_else(|| {
+                Error::coded(
+                    crate::ErrorCode::TargetStale,
+                    "pinned element no longer refers to a live node",
+                )
+            })?
             .into();
         if !node
             .call("function(){return this.isConnected === true}", vec![])
@@ -289,12 +294,21 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
             .as_bool()
             .unwrap_or(false)
         {
-            return Err(Error::cdp_msg("Pinned node is stale"));
+            return Err(Error::coded(
+                crate::ErrorCode::TargetStale,
+                "pinned element no longer refers to a live node",
+            ));
         }
         return Ok(Some(node));
     }
     let query = serde_json::to_string(&spec.query)?;
-    let expression = format!("({})({query})", include_str!("resolve.js"));
+    let expression = format!(
+        "({})({query})",
+        include_str!("resolve.js").replace(
+            "TEXT_CANDIDATES",
+            include_str!("../page/text_candidates.js")
+        )
+    );
     let mut params =
         json!({"expression":expression,"objectGroup":node.group,"returnByValue":false});
     if let Some(context) = context {
@@ -318,8 +332,9 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
         return Ok(None);
     }
     if count > 1 && spec.index.is_none() {
-        return Err(Error::cdp_msg(
-            "ambiguous_target: locator matched multiple elements; select first/nth explicitly",
+        return Err(Error::coded(
+            crate::ErrorCode::AmbiguousTarget,
+            "locator matched multiple elements; select first/nth explicitly",
         ));
     }
     let result: Value = node

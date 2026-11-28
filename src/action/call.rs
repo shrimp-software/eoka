@@ -114,7 +114,13 @@ impl IntoFuture for TryActionCall {
                 }) if receipt.dispatch == DispatchState::NotSent
                     && matches!(
                         *source,
-                        Error::ElementNotFound(_) | Error::ElementNotVisible { .. }
+                        Error::ElementNotFound(_)
+                            | Error::ElementNotVisible { .. }
+                            | Error::Coded {
+                                code: crate::ErrorCode::ActionabilityChanged
+                                    | crate::ErrorCode::TargetStale,
+                                ..
+                            }
                     ) =>
                 {
                     Ok(false)

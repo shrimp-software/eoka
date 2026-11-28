@@ -44,6 +44,44 @@ impl DestinationWatch {
         })
     }
 
+    /// Rebuilds candidates and the origin's liveness from `Target.getTargets`.
+    async fn rescan(&mut self) -> Result<()> {
+        let targets: Value = self
+            .origin
+            .session()
+            .transport()
+            .send("Target.getTargets", &json!({}))
+            .await?;
+        let infos = targets["targetInfos"]
+            .as_array()
+            .ok_or_else(|| Error::cdp_msg("Target list unavailable"))?;
+        let mut live = HashSet::new();
+        for info in infos {
+            let Some(id) = info["targetId"].as_str() else {
+                continue;
+            };
+            live.insert(id.to_owned());
+            if info["type"] == "page"
+                && info["openerId"] == self.origin.target_id()
+                && !self.existing.contains(id)
+                && !self.candidates.contains_key(id)
+            {
+                if self.candidates.len() >= 32 {
+                    return Err(Error::coded(
+                        crate::ErrorCode::AmbiguousDestination,
+                        "too many new child tabs",
+                    ));
+                }
+                self.candidates.insert(id.to_owned(), None);
+            }
+        }
+        self.candidates.retain(|id, _| live.contains(id));
+        if !live.contains(self.origin.target_id()) {
+            self.origin_closed = true;
+        }
+        Ok(())
+    }
+
     pub async fn check(&mut self, expect: &Expectation) -> Result<Option<String>> {
         loop {
             match self.events.try_recv() {
@@ -57,8 +95,9 @@ impl DestinationWatch {
                             .filter(|id| !self.existing.contains(*id))
                         {
                             if self.candidates.len() >= 32 && !self.candidates.contains_key(id) {
-                                return Err(Error::cdp_msg(
-                                    "ambiguous_destination: too many new child tabs",
+                                return Err(Error::coded(
+                                    crate::ErrorCode::AmbiguousDestination,
+                                    "too many new child tabs",
                                 ));
                             }
                             self.candidates.entry(id.into()).or_insert(None);
@@ -77,10 +116,18 @@ impl DestinationWatch {
                 }
                 Ok(_) => {}
                 Err(broadcast::error::TryRecvError::Empty) => break,
-                Err(error) => {
-                    return Err(Error::cdp_msg(format!(
-                        "Destination event stream lost: {error}"
-                    )))
+                // Busy browsers can outrun the shared event buffer. The
+                // dropped events may have announced a child tab, so rebuild
+                // the candidate set from Chrome's target list.
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    tracing::debug!(skipped, "destination events lagged; rescanning targets");
+                    self.rescan().await?;
+                }
+                Err(error @ broadcast::error::TryRecvError::Closed) => {
+                    return Err(Error::transport_io(
+                        "Destination event stream lost",
+                        std::io::Error::other(error),
+                    ))
                 }
             }
         }
@@ -117,8 +164,9 @@ impl DestinationWatch {
             self.candidates.remove(&id);
         }
         if matches.len() > 1 {
-            return Err(Error::cdp_msg(
-                "ambiguous_destination: multiple pages match; select a tab explicitly",
+            return Err(Error::coded(
+                crate::ErrorCode::AmbiguousDestination,
+                "multiple pages match; select a tab explicitly",
             ));
         }
         Ok(matches.pop())
@@ -142,11 +190,12 @@ async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
                 {
                     return Ok(Observation::Closed);
                 }
-                Ok(_) => {}
-                Err(error) => {
-                    return Err(Error::cdp_msg(format!(
-                        "Destination event stream lost: {error}"
-                    )))
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(error @ broadcast::error::RecvError::Closed) => {
+                    return Err(Error::transport_io(
+                        "Destination event stream lost",
+                        std::io::Error::other(error),
+                    ))
                 }
             }
         }
@@ -165,33 +214,12 @@ async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
 }
 
 fn lifecycle_error(error: &Error) -> Option<Observation> {
-    let Error::Cdp {
-        code: Some(code),
-        message,
-        ..
-    } = error
-    else {
-        return None;
-    };
-    if (*code == -32001 && message == "Session with given id not found.")
-        || (*code == -32602 && message == "No target with given id found")
-        || (*code == -32000 && message == "Not attached to an active page")
-    {
-        return Some(Observation::Closed);
+    use crate::error::classify::{cdp_failure, CdpFailure};
+    match cdp_failure(error)? {
+        CdpFailure::SessionGone => Some(Observation::Closed),
+        CdpFailure::ContextLost => Some(Observation::Pending),
+        CdpFailure::NodeGone | CdpFailure::NotRendered | CdpFailure::NotElement => None,
     }
-    if *code == -32000
-        && [
-            "Cannot find context",
-            "Execution context was destroyed",
-            "Could not find object",
-            "Cannot find object",
-        ]
-        .iter()
-        .any(|prefix| message.starts_with(prefix))
-    {
-        return Some(Observation::Pending);
-    }
-    None
 }
 
 impl Drop for DestinationWatch {

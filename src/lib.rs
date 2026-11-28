@@ -104,7 +104,7 @@ pub use download::{
     DownloadBeginning, DownloadEvent, DownloadProgress, DownloadWatch, NativeDownloadState,
 };
 pub use element::{BoundingBox, Element};
-pub use error::{Error, Result};
+pub use error::{Error, ErrorCode, Result};
 pub use fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
 pub use network::{NetworkEvent, NetworkWatcher};
 pub use page::{
