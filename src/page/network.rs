@@ -19,6 +19,24 @@ fn session_cookie(c: crate::cdp::types::Cookie) -> SessionCookie {
     }
 }
 
+/// Writes storage only when the page is on the saved URL's (non-opaque) origin.
+const RESTORE_STORAGE: &str = "(url, local, session, replace) => {
+    const saved = new URL(url, location.href).origin;
+    const actual = location.origin;
+    if (saved === 'null' || saved !== actual) return { written: false, saved, actual };
+    if (replace) { localStorage.clear(); sessionStorage.clear(); }
+    for (const [key, value] of Object.entries(local)) localStorage.setItem(key, value);
+    for (const [key, value] of Object.entries(session)) sessionStorage.setItem(key, value);
+    return { written: true, saved, actual };
+}";
+
+#[derive(serde::Deserialize)]
+struct StorageRestore {
+    written: bool,
+    saved: String,
+    actual: String,
+}
+
 impl Page {
     /// Resolve the current page URL for cookie operations.
     /// Returns None for about:blank (Chrome silently rejects cookies without a URL).
@@ -141,27 +159,69 @@ impl Page {
 
     /// Restore a captured browser state and reload its saved URL.
     ///
-    /// Replaces the browser context's whole cookie jar with the saved cookies, so
+    /// Cookies are restored first, so the first request to the saved URL already
+    /// carries them. This replaces the browser context's whole cookie jar, so
     /// cookies added after the capture are removed. A live session is never wiped,
-    /// because the browser isn't ours: saved cookies are added or overwritten, and
-    /// its other cookies stay.
+    /// because the browser isn't ours: saved cookies and storage entries are added
+    /// or overwritten, and its other cookies and storage entries stay.
+    ///
+    /// Storage is written only when the saved URL loads on its own origin. If it
+    /// redirects elsewhere (to a login page, say) and there is storage to restore,
+    /// this fails after restoring cookies and writes no storage.
+    ///
+    /// The user agent is left alone when it already matches. A different saved
+    /// user agent is applied together with client-hint metadata derived from it,
+    /// keeping this page's languages; script-visible values the stealth
+    /// evasions installed at launch, such as `navigator.platform`, still come
+    /// from the launch fingerprint, so restore into a browser launched with the
+    /// saved `user_agent` for a fully consistent identity.
     pub async fn restore_state(&self, state: &BrowserState) -> Result<()> {
-        self.set_user_agent(&state.user_agent).await?;
-        self.goto(&state.url).await?;
+        self.restore_user_agent(&state.user_agent).await?;
         if !self.config.live_session {
             self.clear_all_cookies().await?;
         }
         self.set_cookies_bulk(state.cookies.clone()).await?;
+        self.goto(&state.url).await?;
 
-        let storage = serde_json::to_string(&serde_json::json!({
-            "localStorage": state.local_storage,
-            "sessionStorage": state.session_storage,
-        }))?;
-        self.execute(&format!(
-            "(() => {{ const state = {storage}; localStorage.clear(); sessionStorage.clear(); for (const [key, value] of Object.entries(state.localStorage)) localStorage.setItem(key, value); for (const [key, value] of Object.entries(state.sessionStorage)) sessionStorage.setItem(key, value); }})()"
-        ))
-        .await?;
-        self.goto(&state.url).await
+        let has_storage = !state.local_storage.is_empty() || !state.session_storage.is_empty();
+        let replace = !self.config.live_session;
+        if !has_storage && !replace {
+            return Ok(());
+        }
+        let landed: StorageRestore = self
+            .evaluate_function(
+                RESTORE_STORAGE,
+                &[
+                    serde_json::Value::String(state.url.clone()),
+                    serde_json::json!(state.local_storage),
+                    serde_json::json!(state.session_storage),
+                    serde_json::Value::Bool(replace),
+                ],
+            )
+            .await?;
+        match landed {
+            StorageRestore { written: true, .. } => self.goto(&state.url).await,
+            StorageRestore { saved, actual, .. } if has_storage => Err(Error::Navigation(format!(
+                "restore_state restored cookies, but the saved URL (origin {saved}) loaded on origin {actual}; storage was not written"
+            ))),
+            _ => Ok(()),
+        }
+    }
+
+    /// Apply a saved user agent without discarding client-hint metadata.
+    async fn restore_user_agent(&self, user_agent: &str) -> Result<()> {
+        let current: String = self.evaluate("navigator.userAgent").await?;
+        if current == user_agent || user_agent.is_empty() {
+            return Ok(());
+        }
+        let languages: Vec<String> = self.evaluate("Array.from(navigator.languages)").await?;
+        let mut fingerprint = crate::stealth::Fingerprint::resolve(Some(user_agent), None);
+        if !languages.is_empty() {
+            fingerprint.languages = languages;
+        }
+        self.session
+            .set_user_agent_full(crate::browser::ua_override_for(&fingerprint))
+            .await
     }
 
     /// Set extra HTTP headers sent with every subsequent request from this page.

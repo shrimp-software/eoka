@@ -204,3 +204,208 @@ async fn restoring_into_a_live_session_deletes_nothing() {
     assert_eq!(jar(&page).await, ["app", "bank", "mail"]);
     browser.close().await.unwrap();
 }
+
+/// Requests seen by a fixture: path and Cookie header.
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
+
+async fn recording_fixture(seen: Seen) -> support::HttpFixture {
+    support::HttpFixture::start(move |request| {
+        let seen = seen.clone();
+        async move {
+            let cookie = request.headers.get("cookie").cloned().unwrap_or_default();
+            seen.lock().unwrap().push((request.target.clone(), cookie));
+            if request.target.starts_with("/redirect") {
+                let port = request.headers["host"]
+                    .rsplit(':')
+                    .next()
+                    .unwrap()
+                    .to_owned();
+                return support::Response {
+                    status: "302 Found",
+                    headers: vec![(
+                        "Location".into(),
+                        format!("http://localhost:{port}/landing"),
+                    )],
+                    body: Vec::new(),
+                    body_gate: None,
+                };
+            }
+            support::Response::html("<!doctype html><title>t</title>")
+        }
+    })
+    .await
+}
+
+fn state_for(url: &str, cookies: Vec<SessionCookie>) -> eoka::BrowserState {
+    eoka::BrowserState {
+        cookies,
+        local_storage: Default::default(),
+        session_storage: Default::default(),
+        user_agent: String::new(),
+        url: url.to_owned(),
+    }
+}
+
+const CLIENT_HINTS: &str = "(async () => { const d = await navigator.userAgentData.getHighEntropyValues(['platformVersion', 'architecture', 'fullVersionList']); return JSON.stringify([navigator.userAgent, navigator.userAgentData.platform, d.platformVersion, d.architecture, d.fullVersionList]); })()";
+
+/// Regression: restoring the same user agent sent a bare
+/// `Emulation.setUserAgentOverride`, which dropped the fingerprint's
+/// platform and client-hint metadata.
+#[tokio::test]
+#[ignore = "requires Chrome; local HTTP fixture"]
+async fn restore_keeps_the_fingerprints_client_hints() {
+    let server = support::HttpFixture::start(|_| async {
+        support::Response::html("<!doctype html><title>t</title>")
+    })
+    .await;
+    let browser = support::browser().await;
+    let page = browser.new_page(&server.url).await.unwrap();
+    let before: String = page.evaluate(CLIENT_HINTS).await.unwrap();
+    let state = page.capture_state().await.unwrap();
+    page.restore_state(&state).await.unwrap();
+    let after: String = page.evaluate(CLIENT_HINTS).await.unwrap();
+    assert_eq!(after, before);
+    browser.close().await.unwrap();
+}
+
+/// A different saved user agent gets a full override derived from it, so
+/// client hints agree with the restored user agent.
+#[tokio::test]
+#[ignore = "requires Chrome; local HTTP fixture"]
+async fn restore_of_another_user_agent_sets_matching_client_hints() {
+    let server = support::HttpFixture::start(|_| async {
+        support::Response::html("<!doctype html><title>t</title>")
+    })
+    .await;
+    let browser = support::browser().await;
+    let page = browser.new_page(&server.url).await.unwrap();
+    let mut state = page.capture_state().await.unwrap();
+    let original = state.user_agent.clone();
+    let version = original
+        .split("Chrome/")
+        .nth(1)
+        .unwrap()
+        .split(' ')
+        .next()
+        .unwrap();
+    let major = version.split('.').next().unwrap();
+    let other_version = format!("{}.0.1.2", major.parse::<u32>().unwrap() - 1);
+    state.user_agent = original.replace(version, &other_version);
+    page.restore_state(&state).await.unwrap();
+    let hints: Value =
+        serde_json::from_str(&page.evaluate::<String>(CLIENT_HINTS).await.unwrap()).unwrap();
+    assert_eq!(hints[0], state.user_agent.as_str());
+    assert!(hints[1].as_str().is_some_and(|p| !p.is_empty()), "{hints}");
+    assert!(
+        hints[4].to_string().contains(&other_version),
+        "full version list follows the restored user agent: {hints}"
+    );
+    browser.close().await.unwrap();
+}
+
+/// Regression: restore navigated to the saved URL before replacing cookies,
+/// so the first request carried the old jar.
+#[tokio::test]
+#[ignore = "requires Chrome; local HTTP fixture"]
+async fn restore_sets_cookies_before_loading_the_saved_url() {
+    let seen = Seen::default();
+    let server = recording_fixture(seen.clone()).await;
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    let url = format!("{}account", server.url);
+    let mut auth = cookie("auth", "127.0.0.1");
+    auth.value = "restored".into();
+    page.restore_state(&state_for(&url, vec![auth]))
+        .await
+        .unwrap();
+    let seen = seen.lock().unwrap().clone();
+    let loads: Vec<_> = seen.iter().filter(|(path, _)| path == "/account").collect();
+    assert!(!loads.is_empty());
+    for (_, cookie) in loads {
+        assert_eq!(cookie, "auth=restored");
+    }
+    browser.close().await.unwrap();
+}
+
+/// Regression: storage was written to whatever origin the saved URL
+/// redirected to.
+#[tokio::test]
+#[ignore = "requires Chrome; local HTTP fixture"]
+async fn restore_refuses_to_write_storage_to_another_origin() {
+    let server = recording_fixture(Seen::default()).await;
+    let port = server.url.rsplit(':').next().unwrap().trim_end_matches('/');
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    let mut state = state_for(&format!("http://127.0.0.1:{port}/redirect"), vec![]);
+    state.local_storage.insert("token".into(), "secret".into());
+    let error = page.restore_state(&state).await.unwrap_err();
+    assert!(error.to_string().contains("storage"), "{error}");
+    assert!(page.url().await.unwrap().starts_with("http://localhost:"));
+    let leaked: Option<String> = page
+        .evaluate("localStorage.getItem('token')")
+        .await
+        .unwrap();
+    assert_eq!(leaked, None);
+
+    // Nothing to write: a redirect is not an error.
+    state.local_storage.clear();
+    page.restore_state(&state).await.unwrap();
+    browser.close().await.unwrap();
+}
+
+/// Regression: live sessions documented a merge but cleared origin storage.
+#[tokio::test]
+#[ignore = "requires Chrome; local HTTP fixture"]
+async fn restoring_into_a_live_session_keeps_other_storage() {
+    let server = support::HttpFixture::start(|_| async {
+        support::Response::html("<!doctype html><title>t</title>")
+    })
+    .await;
+    let browser = eoka::Browser::launch_with(|config| {
+        config.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
+        config.patch_binary = false;
+        config.live_session = true;
+    })
+    .await
+    .unwrap();
+    let page = browser.new_page(&server.url).await.unwrap();
+    page.execute("localStorage.setItem('theirs', '1'); sessionStorage.setItem('tab', '1')")
+        .await
+        .unwrap();
+    let mut state = page.capture_state().await.unwrap();
+    state.local_storage.clear();
+    state.session_storage.clear();
+    state.local_storage.insert("ours".into(), "2".into());
+    page.restore_state(&state).await.unwrap();
+    let kept: Vec<Option<String>> = page
+        .evaluate("[localStorage.getItem('theirs'), localStorage.getItem('ours'), sessionStorage.getItem('tab')]")
+        .await
+        .unwrap();
+    assert_eq!(kept, [Some("1".into()), Some("2".into()), Some("1".into())]);
+    browser.close().await.unwrap();
+}
+
+/// A non-live restore replaces the saved origin's storage.
+#[tokio::test]
+#[ignore = "requires Chrome; local HTTP fixture"]
+async fn restore_replaces_storage_of_the_saved_origin() {
+    let server = support::HttpFixture::start(|_| async {
+        support::Response::html("<!doctype html><title>t</title>")
+    })
+    .await;
+    let browser = support::browser().await;
+    let page = browser.new_page(&server.url).await.unwrap();
+    page.execute("localStorage.setItem('token', 'old'); localStorage.setItem('stale', '1')")
+        .await
+        .unwrap();
+    let mut state = page.capture_state().await.unwrap();
+    state.local_storage.remove("stale");
+    state.local_storage.insert("token".into(), "new".into());
+    page.restore_state(&state).await.unwrap();
+    let stored: Vec<Option<String>> = page
+        .evaluate("[localStorage.getItem('token'), localStorage.getItem('stale')]")
+        .await
+        .unwrap();
+    assert_eq!(stored, [Some("new".into()), None]);
+    browser.close().await.unwrap();
+}

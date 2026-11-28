@@ -30,7 +30,7 @@ pub struct TabInfo {
 }
 
 /// Build the `Emulation.setUserAgentOverride` payload from the resolved fingerprint.
-fn ua_override_for(fp: &Fingerprint) -> EmulationSetUserAgentOverride {
+pub(crate) fn ua_override_for(fp: &Fingerprint) -> EmulationSetUserAgentOverride {
     let to_brands = |v: Vec<(String, String)>| -> Vec<UserAgentBrandVersion> {
         v.into_iter()
             .map(|(brand, version)| UserAgentBrandVersion { brand, version })
