@@ -133,7 +133,7 @@ fn test_chrome_object_matches_stock() {
         "the fallback must provide chrome.loadTimes and chrome.csi"
     );
     assert!(
-        !script.contains("_eoka_rand() * 2"),
+        !script.contains("_eoka_rand"),
         "loadTimes must derive from navigation timing, not per-call randomness"
     );
     assert!(

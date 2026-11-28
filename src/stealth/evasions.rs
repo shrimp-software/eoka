@@ -8,7 +8,8 @@ use crate::stealth::fingerprint::{Fingerprint, GENERIC_FONTS};
 use crate::StealthConfig;
 
 /// Prelude: native-function masking (`_eoka_mark`), the shared prototype patch
-/// helpers (`_eoka_patchMethod`/`_eoka_patchGetter`) and the seeded PRNG.
+/// helpers (`_eoka_patchMethod`/`_eoka_patchGetter`/`_eoka_instance`) and the
+/// noise PRNG step (`_eoka_lcg`).
 pub const NATIVE_TOSTRING_EVASION: &str = include_str!("evasions/scripts/native_tostring.js");
 
 /// WebDriver evasion: `navigator.webdriver` is false on `Navigator.prototype`
@@ -137,7 +138,7 @@ pub(crate) const COMMON_TIMEZONES: &[&str] = &[
 /// Build the complete evasion script for the given config and fingerprint.
 pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> String {
     let mut scripts = vec![
-        NATIVE_TOSTRING_EVASION, // must be first: defines _eoka_mark / _eoka_rand
+        NATIVE_TOSTRING_EVASION, // must be first: defines the _eoka_* helpers
         WEBDRIVER_EVASION,
         CHROME_RUNTIME_EVASION,
         PERMISSIONS_EVASION,

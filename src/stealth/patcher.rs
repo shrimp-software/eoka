@@ -23,79 +23,25 @@
 //! macOS (signed app bundles) and Windows patch into the per-launch runtime
 //! directory instead, which is removed with the browser.
 
-use aho_corasick::AhoCorasick;
-#[cfg(not(target_os = "macos"))]
-use memmap2::Mmap;
-use memmap2::MmapMut;
-#[cfg(any(test, not(target_os = "macos")))]
-use std::fs::File;
-use std::fs::{self, OpenOptions};
-use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 
 pub use crate::browser::discovery::find_chrome;
-#[cfg(target_os = "linux")]
-use crate::browser::discovery::{is_elf, resolve_to_elf};
 use crate::error::{Error, Result};
 
-/// ChromeDriver's automation markers. Every match inside a non-executable
-/// data section is replaced by random alphanumerics of the same length.
-///
-/// Removed in schema 3 after scanning Chrome 155/156 (see `PATCHER_SCHEMA_VERSION`):
-/// - bare `cdc_`: its only hits are the unrelated `cdc_acm` USB driver name,
-///   once in `.rodata` and once as an instruction immediate in `.text`.
-///   Rewriting it corrupted code and hid nothing.
-/// - `--enable-automation`: only present inside a log message.
-/// - `devtoolsw`, `debuggerPrivate`, `HeadlessChrome`: no hits.
-/// - `Runtime.enable`, `Page.addScriptToEvaluateOnNewDocument`: detection-only
-///   entries that were never rewritten.
-///
-/// `webdriver` is deliberately absent: Chrome builds the
-/// `Navigator.prototype.webdriver` accessor name from that literal, and the
-/// JS evasion already handles it.
-static PATCH_PATTERNS: &[&[u8]] = &[b"$cdc_", b"$wdc_", b"$chromeDriver"];
-
-static PATTERN_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
-
-fn pattern_matcher() -> Result<&'static AhoCorasick> {
-    if let Some(ac) = PATTERN_MATCHER.get() {
-        return Ok(ac);
-    }
-    let ac = AhoCorasick::new(PATCH_PATTERNS).map_err(|e| {
-        Error::patching(
-            "init",
-            format!("Failed to build Aho-Corasick automaton: {}", e),
-        )
-    })?;
-    Ok(PATTERN_MATCHER.get_or_init(|| ac))
-}
-
-/// Bumped whenever the rewrite rules or the cache layout change. It is part
-/// of the cache key and of every manifest, so older entries are never reused.
-const PATCHER_SCHEMA_VERSION: u64 = 3;
-
-/// Manifest file inside each published cache entry.
-#[cfg(not(target_os = "macos"))]
-const MANIFEST_NAME: &str = "eoka-patch.manifest";
-
-/// Staging and trash leftovers from crashed processes older than this are
-/// removed when another entry is published.
-#[cfg(not(target_os = "macos"))]
-const LEFTOVER_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 mod cache;
 #[cfg(target_os = "macos")]
 mod macos;
 mod sections;
-#[allow(unused_imports)]
-use cache::*;
-#[allow(unused_imports)]
-use sections::*;
 
-/// Read the whole executable and count the markers the patcher would rewrite.
-fn count_patchable_in_file(path: &Path) -> Result<usize> {
-    Ok(patchable_matches(&fs::read(path)?)?.len())
-}
+#[cfg(target_os = "linux")]
+use cache::resolve_elf_for_patching;
+use cache::{create_cache_root, persistent_cache_root, SourceIdentity};
+#[cfg(unix)]
+use cache::{create_private_cache_directory, validate_cache_root};
+
+/// Bumped whenever the rewrite rules or the cache layout change. It is part
+/// of the cache key and of every manifest, so older entries are never reused.
+const PATCHER_SCHEMA_VERSION: u64 = 3;
 
 /// Chrome binary patcher
 pub struct ChromePatcher {
@@ -158,7 +104,7 @@ impl ChromePatcher {
         #[cfg(unix)]
         create_private_cache_directory(&root)?;
         #[cfg(not(unix))]
-        create_dir_secure(&root)?;
+        create_cache_root(&root)?;
         Self::new_with_root(chrome_path, &root)
     }
 
@@ -171,7 +117,7 @@ impl ChromePatcher {
         }
         #[cfg(unix)]
         let root = {
-            let root = fs::canonicalize(root)?;
+            let root = std::fs::canonicalize(root)?;
             validate_cache_root(&root)?;
             root
         };
@@ -182,7 +128,6 @@ impl ChromePatcher {
 
         #[cfg(target_os = "macos")]
         {
-            // On macOS, handle the full .app bundle
             if let Some(bundle) = chrome_path
                 .ancestors()
                 .find(|path| path.extension().is_some_and(|extension| extension == "app"))
@@ -207,7 +152,6 @@ impl ChromePatcher {
             }
         }
 
-        // Non-macOS or non-bundled binary
         let filename = chrome_path
             .file_name()
             .ok_or_else(|| Error::patching("new", "Invalid path"))?;

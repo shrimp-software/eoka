@@ -1,52 +1,77 @@
 //! Executable-format section parsing: which byte ranges may be rewritten.
 
-#[allow(unused_imports)]
-use super::*;
+use std::ops::Range;
+use std::path::Path;
+use std::sync::OnceLock;
 
-// ---------------------------------------------------------------------------
-// Executable-format section parsing
-// ---------------------------------------------------------------------------
+use aho_corasick::AhoCorasick;
 
-pub(super) fn read_bytes(data: &[u8], offset: u64, len: usize) -> Option<&[u8]> {
+use super::random_string;
+use crate::error::{Error, Result};
+
+/// ChromeDriver's automation markers. Every match inside a non-executable
+/// data section is replaced by random alphanumerics of the same length.
+///
+/// Removed in schema 3 after scanning Chrome 155/156 (see `PATCHER_SCHEMA_VERSION`):
+/// - bare `cdc_`: its only hits are the unrelated `cdc_acm` USB driver name,
+///   once in `.rodata` and once as an instruction immediate in `.text`.
+///   Rewriting it corrupted code and hid nothing.
+/// - `--enable-automation`: only present inside a log message.
+/// - `devtoolsw`, `debuggerPrivate`, `HeadlessChrome`: no hits.
+/// - `Runtime.enable`, `Page.addScriptToEvaluateOnNewDocument`: detection-only
+///   entries that were never rewritten.
+///
+/// `webdriver` is deliberately absent: Chrome builds the
+/// `Navigator.prototype.webdriver` accessor name from that literal, and the
+/// JS evasion already handles it.
+static PATCH_PATTERNS: &[&[u8]] = &[b"$cdc_", b"$wdc_", b"$chromeDriver"];
+
+static PATTERN_MATCHER: OnceLock<AhoCorasick> = OnceLock::new();
+
+pub(super) fn pattern_matcher() -> Result<&'static AhoCorasick> {
+    if let Some(ac) = PATTERN_MATCHER.get() {
+        return Ok(ac);
+    }
+    let ac = AhoCorasick::new(PATCH_PATTERNS).map_err(|e| {
+        Error::patching(
+            "init",
+            format!("Failed to build Aho-Corasick automaton: {}", e),
+        )
+    })?;
+    Ok(PATTERN_MATCHER.get_or_init(|| ac))
+}
+
+/// Read the whole executable and count the markers the patcher would rewrite.
+pub(super) fn count_patchable_in_file(path: &Path) -> Result<usize> {
+    Ok(patchable_matches(&std::fs::read(path)?)?.len())
+}
+
+fn read_bytes(data: &[u8], offset: u64, len: usize) -> Option<&[u8]> {
     let start = usize::try_from(offset).ok()?;
     data.get(start..start.checked_add(len)?)
 }
 
-pub(super) fn read_u16(data: &[u8], offset: u64, big: bool) -> Option<u16> {
-    let bytes: [u8; 2] = read_bytes(data, offset, 2)?.try_into().ok()?;
-    Some(if big {
-        u16::from_be_bytes(bytes)
-    } else {
-        u16::from_le_bytes(bytes)
-    })
+macro_rules! read_int {
+    ($name:ident, $ty:ty) => {
+        fn $name(data: &[u8], offset: u64, big: bool) -> Option<$ty> {
+            let bytes = read_bytes(data, offset, size_of::<$ty>())?
+                .try_into()
+                .ok()?;
+            Some(if big {
+                <$ty>::from_be_bytes(bytes)
+            } else {
+                <$ty>::from_le_bytes(bytes)
+            })
+        }
+    };
 }
-
-pub(super) fn read_u32(data: &[u8], offset: u64, big: bool) -> Option<u32> {
-    let bytes: [u8; 4] = read_bytes(data, offset, 4)?.try_into().ok()?;
-    Some(if big {
-        u32::from_be_bytes(bytes)
-    } else {
-        u32::from_le_bytes(bytes)
-    })
-}
-
-pub(super) fn read_u64(data: &[u8], offset: u64, big: bool) -> Option<u64> {
-    let bytes: [u8; 8] = read_bytes(data, offset, 8)?.try_into().ok()?;
-    Some(if big {
-        u64::from_be_bytes(bytes)
-    } else {
-        u64::from_le_bytes(bytes)
-    })
-}
+read_int!(read_u16, u16);
+read_int!(read_u32, u32);
+read_int!(read_u64, u64);
 
 /// File range `[offset, offset + size)` shifted by `base`, rejected when it
 /// does not fit inside `file_len`.
-pub(super) fn file_range(
-    base: u64,
-    offset: u64,
-    size: u64,
-    file_len: usize,
-) -> Option<Range<usize>> {
+fn file_range(base: u64, offset: u64, size: u64, file_len: usize) -> Option<Range<usize>> {
     let start = base.checked_add(offset)?;
     let end = start.checked_add(size)?;
     if end > file_len as u64 {
@@ -55,7 +80,7 @@ pub(super) fn file_range(
     Some(start as usize..end as usize)
 }
 
-pub(super) fn malformed(format: &str) -> Error {
+fn malformed(format: &str) -> Error {
     Error::patching(
         "sections",
         format!("Malformed {format} headers; refusing to patch the binary"),
@@ -64,7 +89,7 @@ pub(super) fn malformed(format: &str) -> Error {
 
 /// File ranges of non-executable, file-backed data sections. Patterns are only
 /// ever rewritten inside these ranges, never inside code.
-pub(super) fn data_ranges(data: &[u8]) -> Result<Vec<Range<usize>>> {
+fn data_ranges(data: &[u8]) -> Result<Vec<Range<usize>>> {
     match data.get(..4) {
         Some([0x7f, b'E', b'L', b'F']) => elf_data_ranges(data).ok_or_else(|| malformed("ELF")),
         Some([0xcf, 0xfa, 0xed, 0xfe]) => {
@@ -81,7 +106,7 @@ pub(super) fn data_ranges(data: &[u8]) -> Result<Vec<Range<usize>>> {
     }
 }
 
-pub(super) fn elf_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
+fn elf_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
     const SHT_NOBITS: u32 = 8;
     const SHF_ALLOC: u64 = 0x2;
     const SHF_EXECINSTR: u64 = 0x4;
@@ -148,11 +173,7 @@ pub(super) fn elf_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
 }
 
 /// One thin 64-bit Mach-O image at `base` (inside a universal binary or not).
-pub(super) fn macho64_data_ranges(
-    data: &[u8],
-    base: usize,
-    len: usize,
-) -> Option<Vec<Range<usize>>> {
+fn macho64_data_ranges(data: &[u8], base: usize, len: usize) -> Option<Vec<Range<usize>>> {
     const LC_SEGMENT_64: u32 = 0x19;
     const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x8000_0000;
     const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x0000_0400;
@@ -195,7 +216,7 @@ pub(super) fn macho64_data_ranges(
     Some(ranges)
 }
 
-pub(super) fn fat_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
+fn fat_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
     let wide = data.get(3)? == &0xbf;
     let count = read_u32(data, 4, true)? as u64;
     let entry_size = if wide { 32 } else { 20 };
@@ -219,7 +240,7 @@ pub(super) fn fat_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
     Some(ranges)
 }
 
-pub(super) fn pe_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
+fn pe_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
     const IMAGE_SCN_CNT_CODE: u32 = 0x0000_0020;
     const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 
@@ -245,7 +266,7 @@ pub(super) fn pe_data_ranges(data: &[u8]) -> Option<Vec<Range<usize>>> {
 }
 
 /// Pattern matches that lie entirely inside a data section.
-pub(super) fn patchable_matches(data: &[u8]) -> Result<Vec<Range<usize>>> {
+fn patchable_matches(data: &[u8]) -> Result<Vec<Range<usize>>> {
     let ranges = data_ranges(data)?;
     let matcher = pattern_matcher()?;
     Ok(matcher
@@ -271,7 +292,3 @@ pub(super) fn apply_patches(data: &mut [u8]) -> Result<usize> {
     }
     Ok(matches.len())
 }
-
-// ---------------------------------------------------------------------------
-// Stable hashing (DefaultHasher is not stable across Rust releases)
-// ---------------------------------------------------------------------------

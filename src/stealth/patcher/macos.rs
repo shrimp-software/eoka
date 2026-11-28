@@ -1,11 +1,20 @@
 //! macOS app-bundle patching.
 
-#[allow(unused_imports)]
-use super::*;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-#[cfg(target_os = "macos")]
+use memmap2::MmapMut;
+
+use super::cache::{
+    create_private_cache_directory, validate_cache_root, validate_private_cache_directory,
+};
+use super::sections::{apply_patches, count_patchable_in_file};
+use super::ChromePatcher;
+use crate::error::{Error, Result};
+
 impl ChromePatcher {
-    pub(super) fn validate_cache_directory(&self) -> Result<()> {
+    fn validate_cache_directory(&self) -> Result<()> {
         let directory = self.cache_directory()?;
         let parent = directory
             .parent()
@@ -13,13 +22,15 @@ impl ChromePatcher {
         validate_cache_root(parent)?;
         validate_private_cache_directory(directory)
     }
-}
 
-#[cfg(target_os = "macos")]
-impl ChromePatcher {
+    /// The bundle when there is one, otherwise the binary.
+    fn sign_target(&self) -> &Path {
+        self.patched_bundle.as_ref().unwrap_or(&self.patched_path)
+    }
+
     pub(super) fn cache_directory(&self) -> Result<&Path> {
-        let path = self.patched_bundle.as_ref().unwrap_or(&self.patched_path);
-        path.parent()
+        self.sign_target()
+            .parent()
             .ok_or_else(|| Error::patching("cache", "Chrome cache directory has no parent"))
     }
 
@@ -72,8 +83,7 @@ impl ChromePatcher {
     }
 
     /// Copy the app bundle into owned storage before patching or signing it.
-    #[cfg(target_os = "macos")]
-    pub(super) fn copy_bundle(&self) -> Result<()> {
+    fn copy_bundle(&self) -> Result<()> {
         create_private_cache_directory(self.cache_directory()?)?;
         let (orig_bundle, dest_bundle) = match (&self.original_bundle, &self.patched_bundle) {
             (Some(o), Some(d)) => (o, d),
@@ -99,7 +109,6 @@ impl ChromePatcher {
         self.verify_owned_bundle()
     }
 
-    #[cfg(target_os = "macos")]
     pub(super) fn copy_owned_bundle(
         src: &Path,
         dst: &Path,
@@ -167,8 +176,7 @@ impl ChromePatcher {
 
     /// Validate resolved links only after the entire owned tree exists.
     /// Lexical depth alone cannot account for intermediate directory symlinks.
-    #[cfg(target_os = "macos")]
-    pub(super) fn verify_owned_bundle(&self) -> Result<()> {
+    fn verify_owned_bundle(&self) -> Result<()> {
         let Some(bundle) = &self.patched_bundle else {
             return Ok(());
         };
@@ -176,7 +184,6 @@ impl ChromePatcher {
         Self::verify_owned_bundle_links(&bundle, &bundle)
     }
 
-    #[cfg(target_os = "macos")]
     pub(super) fn verify_owned_bundle_links(directory: &Path, bundle: &Path) -> Result<()> {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
@@ -194,11 +201,8 @@ impl ChromePatcher {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
-    pub(super) fn codesign(&self) -> Result<()> {
-        use std::process::Command;
-
-        let sign_path = self.patched_bundle.as_ref().unwrap_or(&self.patched_path);
+    fn codesign(&self) -> Result<()> {
+        let sign_path = self.sign_target();
 
         tracing::info!("Re-signing {:?} with ad-hoc signature...", sign_path);
 
@@ -235,11 +239,8 @@ impl ChromePatcher {
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
-    pub(super) fn verify_signature(&self) -> Result<()> {
-        use std::process::Command;
-
-        let sign_path = self.patched_bundle.as_ref().unwrap_or(&self.patched_path);
+    fn verify_signature(&self) -> Result<()> {
+        let sign_path = self.sign_target();
         let verification = Command::new("/usr/bin/codesign")
             .args(["--verify", "--deep", "--strict"])
             .arg(sign_path)

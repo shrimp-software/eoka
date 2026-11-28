@@ -2,28 +2,22 @@
 // Stock Chrome (headless/new included) ships the five PDF viewer plugins
 // natively; only an empty list is filled.
 const _eoka_buildPlugins = () => {
-    const plugins = [
-        { name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chrome PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Chromium PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'Microsoft Edge PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
-        { name: 'WebKit built-in PDF', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }
-    ];
+    const names = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer',
+        'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'];
 
     const pluginArray = Object.create(PluginArray.prototype);
-    plugins.forEach((p, i) => {
-        const plugin = Object.create(Plugin.prototype);
-        Object.defineProperties(plugin, {
-            name: { value: p.name, enumerable: true },
-            filename: { value: p.filename, enumerable: true },
-            description: { value: p.description, enumerable: true },
-            length: { value: 1, enumerable: true }
+    names.forEach((name, i) => {
+        const plugin = _eoka_instance(Plugin.prototype, {
+            name,
+            filename: 'internal-pdf-viewer',
+            description: 'Portable Document Format',
+            length: 1
         });
         pluginArray[i] = plugin;
-        pluginArray[p.name] = plugin;
+        pluginArray[name] = plugin;
     });
 
-    Object.defineProperty(pluginArray, 'length', { value: plugins.length });
+    Object.defineProperty(pluginArray, 'length', { value: names.length });
     const methods = {
         item(i) { return pluginArray[i] || null; },
         namedItem(name) { return pluginArray[name] || null; },
