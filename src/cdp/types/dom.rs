@@ -76,12 +76,6 @@ impl BoxModel {
             None
         }
     }
-
-    /// Center of the content quad, or `(0.0, 0.0)` when unavailable.
-    #[deprecated(note = "use `try_center` — a silent (0,0) clicks the viewport corner")]
-    pub fn center(&self) -> (f64, f64) {
-        self.try_center().unwrap_or((0.0, 0.0))
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
