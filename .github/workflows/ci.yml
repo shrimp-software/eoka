@@ -151,6 +151,9 @@ jobs:
     name: Downstream eoka-tools
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Where CI OK tolerates a red downstream, it must not fail the run either:
+    # Publish waits for the run's conclusion, not CI OK's.
+    continue-on-error: ${{ github.event_name == 'push' || contains(github.event.pull_request.labels.*.name, 'downstream-breaking') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
