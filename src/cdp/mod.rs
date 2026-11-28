@@ -13,6 +13,7 @@ pub mod connection;
 pub mod discover;
 mod headers;
 mod network_idle;
+mod poll;
 pub mod transport;
 pub(crate) mod types;
 

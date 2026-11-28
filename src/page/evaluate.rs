@@ -1,5 +1,5 @@
 use super::Page;
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 
 const MAX_FUNCTION_BYTES: usize = 1_048_576;
 
@@ -98,7 +98,10 @@ impl Page {
     pub fn function_expression(function: &str, arguments: &[serde_json::Value]) -> Result<String> {
         fn validate(value: &serde_json::Value, depth: usize) -> Result<()> {
             if depth > 64 {
-                return Err(Error::cdp_msg("JavaScript argument nesting exceeds 64"));
+                return Err(Error::coded(
+                    ErrorCode::InvalidArgument,
+                    "JavaScript argument nesting exceeds 64",
+                ));
             }
             match value {
                 serde_json::Value::Number(n)
@@ -106,7 +109,8 @@ impl Page {
                         !n.is_finite() || (n.fract() == 0.0 && n.abs() > 9_007_199_254_740_991.0)
                     }) =>
                 {
-                    return Err(Error::cdp_msg(
+                    return Err(Error::coded(
+                        ErrorCode::InvalidArgument,
                         "JavaScript argument contains an unsafe number",
                     ))
                 }
@@ -129,7 +133,8 @@ impl Page {
         }
         let args = serde_json::to_string(arguments)?;
         if args.len() > MAX_FUNCTION_BYTES || function.len() > MAX_FUNCTION_BYTES {
-            return Err(Error::cdp_msg(
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
                 "JavaScript function or arguments exceed 1 MiB",
             ));
         }

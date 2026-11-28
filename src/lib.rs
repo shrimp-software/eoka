@@ -132,20 +132,6 @@ pub struct StealthConfig {
     pub canvas_spoof: bool,
     /// Spoof audio fingerprint
     pub audio_spoof: bool,
-    /// Has no effect. Choose human pointer movement per call with
-    /// `human_click`/`human_hover` or `Action::Click { human: true, .. }`.
-    #[deprecated(
-        since = "0.11.0",
-        note = "has no effect; use human_click/human_hover per call"
-    )]
-    pub human_mouse: bool,
-    /// Has no effect. Choose human typing per call with `human_type`,
-    /// `human_fill` or `InputMode::Human`.
-    #[deprecated(
-        since = "0.11.0",
-        note = "has no effect; use human_type/human_fill or InputMode::Human"
-    )]
-    pub human_typing: bool,
     /// Custom user agent (None = random realistic)
     pub user_agent: Option<String>,
     /// Headless mode
@@ -169,13 +155,6 @@ pub struct StealthConfig {
     pub viewport_height: u32,
     /// Physical pixels per CSS pixel. Must be finite and positive.
     pub device_scale_factor: f64,
-    /// Has no effect. Use `tracing` for logs and `Page::debug_screenshot`
-    /// for screenshots; `debug_dir` still sets where those go.
-    #[deprecated(
-        since = "0.11.0",
-        note = "has no effect; use tracing and Page::debug_screenshot"
-    )]
-    pub debug: bool,
     /// Directory for debug screenshots (defaults to current directory)
     pub debug_dir: Option<String>,
     /// Proxy server URL (e.g. "http://host:port")
@@ -211,14 +190,6 @@ pub struct StealthConfig {
     /// Extra Chrome command-line arguments appended after standard stealth args.
     /// E.g. vec!["--use-fake-ui-for-media-stream".into()] to auto-grant camera.
     pub extra_args: Vec<String>,
-    /// Has no effect. It enabled a `window.document` Proxy that hid
-    /// ChromeDriver markers eoka never produces and broke `ownerDocument`
-    /// identity.
-    #[deprecated(
-        since = "0.11.0",
-        note = "has no effect; eoka produces no ChromeDriver markers"
-    )]
-    pub aggressive_cdp_evasion: bool,
     /// Treat this as a session attached to a user-owned browser. When true,
     /// `Browser::new_page`/`new_blank_page`/`attach_page` skip injecting the
     /// evasion script. Defaults to false (set automatically by `Browser::connect*`).
@@ -258,7 +229,6 @@ impl std::fmt::Debug for Redacted {
     }
 }
 
-#[allow(deprecated)]
 impl std::fmt::Debug for StealthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Exhaustive, so that adding a field forces a decision about printing it.
@@ -266,8 +236,6 @@ impl std::fmt::Debug for StealthConfig {
             webgl_spoof,
             canvas_spoof,
             audio_spoof,
-            human_mouse,
-            human_typing,
             user_agent,
             headless,
             chrome_path,
@@ -277,7 +245,6 @@ impl std::fmt::Debug for StealthConfig {
             viewport_width,
             viewport_height,
             device_scale_factor,
-            debug,
             debug_dir,
             proxy,
             user_data_dir,
@@ -287,7 +254,6 @@ impl std::fmt::Debug for StealthConfig {
             cdp_timeout,
             timezone,
             extra_args,
-            aggressive_cdp_evasion,
             live_session,
             filter_cdp,
             ignore_cert_errors,
@@ -299,8 +265,6 @@ impl std::fmt::Debug for StealthConfig {
             .field("webgl_spoof", webgl_spoof)
             .field("canvas_spoof", canvas_spoof)
             .field("audio_spoof", audio_spoof)
-            .field("human_mouse", human_mouse)
-            .field("human_typing", human_typing)
             .field("user_agent", user_agent)
             .field("headless", headless)
             .field("chrome_path", chrome_path)
@@ -310,7 +274,6 @@ impl std::fmt::Debug for StealthConfig {
             .field("viewport_width", viewport_width)
             .field("viewport_height", viewport_height)
             .field("device_scale_factor", device_scale_factor)
-            .field("debug", debug)
             .field("debug_dir", debug_dir);
         // A proxy URL can embed credentials.
         match proxy {
@@ -326,7 +289,6 @@ impl std::fmt::Debug for StealthConfig {
             .field("timezone", timezone)
             // Arguments can embed credentials, such as --proxy-server=user:pass@host.
             .field("extra_args", &extra_args.len())
-            .field("aggressive_cdp_evasion", aggressive_cdp_evasion)
             .field("live_session", live_session)
             .field("filter_cdp", filter_cdp)
             .field("ignore_cert_errors", ignore_cert_errors)
@@ -336,15 +298,12 @@ impl std::fmt::Debug for StealthConfig {
     }
 }
 
-#[allow(deprecated)] // Default values for deprecated fields.
 impl Default for StealthConfig {
     fn default() -> Self {
         Self {
             webgl_spoof: true,
             canvas_spoof: true,
             audio_spoof: true,
-            human_mouse: true,
-            human_typing: true,
             user_agent: None,
             headless: true,
             chrome_path: None,
@@ -354,7 +313,6 @@ impl Default for StealthConfig {
             viewport_width: 1920,
             viewport_height: 1080,
             device_scale_factor: 1.0,
-            debug: false,
             debug_dir: None,
             proxy: None,
             user_data_dir: None,
@@ -364,7 +322,6 @@ impl Default for StealthConfig {
             cdp_timeout: 30,
             timezone: None, // Random from common timezones
             extra_args: Vec::new(),
-            aggressive_cdp_evasion: false,
             live_session: false,
             filter_cdp: true,
             ignore_cert_errors: false,
@@ -374,7 +331,6 @@ impl Default for StealthConfig {
     }
 }
 
-#[allow(deprecated)] // Presets still initialize deprecated fields.
 impl StealthConfig {
     /// Proxy credentials the transport answers `Proxy` challenges with.
     pub(crate) fn proxy_credentials(&self) -> Option<(String, String)> {
@@ -392,8 +348,6 @@ impl StealthConfig {
             webgl_spoof: false,
             canvas_spoof: false,
             audio_spoof: false,
-            human_mouse: false,
-            human_typing: false,
             headless: false,
             patch_binary: false,
             ..Default::default()
@@ -408,13 +362,9 @@ impl StealthConfig {
         }
     }
 
-    /// Create a debug config (visible, with logging)
+    /// Create a debug config: visible. Logs come from `tracing`.
     pub fn debug() -> Self {
-        Self {
-            headless: false,
-            debug: true,
-            ..Default::default()
-        }
+        Self::visible()
     }
 
     /// Config tuned for attaching to a user-owned browser via `Browser::connect*`.
@@ -432,8 +382,6 @@ impl StealthConfig {
             webgl_spoof: false,
             canvas_spoof: false,
             audio_spoof: false,
-            human_mouse: true,
-            human_typing: true,
             ..Default::default()
         }
     }

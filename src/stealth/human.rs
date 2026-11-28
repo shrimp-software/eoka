@@ -69,6 +69,11 @@ fn random_range(min: u64, max: u64) -> u64 {
     fastrand::u64(min..max)
 }
 
+/// Sleep for a uniformly random duration in `min..max` milliseconds.
+async fn pause(min: u64, max: u64) {
+    sleep(Duration::from_millis(random_range(min, max))).await;
+}
+
 fn random_f64_range(min: f64, max: f64) -> f64 {
     debug_assert!(
         min < max,
@@ -213,7 +218,7 @@ impl<'a> Human<'a> {
         // Move through path using Page's coordinator when available.
         for (x, y) in path {
             self.mouse_move(x, y).await?;
-            sleep(Duration::from_millis(random_range(min_delay, max_delay))).await;
+            pause(min_delay, max_delay).await;
         }
 
         Ok(())
@@ -224,7 +229,7 @@ impl<'a> Human<'a> {
         self.move_to(target_x, target_y).await?;
 
         // Small delay before click
-        sleep(Duration::from_millis(random_range(50, 150))).await;
+        pause(50, 150).await;
 
         // Click with slight jitter
         let click_x = target_x + random_f64_range(-2.0, 2.0);
@@ -232,12 +237,12 @@ impl<'a> Human<'a> {
 
         self.mouse_down(click_x, click_y).await?;
 
-        sleep(Duration::from_millis(random_range(50, 120))).await;
+        pause(50, 120).await;
 
         self.mouse_up(click_x, click_y).await?;
 
         // Small delay after click
-        sleep(Duration::from_millis(random_range(30, 100))).await;
+        pause(30, 100).await;
 
         Ok(())
     }
@@ -266,10 +271,10 @@ impl<'a> Human<'a> {
     pub async fn drag_by(&self, x: f64, y: f64, dx: f64) -> Result<()> {
         validate_drag(x, y, dx)?;
         let mut release = self.approach_drag(x, y).await?;
-        sleep(Duration::from_millis(random_range(80, 200))).await;
+        pause(80, 200).await;
         let moved = async {
             release.press().await?;
-            sleep(Duration::from_millis(random_range(60, 140))).await;
+            pause(60, 140).await;
 
             let overshoot = if dx.abs() > 40.0 {
                 random_f64_range(4.0, 14.0).min(dx.abs() * 0.3) * dx.signum()
@@ -303,18 +308,18 @@ impl<'a> Human<'a> {
             }
 
             if overshoot != 0.0 {
-                sleep(Duration::from_millis(random_range(60, 150))).await;
+                pause(60, 150).await;
                 let settle_points = random_range(3, 6);
                 for i in 1..=settle_points {
                     let t = i as f64 / settle_points as f64;
                     let sx = over_x + (target_x - over_x) * t;
                     let sy = (end_y + (y - end_y) * t + random_f64_range(-0.8, 0.8)).max(0.0);
                     release.move_to(sx.max(0.0), sy).await?;
-                    sleep(Duration::from_millis(random_range(20, 60))).await;
+                    pause(20, 60).await;
                 }
             }
 
-            sleep(Duration::from_millis(random_range(30, 100))).await;
+            pause(30, 100).await;
             release.x = target_x;
             release.y = y;
             Ok(())
@@ -384,12 +389,12 @@ impl<'a> Human<'a> {
                 let wrong_char = (b'a' + random_range(0, 26) as u8) as char;
                 coordinated_key_char(self.session, &self.held_input, &wrong_char.to_string())
                     .await?;
-                sleep(Duration::from_millis(random_range(100, 300))).await;
+                pause(100, 300).await;
 
                 // Backspace through the shared held-key coordinator.
                 coordinated_key_down(self.session, &self.held_input, "Backspace").await?;
                 coordinated_key_up(self.session, &self.held_input, "Backspace").await?;
-                sleep(Duration::from_millis(random_range(50, 150))).await;
+                pause(50, 150).await;
             }
         }
 
@@ -399,7 +404,7 @@ impl<'a> Human<'a> {
     /// Press a key through the session's held-key coordinator.
     pub async fn press_key(&self, key: &str) -> Result<()> {
         coordinated_key_down(self.session, &self.held_input, key).await?;
-        sleep(Duration::from_millis(random_range(50, 100))).await;
+        pause(50, 100).await;
         coordinated_key_up(self.session, &self.held_input, key).await
     }
 
@@ -417,7 +422,7 @@ impl<'a> Human<'a> {
 
             self.mouse_wheel(x, y, 0.0, scroll_amount).await?;
 
-            sleep(Duration::from_millis(random_range(30, 100))).await;
+            pause(30, 100).await;
         }
 
         Ok(())

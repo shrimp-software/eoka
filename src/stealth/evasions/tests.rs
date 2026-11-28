@@ -11,24 +11,6 @@ fn test_build_full_script() {
     assert!(!script.contains("const documentProxy"));
 }
 
-// Regression: the opt-in CDP module proxied `window.document` (breaking
-// `ownerDocument === document`) to hide chromedriver markers eoka never
-// produces. The flag still compiles but adds nothing.
-#[test]
-#[allow(deprecated)]
-fn test_aggressive_cdp_evasion_adds_nothing() {
-    let config = StealthConfig {
-        aggressive_cdp_evasion: true,
-        ..StealthConfig::default()
-    };
-    let script = build_evasion_script(&config);
-    assert!(!script.contains("documentProxy"));
-    assert!(!script.contains("cdcPattern"));
-    #[allow(deprecated)]
-    let cdp = CDP_EVASION;
-    assert!(cdp.is_empty());
-}
-
 #[test]
 fn test_placeholders_are_filled() {
     let script = build_evasion_script(&StealthConfig::default());
@@ -371,9 +353,6 @@ fn test_no_timezone_or_webrtc_shims() {
     ] {
         assert!(!script.contains(needle), "{needle} must not be patched");
     }
-    #[allow(deprecated)]
-    let removed = [TIMEZONE_EVASION, WEBRTC_EVASION];
-    assert!(removed.iter().all(|script| script.is_empty()));
 }
 
 // Regression: overrides used to be assigned on instances

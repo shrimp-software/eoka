@@ -18,14 +18,7 @@ pub struct PageNavigateResult {
     #[serde(default)]
     pub is_download: Option<bool>,
     #[serde(default)]
-    pub frame_id: String,
-    #[serde(default)]
-    pub loader_id: Option<String>,
-    #[serde(default)]
     pub error_text: Option<String>,
-    /// HTTP status code of the final response (e.g. 200, 404). Not set for non-HTTP schemes.
-    #[serde(default)]
-    pub http_status_code: Option<u16>,
 }
 
 pub type PageEnable = Empty;

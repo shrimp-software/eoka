@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{Page, ResponseBody};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::fetch::{BrowserFetchOutcome, BrowserFetchRequest, BrowserFetchResponse};
 use crate::session::{BrowserState, SessionCookie};
 
@@ -67,7 +67,10 @@ impl Page {
         requests: Vec<BrowserFetchRequest>,
     ) -> Result<Vec<BrowserFetchOutcome>> {
         if requests.len() > 100 {
-            return Err(Error::cdp_msg("fetch_many accepts at most 100 requests"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "fetch_many accepts at most 100 requests",
+            ));
         }
         let script = crate::fetch::fetch_many_script(&requests)?;
         self.evaluate(&script).await

@@ -19,10 +19,13 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex};
 use tokio_tungstenite::tungstenite::{protocol::WebSocketConfig, Message};
 use tokio_tungstenite::{connect_async_with_config, MaybeTlsStream, WebSocketStream};
 
+mod connect;
 mod interception;
+mod pending;
 mod process;
 mod reader;
 mod runtime;
+mod shutdown;
 mod writer;
 
 use super::network_idle::{self, IdleRoutes, IdleState};
@@ -32,10 +35,17 @@ use interception::{
     request_interception_command, FetchInterceptor, RequestRoute, RequestRoutes, ResponseRoute,
     ResponseRoutes,
 };
+pub use pending::CommandDispatch;
+use pending::{
+    fail_pending, fail_session_pending, lock_completions, lock_pending, CommandResponse,
+    CompletionRoutes, PendingMap, PendingRegistration, PendingRequest, WithdrawOnDrop,
+    DISPATCH_CLAIMED, DISPATCH_SENT,
+};
 pub use process::launch_chrome;
 use process::ChildCleanupGuard;
 pub(crate) use process::{chrome_version_output, launch_chrome_with_profile_dir, stop_child};
 pub(crate) use runtime::RuntimeDirectory;
+use shutdown::{duplicate_socket, SocketShutdownGuard};
 
 /// The connected WebSocket stream and its split write/read halves.
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -66,27 +76,6 @@ struct WriteItem {
 
 type WriteQueue = mpsc::UnboundedSender<WriteItem>;
 
-/// Dispatch states shared by [`CommandDispatch`] and queued writes.
-const DISPATCH_UNUSED: u8 = 0;
-const DISPATCH_CLAIMED: u8 = 1;
-const DISPATCH_SENT: u8 = 2;
-const DISPATCH_WITHDRAWN: u8 = 3;
-
-/// Withdraw a queued command when its sender stops waiting before the
-/// writer claims it. After the writer claims it, this does nothing.
-struct WithdrawOnDrop(Arc<AtomicU8>);
-
-impl Drop for WithdrawOnDrop {
-    fn drop(&mut self) {
-        let _ = self.0.compare_exchange(
-            DISPATCH_CLAIMED,
-            DISPATCH_WITHDRAWN,
-            Ordering::AcqRel,
-            Ordering::Acquire,
-        );
-    }
-}
-
 /// Command ids stay below the automatic-reply range; both stay within int32,
 /// because DevTools silently drops commands whose ids fall outside it.
 const COMMAND_ID_MIN: u64 = 1;
@@ -102,53 +91,6 @@ fn wrapping_next(current: u64, min: u64, max: u64) -> u64 {
         current + 1
     }
 }
-
-/// Shuts down the shared TCP connection without acquiring the WebSocket writer.
-/// Each guard must shut down independently of other retained socket owners.
-struct SocketShutdownGuard(Arc<std::net::TcpStream>);
-
-impl Drop for SocketShutdownGuard {
-    fn drop(&mut self) {
-        // Shutdown affects every duplicated descriptor, including the socket
-        // retained by SplitSink. Repeated shutdown after EOF is harmless.
-        let _ = self.0.shutdown(std::net::Shutdown::Both);
-    }
-}
-
-fn duplicate_socket(stream: &WsStream) -> Result<Arc<std::net::TcpStream>> {
-    let MaybeTlsStream::Plain(socket) = stream.get_ref() else {
-        return Err(Error::transport(
-            "CDP transport requires a plain ws:// socket",
-        ));
-    };
-    #[cfg(unix)]
-    let socket = {
-        use std::os::fd::AsFd;
-        socket.as_fd().try_clone_to_owned()
-    };
-    #[cfg(windows)]
-    let socket = {
-        use std::os::windows::io::AsSocket;
-        socket.as_socket().try_clone_to_owned()
-    };
-    let socket = socket
-        .map(std::net::TcpStream::from)
-        .map_err(|error| Error::transport(format!("Failed to duplicate CDP socket: {error}")))?;
-    Ok(Arc::new(socket))
-}
-
-/// Pending requests map — accessed from both the async reader task and
-/// `send_impl`; the lock is held very briefly so a std Mutex is fine.
-type PendingMap = std::sync::Mutex<HashMap<u64, PendingRequest>>;
-
-/// A pending request waiting for a response, with the session it was sent to
-/// so a detached or crashed session can fail it at once.
-struct PendingRequest {
-    sender: oneshot::Sender<Result<Value>>,
-    session: Option<Arc<str>>,
-}
-
-type CompletionRoutes = std::sync::Mutex<HashMap<Arc<str>, u64>>;
 
 #[derive(Serialize)]
 struct CdpCommand<'a> {
@@ -181,154 +123,6 @@ pub(crate) enum TargetLifecycle {
 }
 
 type LifecycleSink = Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<TargetLifecycle>>>>;
-
-/// Recover a poisoned pending-request map. Its critical sections only mutate
-/// `HashMap` entries, whose memory invariants remain intact during unwinding.
-fn lock_pending(pending: &PendingMap) -> std::sync::MutexGuard<'_, HashMap<u64, PendingRequest>> {
-    match pending.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::error!("Pending CDP request map was poisoned; recovering its contents");
-            poisoned.into_inner()
-        }
-    }
-}
-
-fn lock_completions(
-    routes: &CompletionRoutes,
-) -> std::sync::MutexGuard<'_, HashMap<Arc<str>, u64>> {
-    match routes.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => {
-            tracing::error!("Native completion routes were poisoned; recovering their contents");
-            poisoned.into_inner()
-        }
-    }
-}
-
-/// One-shot observation token for a single tracked command send.
-///
-/// A token cannot be reused, including after failure or cancellation. Concurrent
-/// attempts with the same token are rejected except for the first polled send.
-/// It does not acknowledge delivery or retract an already dispatched command.
-#[derive(Default)]
-pub struct CommandDispatch {
-    // Shared with the writer task, which marks the command sent.
-    state: Arc<AtomicU8>,
-}
-
-impl CommandDispatch {
-    /// Create an unused token.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Whether the command may have entered the WebSocket sink.
-    ///
-    /// True is irrevocable and does not mean delivery or success. False permits
-    /// safe handoff only after the associated send future has terminated or been
-    /// dropped; an active send can still progress and change this observation.
-    pub fn may_have_been_sent(&self) -> bool {
-        self.state.load(Ordering::Acquire) == DISPATCH_SENT
-    }
-
-    fn claim(&self) -> Result<Arc<AtomicU8>> {
-        self.state
-            .compare_exchange(
-                DISPATCH_UNUSED,
-                DISPATCH_CLAIMED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .map(|_| Arc::clone(&self.state))
-            .map_err(|_| Error::transport("CommandDispatch token already used"))
-    }
-}
-
-struct PendingRegistration {
-    pending: Arc<PendingMap>,
-    completion: Option<(Arc<CompletionRoutes>, Arc<str>)>,
-    id: u64,
-}
-
-impl Drop for PendingRegistration {
-    fn drop(&mut self) {
-        lock_pending(&self.pending).remove(&self.id);
-        if let Some((routes, session)) = &self.completion {
-            let mut routes = lock_completions(routes);
-            if routes.get(session.as_ref()) == Some(&self.id) {
-                routes.remove(session.as_ref());
-            }
-        }
-    }
-}
-
-pub(crate) struct CommandResponse {
-    registration: PendingRegistration,
-    receiver: oneshot::Receiver<Result<Value>>,
-    /// Replies carry only the command id; protocol errors get their method here.
-    method: Box<str>,
-}
-
-impl CommandResponse {
-    pub(crate) async fn wait(self) -> Result<Value> {
-        let result = self
-            .receiver
-            .await
-            .map_err(|error| Error::transport(format!("Response channel closed: {error}")))?;
-        drop(self.registration);
-        result.map_err(|error| match error {
-            Error::Cdp {
-                method: None,
-                code: code @ Some(_),
-                message,
-            } => Error::Cdp {
-                method: Some(self.method.into()),
-                code,
-                message,
-            },
-            other => other,
-        })
-    }
-}
-
-/// Fail and remove every pending request, returning the number drained.
-fn fail_pending(pending: &PendingMap, context: &str) -> usize {
-    let requests = std::mem::take(&mut *lock_pending(pending));
-    let count = requests.len();
-    for request in requests.into_values() {
-        drop(request.sender.send(Err(Error::transport(context))));
-    }
-    count
-}
-
-/// Chrome's reply to a command for a session that no longer exists. Pending
-/// commands of a detached session fail with the same error, so callers that
-/// already classify it as "target closed" keep working.
-const SESSION_GONE_CODE: i64 = -32001;
-const SESSION_GONE_MESSAGE: &str = "Session with given id not found.";
-
-/// Fail the pending requests sent to a detached session, returning the number drained.
-fn fail_session_pending(pending: &PendingMap, session: &str) -> usize {
-    let requests: Vec<PendingRequest> = {
-        let mut pending = lock_pending(pending);
-        let ids: Vec<u64> = pending
-            .iter()
-            .filter(|(_, request)| request.session.as_deref() == Some(session))
-            .map(|(id, _)| *id)
-            .collect();
-        ids.iter().filter_map(|id| pending.remove(id)).collect()
-    };
-    let count = requests.len();
-    for request in requests {
-        drop(request.sender.send(Err(Error::Cdp {
-            method: None,
-            code: Some(SESSION_GONE_CODE),
-            message: SESSION_GONE_MESSAGE.into(),
-        })));
-    }
-    count
-}
 
 /// Largest CDP message accepted, matching Puppeteer. Full-page screenshots and
 /// response bodies are base64 JSON and routinely exceed tens of MiB. tungstenite
@@ -476,232 +270,6 @@ impl Transport {
         receiver
     }
 
-    /// Create a new transport connecting to Chrome via WebSocket
-    pub async fn new(child: Child, ws_url: &str) -> Result<Self> {
-        Self::new_with_options(child, ws_url, None, 30, false).await
-    }
-
-    /// Connect the WebSocket and return the stream.
-    async fn ws_connect(ws_url: &str, timeout: Duration) -> Result<WsStream> {
-        if !ws_url.starts_with("ws://") {
-            return Err(Error::transport(format!(
-                "Invalid WebSocket URL (expected ws://...): {}",
-                ws_url
-            )));
-        }
-        let config = WebSocketConfig::default()
-            .max_message_size(Some(MAX_CDP_MESSAGE_BYTES))
-            .max_frame_size(Some(MAX_CDP_MESSAGE_BYTES));
-        let (stream, _resp) = tokio::time::timeout(
-            timeout,
-            connect_async_with_config(ws_url, Some(config), false),
-        )
-        .await
-        .map_err(|_| Error::Timeout("WebSocket connection exceeded its deadline".into()))?
-        .map_err(|e| Error::transport(format!("WebSocket connect failed: {}", e)))?;
-        tracing::debug!("WebSocket connected to {}", ws_url);
-        Ok(stream)
-    }
-
-    /// Spawn the reader task and build the Transport from a connected stream.
-    fn build(
-        child: Option<Child>,
-        stream: WsStream,
-        proxy_auth: Option<(String, String)>,
-        cdp_timeout_secs: u64,
-        filter_cdp: bool,
-        strip_x_client_data: bool,
-    ) -> Result<Self> {
-        let mut child = child.map(ChildCleanupGuard::new);
-        let shutdown_socket = duplicate_socket(&stream)?;
-        let child = child.as_mut().map(ChildCleanupGuard::take).transpose()?;
-        let cmd_timeout = std::time::Duration::from_secs(cdp_timeout_secs);
-        tracing::debug!("CDP timeout set to {}s", cdp_timeout_secs);
-
-        let (sink, source) = stream.split();
-        let writer: SharedSink = Arc::new(Mutex::new(sink));
-
-        let pending: Arc<PendingMap> = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let completion_routes = Arc::new(CompletionRoutes::default());
-        let closed = Arc::new(AtomicBool::new(false));
-        let reason = CloseReason::default();
-        let lifecycle = LifecycleSink::default();
-        let (reader_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-        let event_tx = reader_events.downgrade();
-        let (commands, command_queue) = mpsc::unbounded_channel();
-        let (replies, reply_queue) = mpsc::unbounded_channel();
-
-        let pending_clone = Arc::clone(&pending);
-        let response_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let reader_responses = Arc::clone(&response_routes);
-        let request_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let reader_requests = Arc::clone(&request_routes);
-        let idle_routes = Arc::new(std::sync::Mutex::new(HashMap::new()));
-        let reader_idle = Arc::clone(&idle_routes);
-        let request_base_auth = proxy_auth.is_some();
-        // Construct the guard before spawning: abort-before-first-poll must
-        // still shut down the socket while Transport retains the writer.
-        let writer_failed = Arc::new(tokio::sync::Notify::new());
-        let completion_state = ReaderCompletionState {
-            closed: Arc::clone(&closed),
-            reason: Arc::clone(&reason),
-            shutdown: SocketShutdownGuard(Arc::clone(&shutdown_socket)),
-            lifecycle: Arc::clone(&lifecycle),
-            writer_failed: Arc::clone(&writer_failed),
-        };
-        let writer_state = writer::WriterState {
-            closed: Arc::clone(&closed),
-            reason,
-            write_timeout: cmd_timeout,
-            shutdown: SocketShutdownGuard(Arc::clone(&shutdown_socket)),
-            failed: writer_failed,
-        };
-        let writer_handle = tokio::spawn(writer::writer_loop(
-            Arc::clone(&writer),
-            reply_queue,
-            command_queue,
-            writer_state,
-        ));
-        let reader_handle = tokio::spawn(async move {
-            Self::reader_loop(
-                source,
-                pending_clone,
-                completion_state,
-                reader_events,
-                replies,
-                reader_idle,
-                FetchInterceptor {
-                    responses: reader_responses,
-                    requests: reader_requests,
-                    proxy_auth,
-                    strip: strip_x_client_data,
-                },
-            )
-            .await;
-        });
-
-        Ok(Self {
-            target_discovery: tokio::sync::OnceCell::new(),
-            child: std::sync::Mutex::new(child),
-            runtime: std::sync::Mutex::new(None),
-            browser_endpoint: None,
-            closed,
-            writer,
-            commands,
-            writer_handle,
-            lifecycle,
-            shutdown_socket,
-            next_id: AtomicU64::new(COMMAND_ID_MIN),
-            pending,
-            completion_routes,
-            event_tx,
-            request_routes,
-            response_routes,
-            idle_routes,
-            request_base_auth,
-            request_base_strip: strip_x_client_data,
-            cmd_timeout,
-            reader_handle,
-            filter_cdp,
-        })
-    }
-
-    /// Create a new transport with proxy auth, X-Client-Data stripping and
-    /// configurable CDP timeout.
-    pub async fn new_with_options(
-        child: Child,
-        ws_url: &str,
-        proxy_auth: Option<(String, String)>,
-        cdp_timeout_secs: u64,
-        strip_x_client_data: bool,
-    ) -> Result<Self> {
-        Self::new_with_runtime_options(
-            child,
-            ws_url,
-            proxy_auth,
-            cdp_timeout_secs,
-            true,
-            strip_x_client_data,
-            None,
-        )
-        .await
-    }
-
-    pub(crate) async fn new_with_runtime_options(
-        child: Child,
-        ws_url: &str,
-        proxy_auth: Option<(String, String)>,
-        cdp_timeout_secs: u64,
-        filter_cdp: bool,
-        strip_x_client_data: bool,
-        runtime: Option<RuntimeDirectory>,
-    ) -> Result<Self> {
-        let mut child = ChildCleanupGuard::new(child);
-        let stream = Self::ws_connect(ws_url, Duration::from_secs(cdp_timeout_secs)).await?;
-        let mut transport = Self::build(
-            Some(child.take()?),
-            stream,
-            proxy_auth,
-            cdp_timeout_secs,
-            filter_cdp,
-            strip_x_client_data,
-        )?;
-        transport.browser_endpoint = Some(ws_url.to_owned());
-        *transport
-            .runtime
-            .get_mut()
-            .expect("new runtime mutex is unpoisoned") = runtime;
-        Ok(transport)
-    }
-
-    /// Connect to an existing Chrome instance at the given WebSocket URL.
-    /// Does not manage a Chrome process — caller owns the browser lifecycle.
-    /// `cdp_timeout_secs` bounds connection establishment and each CDP command.
-    pub async fn connect(ws_url: &str, cdp_timeout_secs: u64) -> Result<Self> {
-        Self::connect_with_options(ws_url, cdp_timeout_secs, true, false).await
-    }
-
-    /// Connect to an existing Chrome with full options control. Use
-    /// `filter_cdp = false` to allow `Runtime.enable` and friends — needed
-    /// when driving a user-owned browser where stealth filtering is unwanted.
-    /// `cdp_timeout_secs` bounds connection establishment and each CDP command.
-    pub async fn connect_with_options(
-        ws_url: &str,
-        cdp_timeout_secs: u64,
-        filter_cdp: bool,
-        strip_x_client_data: bool,
-    ) -> Result<Self> {
-        Self::connect_with_proxy_auth(
-            ws_url,
-            None,
-            cdp_timeout_secs,
-            filter_cdp,
-            strip_x_client_data,
-        )
-        .await
-    }
-
-    /// Connect with proxy credentials answered by the reader, as on launch.
-    pub(crate) async fn connect_with_proxy_auth(
-        ws_url: &str,
-        proxy_auth: Option<(String, String)>,
-        cdp_timeout_secs: u64,
-        filter_cdp: bool,
-        strip_x_client_data: bool,
-    ) -> Result<Self> {
-        let stream = Self::ws_connect(ws_url, Duration::from_secs(cdp_timeout_secs)).await?;
-        let mut transport = Self::build(
-            None,
-            stream,
-            proxy_auth,
-            cdp_timeout_secs,
-            filter_cdp,
-            strip_x_client_data,
-        )?;
-        transport.browser_endpoint = Some(ws_url.to_owned());
-        Ok(transport)
-    }
-
     /// Refuse commands the stealth filter blocks with an error, not an empty result.
     fn check_filter(&self, method: &str) -> Result<()> {
         if self.filter_cdp && is_blocked(method) {
@@ -782,7 +350,8 @@ impl Transport {
             (Some(session), true) => {
                 let mut routes = lock_completions(&self.completion_routes);
                 if routes.contains_key(session.as_ref()) {
-                    return Err(Error::cdp_msg(
+                    return Err(Error::coded(
+                        crate::ErrorCode::Busy,
                         "Native command completion is already owned for this session",
                     ));
                 }
@@ -992,7 +561,8 @@ impl Transport {
             return Err(Error::transport("CDP transport is closed"));
         }
         if routes.contains_key(session) {
-            return Err(Error::cdp_msg(
+            return Err(Error::coded(
+                crate::ErrorCode::Busy,
                 "Request interception already owned for this session",
             ));
         }
@@ -1029,148 +599,6 @@ impl Transport {
             .unwrap_or_else(|e| e.into_inner())
             .remove(session);
     }
-
-    pub(crate) async fn wait_for_owned_exit(&self, timeout: Duration) -> Result<bool> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            let exited = match self
-                .child
-                .lock()
-                .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?
-                .as_mut()
-            {
-                None => true,
-                Some(child) => child.try_wait()?.is_some(),
-            };
-            if exited {
-                return Ok(true);
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Ok(false);
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-    }
-
-    /// Close the transport and terminate any owned Chrome process.
-    ///
-    /// Waiting for the writer and sending the best-effort WebSocket close frame
-    /// share the configured command timeout. TCP shutdown follows that attempt,
-    /// independently of the writer lock, and also occurs if this future is
-    /// cancelled. Pending requests are failed and owned cleanup is attempted
-    /// even if the deadline expires. Borrowed Chrome processes are not terminated.
-    /// Reaping Chrome and removing its runtime directory run on a blocking thread.
-    pub async fn close(&self) -> Result<()> {
-        self.closed.store(true, Ordering::Release);
-        interception::close_routes(&self.request_routes, &self.response_routes);
-        // If this future is cancelled during the graceful attempt, shutdown
-        // must still happen without waiting for the writer or the reader task.
-        let shutdown = SocketShutdownGuard(Arc::clone(&self.shutdown_socket));
-        // Bound both writer acquisition and the best-effort close-frame write
-        // so a stalled sink cannot prevent pending failure or owned cleanup.
-        match tokio::time::timeout(self.cmd_timeout, async {
-            self.writer.lock().await.send(Message::Close(None)).await
-        })
-        .await
-        {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::debug!("WebSocket close frame was not sent: {}", error);
-            }
-            Err(error) => {
-                tracing::debug!("WebSocket close frame exceeded its deadline: {}", error);
-            }
-        }
-        drop(shutdown);
-        self.stop_tasks("CDP transport closed");
-        self.cleanup_owned_blocking().await
-    }
-
-    fn stop_tasks(&self, context: &str) {
-        self.reader_handle.abort();
-        self.writer_handle.abort();
-        network_idle::disconnect(&self.idle_routes);
-        fail_pending(&self.pending, context);
-    }
-
-    /// Move owned cleanup off the async runtime; leftovers are restored on failure
-    /// so a later attempt (including Drop) can retry.
-    async fn cleanup_owned_blocking(&self) -> Result<()> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?
-            .take();
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| Error::transport("Chrome runtime mutex poisoned"))?
-            .take();
-        if child.is_none() && runtime.is_none() {
-            return Ok(());
-        }
-        let (result, child, runtime) = tokio::task::spawn_blocking(move || {
-            let result = cleanup_parts(&mut child, &mut runtime);
-            (result, child, runtime)
-        })
-        .await
-        .map_err(|error| Error::transport(format!("Owned Chrome cleanup task failed: {error}")))?;
-        if child.is_some() {
-            if let Ok(mut slot) = self.child.lock() {
-                *slot = child;
-            }
-        }
-        if runtime.is_some() {
-            if let Ok(mut slot) = self.runtime.lock() {
-                *slot = runtime;
-            }
-        }
-        result
-    }
-
-    /// Synchronous owned cleanup, for Drop where awaiting is impossible.
-    pub(crate) fn cleanup_owned(&self) -> Result<()> {
-        let mut child = self
-            .child
-            .lock()
-            .map_err(|_| Error::transport("Chrome ownership mutex poisoned"))?;
-        let mut runtime = self
-            .runtime
-            .lock()
-            .map_err(|_| Error::transport("Chrome runtime mutex poisoned"))?;
-        cleanup_parts(&mut child, &mut runtime)
-    }
 }
-
-/// Reap the child, then remove the runtime directory. Each part becomes `None`
-/// once cleaned, so a failed attempt keeps what still needs cleanup.
-fn cleanup_parts(child: &mut Option<Child>, runtime: &mut Option<RuntimeDirectory>) -> Result<()> {
-    if let Some(process) = child.as_mut() {
-        stop_child(process)?;
-        *child = None;
-    }
-    if let Some(directory) = runtime.as_mut() {
-        directory.cleanup()?;
-        *runtime = None;
-    }
-    Ok(())
-}
-
-impl Drop for Transport {
-    fn drop(&mut self) {
-        self.closed.store(true, Ordering::Release);
-        interception::close_routes(&self.request_routes, &self.response_routes);
-        let _ = self.shutdown_socket.shutdown(std::net::Shutdown::Both);
-        self.stop_tasks("CDP transport dropped");
-
-        if let Err(error) = self.cleanup_owned() {
-            tracing::warn!(
-                "Failed to clean up Chrome while dropping transport: {}",
-                error
-            );
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests;

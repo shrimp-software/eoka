@@ -413,8 +413,17 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
         }
         break result?;
     };
-    if result.get("exceptionDetails").is_some() {
-        return Err(Error::cdp_msg("Invalid locator query"));
+    if let Some(exception) = result.get("exceptionDetails") {
+        let stale = exception["exception"]["description"]
+            .as_str()
+            .is_some_and(|text| text.contains(WORLD_MISMATCH));
+        // A world that stayed stale after three attempts is a page-state
+        // race; any other exception means the query itself is invalid.
+        return Err(if stale {
+            Error::cdp_msg("Invalid locator query")
+        } else {
+            Error::coded(ErrorCode::InvalidArgument, "invalid locator query")
+        });
     }
     node.object = result["result"]["objectId"]
         .as_str()

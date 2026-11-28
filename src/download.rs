@@ -82,7 +82,10 @@ impl DownloadWatch {
         })?;
         let directory = std::fs::canonicalize(directory)?;
         if !directory.is_dir() {
-            return Err(Error::cdp_msg("Download directory is not a directory"));
+            return Err(Error::coded(
+                crate::ErrorCode::InvalidArgument,
+                "Download directory is not a directory",
+            ));
         }
         let watch = Self {
             events: transport.subscribe(),

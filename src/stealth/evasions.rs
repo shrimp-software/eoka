@@ -16,13 +16,6 @@ pub const NATIVE_TOSTRING_EVASION: &str = include_str!("evasions/scripts/native_
 /// (only replaced where the native getter still reports true).
 pub const WEBDRIVER_EVASION: &str = include_str!("evasions/scripts/webdriver.js");
 
-/// Formerly proxied `window.document` to hide chromedriver markers. Now empty.
-#[deprecated(
-    since = "0.11.0",
-    note = "eoka produces no CDP markers; the script is empty"
-)]
-pub const CDP_EVASION: &str = "";
-
 /// Chrome runtime object. Stock Chrome (headless/new included) provides
 /// `window.chrome` natively; this only fills it where missing, matching a
 /// real, extension-less page: `Object.keys(window.chrome)` is
@@ -67,13 +60,6 @@ pub const FINGERPRINT_EVASION: &str = concat!(
     include_str!("evasions/scripts/audio.js"),
 );
 
-/// Formerly stripped STUN/TURN servers from `RTCPeerConnection`. Now empty.
-#[deprecated(
-    since = "0.11.0",
-    note = "WebRTC is handled by a Chrome launch flag; the script is empty"
-)]
-pub const WEBRTC_EVASION: &str = "";
-
 /// Speech synthesis - headless Chrome has 0 voices, real Chrome has many.
 /// The fallback list is fingerprint data (`__EOKA_SPEECH_VOICES__`, JSON):
 /// platform-aware and stable per identity.
@@ -101,13 +87,6 @@ pub const FONTS_EVASION: &str = include_str!("evasions/scripts/fonts.js");
 /// The map is fingerprint data (`__EOKA_KEYBOARD_MAP__`, JSON or null):
 /// US ANSI, matching the identity's en-US locale.
 pub const KEYBOARD_EVASION: &str = include_str!("evasions/scripts/keyboard.js");
-
-/// Formerly approximated the timezone in `Date` and `Intl`. Now empty.
-#[deprecated(
-    since = "0.11.0",
-    note = "the timezone is applied natively by Emulation.setTimezoneOverride; the script is empty"
-)]
-pub const TIMEZONE_EVASION: &str = "";
 
 /// Common timezones for random selection (balanced across regions)
 pub(crate) const COMMON_TIMEZONES: &[&str] = &[
@@ -148,7 +127,6 @@ pub fn build_evasion_script_for(config: &StealthConfig, fp: &Fingerprint) -> Str
     ];
 
     // Each fingerprint flag gates only its own surface.
-    // `aggressive_cdp_evasion` no longer adds anything (see `CDP_EVASION`).
     for (enabled, script) in [
         (config.webgl_spoof, WEBGL_EVASION),
         (config.canvas_spoof, CANVAS_EVASION),

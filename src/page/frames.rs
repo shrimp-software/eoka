@@ -6,7 +6,8 @@ use serde_json::{json, Value};
 use super::{FrameInfo, Page, ShadowClickReceipt};
 use crate::cdp::ObjectGroup;
 use crate::cdp::{Frame, FrameTree, RuntimeEvaluateResult, Session, TargetGetTargets};
-use crate::error::{Error, Result};
+use crate::error::classify::frame_discovery_raced;
+use crate::error::{Error, ErrorCode, Result};
 
 mod shadow;
 
@@ -23,13 +24,6 @@ struct FrameTarget {
     r#type: String,
     url: String,
     parent_frame_id: Option<String>,
-}
-
-fn frame_discovery_raced(error: &Error) -> bool {
-    matches!(error, Error::Cdp { message, .. } if [
-        "No target with given id found", "Session with given id not found",
-        "Not attached to an active page", "No frame with given id found",
-    ].iter().any(|text| message.contains(text)))
 }
 
 struct AttachedFrame(Session);
@@ -61,9 +55,12 @@ struct Snapshot {
 
 impl Snapshot {
     fn get(&self, id: &str) -> Result<&Entry> {
-        self.entries
-            .get(id)
-            .ok_or_else(|| Error::cdp_msg(format!("Frame not in this page: {id}")))
+        self.entries.get(id).ok_or_else(|| {
+            Error::coded(
+                ErrorCode::PreconditionFailed,
+                format!("Frame not in this page: {id}"),
+            )
+        })
     }
 
     async fn capture(page: &Page) -> Result<Self> {
@@ -107,7 +104,10 @@ impl Snapshot {
                 snapshot.attachments.push(AttachedFrame(session.clone()));
                 tree = session.get_frame_tree().await?;
                 if tree.frame.id != id {
-                    return Err(Error::cdp_msg("Frame target changed while attaching"));
+                    return Err(Error::coded(
+                        ErrorCode::PreconditionFailed,
+                        "Frame target changed while attaching",
+                    ));
                 }
             }
             for target in targets
@@ -248,7 +248,10 @@ impl Page {
         hit_test: bool,
     ) -> Result<(f64, f64)> {
         if !x.is_finite() || !y.is_finite() {
-            return Err(Error::cdp_msg("Frame coordinates must be finite"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "Frame coordinates must be finite",
+            ));
         }
         let snapshot = Snapshot::capture(self).await?;
         let mut id = frame_id;
@@ -263,7 +266,8 @@ impl Page {
                     .await?,
             )?;
             if x < 0.0 || y < 0.0 || x >= size[0] || y >= size[1] {
-                return Err(Error::cdp_msg(
+                return Err(Error::coded(
+                    ErrorCode::TargetUnavailable,
                     "Frame point is outside a viewport in its ancestor chain",
                 ));
             }
@@ -281,9 +285,12 @@ impl Page {
                 "backendNodeId": owner.backend_node_id, "executionContextId": parent_context,
                 "objectGroup":objects.name,
             })).await?;
-            let object_id = resolved["object"]["objectId"]
-                .as_str()
-                .ok_or_else(|| Error::cdp_msg("Frame owner could not be resolved"))?;
+            let object_id = resolved["object"]["objectId"].as_str().ok_or_else(|| {
+                Error::coded(
+                    ErrorCode::TargetUnavailable,
+                    "Frame owner could not be resolved",
+                )
+            })?;
             let model: Value = parent
                 .session
                 .send("DOM.getBoxModel", &json!({"objectId":object_id}))
@@ -297,7 +304,10 @@ impl Page {
                 || (quad[5] - quad[7]).abs() > 1e-6
                 || (quad[6] - quad[0]).abs() > 1e-6
             {
-                return Err(Error::cdp_msg("Unsupported rendered frame owner transform"));
+                return Err(Error::coded(
+                    ErrorCode::PreconditionFailed,
+                    "Unsupported rendered frame owner transform",
+                ));
             }
             let result: Result<RuntimeEvaluateResult> = parent
                 .session
@@ -318,12 +328,16 @@ impl Page {
                 || geometry.scale_x <= 0.0
                 || geometry.scale_y <= 0.0
             {
-                return Err(Error::cdp_msg(
+                return Err(Error::coded(
+                    ErrorCode::PreconditionFailed,
                     "Unsupported transformed or hidden frame owner",
                 ));
             }
             if (geometry.width - size[0]).abs() > 1.0 || (geometry.height - size[1]).abs() > 1.0 {
-                return Err(Error::cdp_msg("Frame owner and viewport dimensions differ"));
+                return Err(Error::coded(
+                    ErrorCode::PreconditionFailed,
+                    "Frame owner and viewport dimensions differ",
+                ));
             }
             x = geometry.x + x * geometry.scale_x;
             y = geometry.y + y * geometry.scale_y;
@@ -341,8 +355,9 @@ impl Page {
                     )
                     .await?;
                 if !self.eval_impl::<bool>(result)? {
-                    return Err(Error::cdp_msg(
-                        "Frame input point is covered by another element",
+                    return Err(Error::coded(
+                        ErrorCode::ActionabilityChanged,
+                        "an iframe owner is covered",
                     ));
                 }
             }
@@ -372,7 +387,10 @@ impl Page {
         expression: &str,
     ) -> Result<T> {
         if frame_selector.len() > 4096 {
-            return Err(Error::cdp_msg("Frame selector exceeds 4096 bytes"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "Frame selector exceeds 4096 bytes",
+            ));
         }
         let root = self.session.get_frame_tree().await?.frame.id;
         let context = self.session.create_isolated_world(&root).await?;
@@ -397,9 +415,12 @@ impl Page {
             .session
             .send("DOM.describeNode", &json!({"objectId":object_id}))
             .await?;
-        let frame_id = described["node"]["frameId"]
-            .as_str()
-            .ok_or_else(|| Error::cdp_msg("Selected frame has no attached document"))?;
+        let frame_id = described["node"]["frameId"].as_str().ok_or_else(|| {
+            Error::coded(
+                ErrorCode::PreconditionFailed,
+                "Selected frame has no attached document",
+            )
+        })?;
         objects.release().await?;
         self.evaluate_in_frame_id(frame_id, expression).await
     }
@@ -442,7 +463,10 @@ impl Page {
         index: usize,
     ) -> Result<[f64; 8]> {
         if index >= 64 || selector.len() > 4096 {
-            return Err(Error::cdp_msg("Frame quad selection limit exceeded"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "Frame quad selection limit exceeded",
+            ));
         }
         let snapshot = Snapshot::capture(self).await?;
         let entry = snapshot.get(frame_id)?;
@@ -476,7 +500,10 @@ impl Page {
             })
             .sum::<f64>();
         if quad.iter().any(|v| !v.is_finite()) || !area.is_finite() || area.abs() < 1e-8 {
-            return Err(Error::cdp_msg("Degenerate frame content quad"));
+            return Err(Error::coded(
+                ErrorCode::TargetUnavailable,
+                "Degenerate frame content quad",
+            ));
         }
         objects.release().await?;
         Ok(quad)
@@ -612,21 +639,5 @@ mod tests {
             assert_eq!(observed.1, vec![observed.0.clone()]);
             peer.abort();
         }
-    }
-
-    #[test]
-    fn only_known_discovery_races_are_retried() {
-        assert!(frame_discovery_raced(&Error::cdp_msg(
-            "No target with given id found"
-        )));
-        assert!(frame_discovery_raced(&Error::cdp_msg(
-            "Session with given id not found"
-        )));
-        assert!(!frame_discovery_raced(&Error::cdp_msg(
-            "Invalid parameters"
-        )));
-        assert!(!frame_discovery_raced(&Error::Decode(
-            "No target with given id found".into()
-        )));
     }
 }

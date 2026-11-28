@@ -175,7 +175,6 @@ pub struct NetworkRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkResponse {
-    pub url: String,
     pub status: i32,
     pub status_text: String,
     #[serde(default)]
@@ -205,7 +204,6 @@ pub struct NetworkResponseReceivedEvent {
 #[serde(rename_all = "camelCase")]
 pub struct NetworkLoadingFinishedEvent {
     pub request_id: String,
-    pub timestamp: f64,
     pub encoded_data_length: i64,
 }
 

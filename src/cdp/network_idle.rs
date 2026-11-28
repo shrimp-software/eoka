@@ -140,9 +140,12 @@ impl IdleState {
 
     async fn wait(&self, idle: Duration, timeout: Duration) -> Result<()> {
         let start = Instant::now();
-        let deadline = start
-            .checked_add(timeout)
-            .ok_or_else(|| Error::cdp_msg("Network idle timeout is too large"))?;
+        let deadline = start.checked_add(timeout).ok_or_else(|| {
+            Error::coded(
+                crate::ErrorCode::InvalidArgument,
+                "Network idle timeout is too large",
+            )
+        })?;
         let mut changes = self.changed.subscribe();
         loop {
             let wake_at = {
@@ -151,7 +154,10 @@ impl IdleState {
                     return Err(Error::transport(reason));
                 }
                 if !state.trusted {
-                    return Err(Error::cdp_msg("Network idle tracking requires a full navigation or reload after attachment"));
+                    return Err(Error::coded(
+                        crate::ErrorCode::PreconditionFailed,
+                        "Network idle tracking requires a full navigation or reload after attachment",
+                    ));
                 }
                 // A busy executor may resume after both the quiet timer and deadline.
                 // Do not turn that expired wait into a successful idle observation.

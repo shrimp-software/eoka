@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{frame_discovery_raced, Page, ShadowClickReceipt, Snapshot};
+use super::{Page, ShadowClickReceipt, Snapshot};
 use crate::cdp::ObjectGroup;
 use crate::cdp::Session;
-use crate::error::{Error, Result};
+use crate::error::classify::{frame_discovery_raced, node_left_document};
+use crate::error::{Error, ErrorCode, Result};
 use crate::stealth::human::Human;
 use crate::MouseButton;
 
@@ -60,21 +61,13 @@ impl Drop for HeldInputGuard {
 
 /// Transient CDP failures during discovery, navigation or frame mapping are
 /// retried until the shadow deadline; protocol errors such as an invalid
-/// selector propagate immediately.
+/// selector propagate immediately. Frame mapping reports an unresolvable
+/// owner or an out-of-viewport point as [`ErrorCode::TargetUnavailable`].
 fn shadow_retryable(error: &Error) -> bool {
-    if frame_discovery_raced(error) || crate::page::is_navigation_race(error) {
-        return true;
-    }
-    match error {
-        Error::Cdp { message, .. } => [
-            "Node with given id does not belong to the document",
-            "Frame point is outside a viewport in its ancestor chain",
-            "Frame owner could not be resolved",
-        ]
-        .iter()
-        .any(|text| message.contains(text)),
-        _ => false,
-    }
+    frame_discovery_raced(error)
+        || crate::page::is_navigation_race(error)
+        || node_left_document(error)
+        || error.code() == Some(ErrorCode::TargetUnavailable)
 }
 
 impl Page {
@@ -124,7 +117,8 @@ impl Page {
     ) -> Result<ShadowClickReceipt> {
         let selector = selector.trim();
         if selector.is_empty() || selector.len() > SHADOW_SELECTOR_LIMIT {
-            return Err(Error::cdp_msg(
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
                 "Shadow selector must be 1..=4096 characters",
             ));
         }
@@ -339,7 +333,10 @@ impl Page {
             .map(|quad| quad.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
             .unwrap_or_default();
         if quad.len() < 8 || quad.iter().any(|value| !value.is_finite()) {
-            return Err(Error::cdp_msg("Shadow node has no finite content quad"));
+            return Err(Error::coded(
+                ErrorCode::PreconditionFailed,
+                "Shadow node has no finite content quad",
+            ));
         }
         let area = (0..4)
             .map(|index| {
@@ -348,7 +345,10 @@ impl Page {
             })
             .sum::<f64>();
         if !area.is_finite() || area.abs() < 1e-8 {
-            return Err(Error::cdp_msg("Shadow node content quad is degenerate"));
+            return Err(Error::coded(
+                ErrorCode::PreconditionFailed,
+                "Shadow node content quad is degenerate",
+            ));
         }
         Ok((
             (quad[0] + quad[2] + quad[4] + quad[6]) / 4.0,
