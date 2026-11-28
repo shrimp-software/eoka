@@ -298,8 +298,14 @@ fn fail_pending(pending: &PendingMap, context: &str) -> usize {
     count
 }
 
-/// Fail the pending requests sent to one session, returning the number drained.
-fn fail_session_pending(pending: &PendingMap, session: &str, context: &str) -> usize {
+/// Chrome's reply to a command for a session that no longer exists. Pending
+/// commands of a detached session fail with the same error, so callers that
+/// already classify it as "target closed" keep working.
+const SESSION_GONE_CODE: i64 = -32001;
+const SESSION_GONE_MESSAGE: &str = "Session with given id not found.";
+
+/// Fail the pending requests sent to a detached session, returning the number drained.
+fn fail_session_pending(pending: &PendingMap, session: &str) -> usize {
     let requests: Vec<PendingRequest> = {
         let mut pending = lock_pending(pending);
         let ids: Vec<u64> = pending
@@ -311,7 +317,11 @@ fn fail_session_pending(pending: &PendingMap, session: &str, context: &str) -> u
     };
     let count = requests.len();
     for request in requests {
-        drop(request.sender.send(Err(Error::transport(context))));
+        drop(request.sender.send(Err(Error::Cdp {
+            method: None,
+            code: Some(SESSION_GONE_CODE),
+            message: SESSION_GONE_MESSAGE.into(),
+        })));
     }
     count
 }

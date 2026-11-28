@@ -33,7 +33,16 @@ async fn commands_on_a_closed_tab_fail_at_detachment_not_at_the_deadline() {
         .await
         .unwrap();
     let error = never.await.unwrap().unwrap_err();
-    assert!(error.to_string().contains("detached"), "{error}");
+    assert!(
+        matches!(
+            error,
+            eoka::Error::Cdp {
+                code: Some(-32001),
+                ..
+            }
+        ),
+        "{error:?}"
+    );
     assert!(
         started.elapsed() < Duration::from_secs(3),
         "{:?}",

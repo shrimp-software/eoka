@@ -238,11 +238,7 @@ fn session_lifecycle(
     match method {
         "Target.detachedFromTarget" => {
             if let Some(detached) = params["sessionId"].as_str() {
-                fail_session_pending(
-                    pending,
-                    detached,
-                    "CDP session detached before the command completed",
-                );
+                fail_session_pending(pending, detached);
             }
             if let Some(target_id) = params["targetId"].as_str() {
                 notify(TargetLifecycle::Detached {
@@ -259,11 +255,7 @@ fn session_lifecycle(
         }
         "Inspector.detached" => {
             if let Some(session) = session {
-                fail_session_pending(
-                    pending,
-                    session,
-                    "CDP session detached before the command completed",
-                );
+                fail_session_pending(pending, session);
             }
         }
         // Inspector.targetCrashed is deliberately not handled: the target and

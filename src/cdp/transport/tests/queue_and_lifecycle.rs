@@ -123,8 +123,12 @@ async fn commands_on_a_detached_session_fail_without_waiting_for_their_deadline(
             .await
             .expect("a detached session must fail its commands at once")
             .unwrap_err();
-        assert!(matches!(error, Error::Transport { .. }), "{error:?}");
-        assert!(error.to_string().contains("detached"), "{error}");
+        // The same error Chrome returns for a command to a missing session.
+        assert!(
+            matches!(&error, Error::Cdp { method: Some(method), code: Some(-32001), message }
+                if method == "Fixture.detached" && message == "Session with given id not found."),
+            "{error:?}"
+        );
         let alive = sent.iter().find(|c| c["sessionId"] == "alive").unwrap();
         peer.send(Message::Text(
             json!({"id":alive["id"],"result":{"ok":true}})

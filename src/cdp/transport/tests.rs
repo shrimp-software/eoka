@@ -757,7 +757,16 @@ async fn completion_receipt_is_released_by_target_session_detachment() {
     let result = tokio::time::timeout(Duration::from_secs(2), response.wait())
         .await
         .unwrap();
-    assert!(matches!(result, Err(Error::Transport { .. })));
+    assert!(
+        matches!(
+            result,
+            Err(Error::Cdp {
+                code: Some(-32001),
+                ..
+            })
+        ),
+        "{result:?}"
+    );
     assert!(lock_pending(&transport.pending).is_empty());
     assert!(lock_completions(&transport.completion_routes).is_empty());
     transport.close().await.unwrap();
