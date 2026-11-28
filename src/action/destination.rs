@@ -4,7 +4,8 @@ use futures_util::future::{select, Either};
 use serde_json::{json, Value};
 use tokio::sync::broadcast;
 
-use crate::{cdp::transport::CdpMessage, Destination, Error, Expectation, Page, Result};
+use crate::error::classify::{cdp_failure, CdpFailure};
+use crate::{cdp::transport::CdpMessage, Destination, Error, ErrorCode, Expectation, Page, Result};
 
 pub(super) struct DestinationWatch {
     origin: Page,
@@ -23,14 +24,8 @@ impl DestinationWatch {
             .transport()
             .ensure_target_discovery()
             .await?;
-        let targets: Value = origin
-            .session()
-            .transport()
-            .send("Target.getTargets", &json!({}))
-            .await?;
-        let existing = targets["targetInfos"]
-            .as_array()
-            .ok_or_else(|| Error::cdp_msg("Target list unavailable"))?
+        let existing = target_infos(origin)
+            .await?
             .iter()
             .filter_map(|info| info["targetId"].as_str().map(str::to_owned))
             .collect();
@@ -46,17 +41,8 @@ impl DestinationWatch {
 
     /// Rebuilds candidates and the origin's liveness from `Target.getTargets`.
     async fn rescan(&mut self) -> Result<()> {
-        let targets: Value = self
-            .origin
-            .session()
-            .transport()
-            .send("Target.getTargets", &json!({}))
-            .await?;
-        let infos = targets["targetInfos"]
-            .as_array()
-            .ok_or_else(|| Error::cdp_msg("Target list unavailable"))?;
         let mut live = HashSet::new();
-        for info in infos {
+        for info in target_infos(&self.origin).await? {
             let Some(id) = info["targetId"].as_str() else {
                 continue;
             };
@@ -64,21 +50,25 @@ impl DestinationWatch {
             if info["type"] == "page"
                 && info["openerId"] == self.origin.target_id()
                 && !self.existing.contains(id)
-                && !self.candidates.contains_key(id)
             {
-                if self.candidates.len() >= 32 {
-                    return Err(Error::coded(
-                        crate::ErrorCode::AmbiguousDestination,
-                        "too many new child tabs",
-                    ));
-                }
-                self.candidates.insert(id.to_owned(), None);
+                self.add_candidate(id)?;
             }
         }
         self.candidates.retain(|id, _| live.contains(id));
         if !live.contains(self.origin.target_id()) {
             self.origin_closed = true;
         }
+        Ok(())
+    }
+
+    fn add_candidate(&mut self, id: &str) -> Result<()> {
+        if self.candidates.len() >= 32 && !self.candidates.contains_key(id) {
+            return Err(Error::coded(
+                ErrorCode::AmbiguousDestination,
+                "too many new child tabs",
+            ));
+        }
+        self.candidates.entry(id.into()).or_insert(None);
         Ok(())
     }
 
@@ -94,13 +84,7 @@ impl DestinationWatch {
                             .as_str()
                             .filter(|id| !self.existing.contains(*id))
                         {
-                            if self.candidates.len() >= 32 && !self.candidates.contains_key(id) {
-                                return Err(Error::coded(
-                                    crate::ErrorCode::AmbiguousDestination,
-                                    "too many new child tabs",
-                                ));
-                            }
-                            self.candidates.entry(id.into()).or_insert(None);
+                            self.add_candidate(id)?;
                         }
                     }
                 }
@@ -123,12 +107,7 @@ impl DestinationWatch {
                     tracing::debug!(skipped, "destination events lagged; rescanning targets");
                     self.rescan().await?;
                 }
-                Err(broadcast::error::TryRecvError::Closed) => {
-                    return Err(Error::transport_io(
-                        "Destination event stream lost",
-                        std::io::Error::other(broadcast::error::TryRecvError::Closed),
-                    ))
-                }
+                Err(broadcast::error::TryRecvError::Closed) => return Err(stream_lost()),
             }
         }
         let mut matches = Vec::new();
@@ -165,12 +144,31 @@ impl DestinationWatch {
         }
         if matches.len() > 1 {
             return Err(Error::coded(
-                crate::ErrorCode::AmbiguousDestination,
+                ErrorCode::AmbiguousDestination,
                 "multiple pages match; select a tab explicitly",
             ));
         }
         Ok(matches.pop())
     }
+}
+
+async fn target_infos(page: &Page) -> Result<Vec<Value>> {
+    let mut targets: Value = page
+        .session()
+        .transport()
+        .send("Target.getTargets", &json!({}))
+        .await?;
+    match targets["targetInfos"].take() {
+        Value::Array(infos) => Ok(infos),
+        _ => Err(Error::cdp_msg("Target list unavailable")),
+    }
+}
+
+fn stream_lost() -> Error {
+    Error::transport_io(
+        "Destination event stream lost",
+        std::io::Error::other(broadcast::error::RecvError::Closed),
+    )
 }
 
 enum Observation {
@@ -191,12 +189,7 @@ async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
                     return Ok(Observation::Closed);
                 }
                 Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => {
-                    return Err(Error::transport_io(
-                        "Destination event stream lost",
-                        std::io::Error::other(broadcast::error::RecvError::Closed),
-                    ))
-                }
+                Err(broadcast::error::RecvError::Closed) => return Err(stream_lost()),
             }
         }
     };
@@ -214,7 +207,6 @@ async fn observe(page: &Page, expect: &Expectation) -> Result<Observation> {
 }
 
 fn lifecycle_error(error: &Error) -> Option<Observation> {
-    use crate::error::classify::{cdp_failure, CdpFailure};
     match cdp_failure(error)? {
         CdpFailure::SessionGone => Some(Observation::Closed),
         CdpFailure::ContextLost => Some(Observation::Pending),

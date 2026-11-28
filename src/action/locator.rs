@@ -1,9 +1,11 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde_json::{json, Value};
 
 use super::{Action, ActionOptions, ActionReceipt, LocatorQuery, LocatorSpec};
-use crate::{cdp::Session, Error, Page, Result};
+use crate::{cdp::Session, error::classify, Error, ErrorCode, Page, Result};
 
 /// A read-only observation of a resolved control, without its input value.
 #[derive(Debug, Clone)]
@@ -58,42 +60,39 @@ impl Locator {
 
     /// Click once and verify the supplied completion condition.
     pub async fn click(&self, options: ActionOptions) -> Result<ActionReceipt> {
-        self.page
-            .act(
-                Action::Click {
-                    target: self.spec.clone(),
-                    human: false,
-                    double: false,
-                },
-                options,
-            )
-            .await
+        self.run(
+            Action::Click {
+                target: self.spec.clone(),
+                human: false,
+                double: false,
+            },
+            options,
+        )
+        .await
     }
     /// Click with paced input and verify the supplied condition.
     pub async fn human_click(&self, options: ActionOptions) -> Result<ActionReceipt> {
-        self.page
-            .act(
-                Action::Click {
-                    target: self.spec.clone(),
-                    human: true,
-                    double: false,
-                },
-                options,
-            )
-            .await
+        self.run(
+            Action::Click {
+                target: self.spec.clone(),
+                human: true,
+                double: false,
+            },
+            options,
+        )
+        .await
     }
     /// Replace and verify the target value.
     pub async fn fill(&self, value: &str, options: ActionOptions) -> Result<ActionReceipt> {
-        self.page
-            .act(
-                Action::Fill {
-                    target: self.spec.clone(),
-                    value: value.into(),
-                    input_mode: Default::default(),
-                },
-                options,
-            )
-            .await
+        self.run(
+            Action::Fill {
+                target: self.spec.clone(),
+                value: value.into(),
+                input_mode: Default::default(),
+            },
+            options,
+        )
+        .await
     }
     /// Set and verify selected option values.
     pub async fn select(
@@ -101,15 +100,14 @@ impl Locator {
         values: Vec<String>,
         options: ActionOptions,
     ) -> Result<ActionReceipt> {
-        self.page
-            .act(
-                Action::Select {
-                    target: self.spec.clone(),
-                    values,
-                },
-                options,
-            )
-            .await
+        self.run(
+            Action::Select {
+                target: self.spec.clone(),
+                values,
+            },
+            options,
+        )
+        .await
     }
     /// Double-click and verify the supplied completion condition.
     pub async fn double_click(&self, options: ActionOptions) -> Result<ActionReceipt> {
@@ -196,15 +194,14 @@ impl Locator {
         files: Vec<String>,
         options: ActionOptions,
     ) -> Result<ActionReceipt> {
-        self.page
-            .act(
-                Action::Upload {
-                    target: self.spec.clone(),
-                    files,
-                },
-                options,
-            )
-            .await
+        self.run(
+            Action::Upload {
+                target: self.spec.clone(),
+                files,
+            },
+            options,
+        )
+        .await
     }
 }
 
@@ -361,16 +358,17 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
         | LocatorQuery::Role { .. } => None,
     };
     if let Some(mut params) = pinned {
+        let stale = || {
+            Error::coded(
+                ErrorCode::TargetStale,
+                "pinned element no longer refers to a live node",
+            )
+        };
         params["objectGroup"] = json!(node.group);
         let result: Value = node.session.send("DOM.resolveNode", &params).await?;
         node.object = result["object"]["objectId"]
             .as_str()
-            .ok_or_else(|| {
-                Error::coded(
-                    crate::ErrorCode::TargetStale,
-                    "pinned element no longer refers to a live node",
-                )
-            })?
+            .ok_or_else(stale)?
             .into();
         if !node
             .call("function(){return this.isConnected === true}", vec![])
@@ -378,10 +376,7 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
             .as_bool()
             .unwrap_or(false)
         {
-            return Err(Error::coded(
-                crate::ErrorCode::TargetStale,
-                "pinned element no longer refers to a live node",
-            ));
+            return Err(stale());
         }
         return Ok(Some(node));
     }
@@ -407,9 +402,7 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
             .send::<_, Value>("Runtime.evaluate", &params)
             .await;
         let stale = match &result {
-            Err(error) => {
-                crate::error::classify::is(error, crate::error::classify::CdpFailure::ContextLost)
-            }
+            Err(error) => classify::is(error, classify::CdpFailure::ContextLost),
             Ok(value) => value["exceptionDetails"]["exception"]["description"]
                 .as_str()
                 .is_some_and(|text| text.contains(WORLD_MISMATCH)),
@@ -438,7 +431,7 @@ pub(super) async fn resolve(page: &Page, spec: &LocatorSpec) -> Result<Option<No
     }
     if count > 1 && spec.index.is_none() {
         return Err(Error::coded(
-            crate::ErrorCode::AmbiguousTarget,
+            ErrorCode::AmbiguousTarget,
             "locator matched multiple elements; select first/nth explicitly",
         ));
     }
@@ -467,13 +460,13 @@ struct World {
     token: u64,
 }
 
-type WorldKey = (String, String);
-
-fn worlds() -> &'static std::sync::Mutex<std::collections::HashMap<WorldKey, World>> {
-    static WORLDS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<WorldKey, World>>,
-    > = std::sync::OnceLock::new();
-    WORLDS.get_or_init(Default::default)
+/// Cached worlds keyed by (session id, frame id).
+fn worlds() -> MutexGuard<'static, HashMap<(String, String), World>> {
+    static WORLDS: OnceLock<Mutex<HashMap<(String, String), World>>> = OnceLock::new();
+    WORLDS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
 }
 
 /// The cached eoka isolated world for a frame, created on first use.
@@ -484,12 +477,7 @@ fn worlds() -> &'static std::sync::Mutex<std::collections::HashMap<WorldKey, Wor
 /// token, set inside the world, also catches a reused context id.
 async fn isolated_world(session: &Session, frame_id: &str) -> Result<World> {
     let key = (session.session_id().to_owned(), frame_id.to_owned());
-    if let Some(world) = worlds()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&key)
-        .copied()
-    {
+    if let Some(world) = worlds().get(&key).copied() {
         return Ok(world);
     }
     let context = session.create_isolated_world(frame_id).await?;
@@ -501,7 +489,7 @@ async fn isolated_world(session: &Session, frame_id: &str) -> Result<World> {
         )
         .await?;
     let world = World { context, token };
-    let mut cache = worlds().lock().unwrap_or_else(|e| e.into_inner());
+    let mut cache = worlds();
     if cache.len() >= 512 {
         cache.clear();
     }
@@ -510,8 +498,5 @@ async fn isolated_world(session: &Session, frame_id: &str) -> Result<World> {
 }
 
 fn forget_isolated_world(session: &Session, frame_id: &str) {
-    worlds()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .remove(&(session.session_id().to_owned(), frame_id.to_owned()));
+    worlds().remove(&(session.session_id().to_owned(), frame_id.to_owned()));
 }

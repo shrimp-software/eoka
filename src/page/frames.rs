@@ -1,6 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::Ordering;
-use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -8,8 +6,6 @@ use serde_json::{json, Value};
 use super::{FrameInfo, Page, ShadowClickReceipt};
 use crate::cdp::{Frame, FrameTree, RuntimeEvaluateResult, Session, TargetGetTargets};
 use crate::error::{Error, Result};
-use crate::stealth::human::Human;
-use crate::MouseButton;
 
 mod shadow;
 

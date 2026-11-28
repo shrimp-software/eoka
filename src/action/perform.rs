@@ -3,7 +3,7 @@ use super::{
     locator::{resolve, Node},
     Action,
 };
-use crate::{page::ActionInput, Error, Page, Result};
+use crate::{page::ActionInput, Error, ErrorCode, Page, Result};
 use serde_json::{json, Value};
 
 pub(super) enum Verification {
@@ -64,7 +64,7 @@ pub(super) async fn prepare(
                 || (matches!(action, Action::Type { .. }) && props["fillMode"] != "text"))
         {
             return Err(Error::coded(
-                crate::ErrorCode::UnsupportedInput,
+                ErrorCode::UnsupportedInput,
                 "target does not support this input action; use fill for native date/time controls",
             ));
         }
@@ -124,10 +124,7 @@ pub(super) async fn prepare(
 pub(super) async fn point(page: &Page, node: &Node, require_enabled: bool) -> Result<(f64, f64)> {
     let props = node.properties().await?;
     if props["receives"] != true || (require_enabled && props["disabled"] == true) {
-        return Err(Error::coded(
-            crate::ErrorCode::ActionabilityChanged,
-            "target no longer receives input",
-        ));
+        return Err(actionability_changed("target no longer receives input"));
     }
     let x = props["x"]
         .as_f64()
@@ -142,16 +139,17 @@ pub(super) async fn point(page: &Page, node: &Node, require_enabled: bool) -> Re
                 Error::Cdp { ref message, .. }
                     if message == "Frame input point is covered by another element" =>
                 {
-                    Error::coded(
-                        crate::ErrorCode::ActionabilityChanged,
-                        "an iframe owner is covered",
-                    )
+                    actionability_changed("an iframe owner is covered")
                 }
                 other => other,
             })
     } else {
         Ok((x, y))
     }
+}
+
+fn actionability_changed(message: &str) -> Error {
+    Error::coded(ErrorCode::ActionabilityChanged, message)
 }
 
 pub(super) fn retryable_preparation(action: &Action, error: &Error) -> bool {
@@ -166,7 +164,7 @@ pub(super) fn retryable_preparation(action: &Action, error: &Error) -> bool {
     }
     match error {
         Error::Coded {
-            code: crate::ErrorCode::ActionabilityChanged,
+            code: ErrorCode::ActionabilityChanged,
             ..
         } => true,
         Error::Cdp {
@@ -216,8 +214,7 @@ async fn require_focused_editable(node: &Node) -> Result<()> {
         || properties["focused"] != true
         || properties["editable"] != true
     {
-        return Err(Error::coded(
-            crate::ErrorCode::ActionabilityChanged,
+        return Err(actionability_changed(
             "input target detached, lost focus or became readonly",
         ));
     }
@@ -301,10 +298,7 @@ pub(super) async fn perform(
             }
             let (checked_x, checked_y) = point(page, node, true).await?;
             if (x - checked_x).abs() > 0.5 || (y - checked_y).abs() > 0.5 {
-                return Err(Error::coded(
-                    crate::ErrorCode::ActionabilityChanged,
-                    "target moved before input",
-                ));
+                return Err(actionability_changed("target moved before input"));
             }
             input.click(dispatch, x, y, 1, *human).await?;
             if *double {
@@ -323,7 +317,7 @@ pub(super) async fn perform(
                     .await?;
                 if normalized.is_null() {
                     return Err(Error::coded(
-                        crate::ErrorCode::InvalidInputValue,
+                        ErrorCode::InvalidInputValue,
                         "value cannot be represented by this native input",
                     ));
                 }
@@ -439,10 +433,7 @@ pub(super) async fn perform(
                 || properties["focused"] != true
                 || properties["disabled"] == true
             {
-                return Err(Error::coded(
-                    crate::ErrorCode::ActionabilityChanged,
-                    "submit target did not retain focus",
-                ));
+                return Err(actionability_changed("submit target did not retain focus"));
             }
             input.key(dispatch, "Enter").await?;
             Ok(Verification::Explicit)
@@ -569,7 +560,7 @@ async fn navigate_history(page: &Page, dispatch: &Dispatch, offset: i64) -> Resu
     // Nothing to navigate to: fail before dispatch rather than claim success.
     let Some(entry) = entry else {
         return Err(Error::coded(
-            crate::ErrorCode::HistoryUnavailable,
+            ErrorCode::HistoryUnavailable,
             format!("no history entry at offset {offset}"),
         ));
     };
