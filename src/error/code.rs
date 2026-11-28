@@ -123,6 +123,12 @@ impl fmt::Display for ErrorCode {
     }
 }
 
+impl From<ErrorCode> for String {
+    fn from(code: ErrorCode) -> Self {
+        code.as_str().to_owned()
+    }
+}
+
 impl PartialEq<str> for ErrorCode {
     fn eq(&self, other: &str) -> bool {
         self.as_str() == other
