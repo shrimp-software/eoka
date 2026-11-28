@@ -224,7 +224,7 @@ All notable changes to this project will be documented in this file.
   matching `Element` methods now return `ActionCall` instead of being `async fn`
   returning `Result<()>`. Awaiting one yields an `ActionReceipt`: `OutcomeUnknown`
   proves dispatch only, and `.expecting(..)` proves one call. `Page::act` and
-  `Locator` remain strict. See [MIGRATION-0.10.md](MIGRATION-0.10.md).
+  `Locator` remain strict.
 - **Breaking:** `try_click`, `try_click_by_text`, `try_human_click` and
   `try_human_click_by_text` return `TryActionCall`.
 - **Breaking:** `Page::with_action_options` is replaced by

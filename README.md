@@ -74,7 +74,7 @@ positions and one deadline. `Page::act` and `Locator` require an explicit expect
 result for click, typing, key and drag actions; shorthand methods such as
 `page.click` make it optional. Successful actions and `Error::Action` failures carry
 receipts distinguishing not dispatched, unknown outcome and verified completion.
-No action is replayed after dispatch. [Migration and complete contract](MIGRATION-0.6.md).
+No action is replayed after dispatch.
 Durable operation IDs and download recovery are provided by eoka-tools.
 
 For an agent exploring an unfamiliar page, `page.explore(action, options)` uses
