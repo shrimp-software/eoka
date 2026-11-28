@@ -6,10 +6,11 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use super::{frame_discovery_raced, Page, ShadowClickReceipt, Snapshot};
+use super::{Page, ShadowClickReceipt, Snapshot};
 use crate::cdp::ObjectGroup;
 use crate::cdp::Session;
-use crate::error::{Error, Result};
+use crate::error::classify::{frame_discovery_raced, node_left_document};
+use crate::error::{Error, ErrorCode, Result};
 use crate::stealth::human::Human;
 use crate::MouseButton;
 
@@ -60,21 +61,13 @@ impl Drop for HeldInputGuard {
 
 /// Transient CDP failures during discovery, navigation or frame mapping are
 /// retried until the shadow deadline; protocol errors such as an invalid
-/// selector propagate immediately.
+/// selector propagate immediately. Frame mapping reports an unresolvable
+/// owner or an out-of-viewport point as [`ErrorCode::TargetUnavailable`].
 fn shadow_retryable(error: &Error) -> bool {
-    if frame_discovery_raced(error) || crate::page::is_navigation_race(error) {
-        return true;
-    }
-    match error {
-        Error::Cdp { message, .. } => [
-            "Node with given id does not belong to the document",
-            "Frame point is outside a viewport in its ancestor chain",
-            "Frame owner could not be resolved",
-        ]
-        .iter()
-        .any(|text| message.contains(text)),
-        _ => false,
-    }
+    frame_discovery_raced(error)
+        || crate::page::is_navigation_race(error)
+        || node_left_document(error)
+        || error.code() == Some(ErrorCode::TargetUnavailable)
 }
 
 impl Page {

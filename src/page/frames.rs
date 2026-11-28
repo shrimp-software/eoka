@@ -6,7 +6,8 @@ use serde_json::{json, Value};
 use super::{FrameInfo, Page, ShadowClickReceipt};
 use crate::cdp::ObjectGroup;
 use crate::cdp::{Frame, FrameTree, RuntimeEvaluateResult, Session, TargetGetTargets};
-use crate::error::{Error, Result};
+use crate::error::classify::frame_discovery_raced;
+use crate::error::{Error, ErrorCode, Result};
 
 mod shadow;
 
@@ -23,13 +24,6 @@ struct FrameTarget {
     r#type: String,
     url: String,
     parent_frame_id: Option<String>,
-}
-
-fn frame_discovery_raced(error: &Error) -> bool {
-    matches!(error, Error::Cdp { message, .. } if [
-        "No target with given id found", "Session with given id not found",
-        "Not attached to an active page", "No frame with given id found",
-    ].iter().any(|text| message.contains(text)))
 }
 
 struct AttachedFrame(Session);
@@ -263,7 +257,8 @@ impl Page {
                     .await?,
             )?;
             if x < 0.0 || y < 0.0 || x >= size[0] || y >= size[1] {
-                return Err(Error::cdp_msg(
+                return Err(Error::coded(
+                    ErrorCode::TargetUnavailable,
                     "Frame point is outside a viewport in its ancestor chain",
                 ));
             }
@@ -281,9 +276,12 @@ impl Page {
                 "backendNodeId": owner.backend_node_id, "executionContextId": parent_context,
                 "objectGroup":objects.name,
             })).await?;
-            let object_id = resolved["object"]["objectId"]
-                .as_str()
-                .ok_or_else(|| Error::cdp_msg("Frame owner could not be resolved"))?;
+            let object_id = resolved["object"]["objectId"].as_str().ok_or_else(|| {
+                Error::coded(
+                    ErrorCode::TargetUnavailable,
+                    "Frame owner could not be resolved",
+                )
+            })?;
             let model: Value = parent
                 .session
                 .send("DOM.getBoxModel", &json!({"objectId":object_id}))
@@ -612,21 +610,5 @@ mod tests {
             assert_eq!(observed.1, vec![observed.0.clone()]);
             peer.abort();
         }
-    }
-
-    #[test]
-    fn only_known_discovery_races_are_retried() {
-        assert!(frame_discovery_raced(&Error::cdp_msg(
-            "No target with given id found"
-        )));
-        assert!(frame_discovery_raced(&Error::cdp_msg(
-            "Session with given id not found"
-        )));
-        assert!(!frame_discovery_raced(&Error::cdp_msg(
-            "Invalid parameters"
-        )));
-        assert!(!frame_discovery_raced(&Error::Decode(
-            "No target with given id found".into()
-        )));
     }
 }

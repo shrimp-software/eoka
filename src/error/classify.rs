@@ -60,6 +60,35 @@ pub(crate) fn is(error: &Error, failure: CdpFailure) -> bool {
     cdp_failure(error) == Some(failure)
 }
 
+fn cdp_message_contains(error: &Error, needles: &[&str]) -> bool {
+    matches!(error, Error::Cdp { message, .. } if needles.iter().any(|needle| message.contains(needle)))
+}
+
+/// Whether a frame snapshot raced a frame target or session going away
+/// (frame discovery retries these). Narrower than
+/// [`CdpFailure::SessionGone`]: a closed or navigated inspected target is not
+/// retried, and a vanished frame id is.
+pub(crate) fn frame_discovery_raced(error: &Error) -> bool {
+    cdp_message_contains(
+        error,
+        &[
+            "No target with given id found",
+            "Session with given id not found",
+            "Not attached to an active page",
+            "No frame with given id found",
+        ],
+    )
+}
+
+/// Whether a node id refers to a document that was replaced. Narrower than
+/// [`CdpFailure::ContextLost`]: lost remote objects are not included.
+pub(crate) fn node_left_document(error: &Error) -> bool {
+    cdp_message_contains(
+        error,
+        &["Node with given id does not belong to the document"],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -94,5 +123,46 @@ mod tests {
             cdp_failure(&Error::Timeout("Execution context was destroyed".into())),
             None
         );
+    }
+
+    #[test]
+    fn only_known_discovery_races_are_retried() {
+        for message in [
+            "No target with given id found",
+            "Session with given id not found",
+            "Not attached to an active page",
+            "No frame with given id found",
+        ] {
+            assert!(frame_discovery_raced(&Error::cdp_msg(message)), "{message}");
+        }
+        for message in [
+            "Invalid parameters",
+            "Target closed",
+            "Inspected target navigated or closed",
+        ] {
+            assert!(
+                !frame_discovery_raced(&Error::cdp_msg(message)),
+                "{message}"
+            );
+        }
+        assert!(!frame_discovery_raced(&Error::Decode(
+            "No target with given id found".into()
+        )));
+    }
+
+    #[test]
+    fn node_left_document_excludes_lost_objects() {
+        assert!(node_left_document(&Error::cdp(
+            "DOM.resolveNode",
+            -32000,
+            "Node with given id does not belong to the document"
+        )));
+        assert!(!node_left_document(&Error::cdp_msg("Cannot find object")));
+        assert!(!node_left_document(&Error::cdp_msg(
+            "Could not find object"
+        )));
+        assert!(!node_left_document(&Error::Decode(
+            "Node with given id does not belong to the document".into()
+        )));
     }
 }
