@@ -358,11 +358,9 @@ pub(super) fn prepare_browser_launch(
     } else {
         None
     };
-    let fingerprint = Fingerprint::resolve_for_profile(
-        config
-            .user_agent
-            .as_deref()
-            .or(detected_user_agent.as_deref()),
+    let fingerprint = Fingerprint::resolve_for_launch(
+        config.user_agent.as_deref(),
+        detected_user_agent.as_deref(),
         config.timezone.as_deref(),
         (!profile.owned).then_some(profile.path.as_path()),
     )?;

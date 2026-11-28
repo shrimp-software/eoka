@@ -26,14 +26,14 @@ pub(super) const WINDOWS_CH_VERSIONS: &[&str] = &["10.0.0", "15.0.0"];
 /// version here rather than advertising the distribution release.
 pub(super) const LINUX_CH_VERSIONS: &[&str] = &["5.15.0", "6.8.0"];
 
-/// WebGL renderers for Mac
+/// WebGL renderers for Mac. Apple silicon only: macOS identities claim the
+/// `arm` client-hint architecture, which an Intel GPU would contradict.
+/// Current Chrome on macOS renders through ANGLE's Metal backend.
 pub(super) const WEBGL_RENDERERS_MAC: &[&str] = &[
-    "ANGLE (Apple, Apple M1 Pro, OpenGL 4.1)",
-    "ANGLE (Apple, Apple M1, OpenGL 4.1)",
-    "ANGLE (Apple, Apple M2, OpenGL 4.1)",
-    "ANGLE (Apple, Apple M3, OpenGL 4.1)",
-    "ANGLE (Intel, Intel Iris Pro Graphics 6200, OpenGL 4.1)",
-    "ANGLE (Intel, Intel UHD Graphics 630, OpenGL 4.1)",
+    "ANGLE (Apple, ANGLE Metal Renderer: Apple M1, Unspecified Version)",
+    "ANGLE (Apple, ANGLE Metal Renderer: Apple M1 Pro, Unspecified Version)",
+    "ANGLE (Apple, ANGLE Metal Renderer: Apple M2, Unspecified Version)",
+    "ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)",
 ];
 
 /// WebGL renderers for Windows

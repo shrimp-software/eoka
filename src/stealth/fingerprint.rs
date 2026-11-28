@@ -122,9 +122,11 @@ pub struct Fingerprint {
     pub chrome_full_version: String,
     /// Client-hint OS version, e.g. "15.0.0".
     pub platform_version: String,
-    /// Screen width in pixels.
+    /// Stored for compatibility only. The screen a page sees comes from the
+    /// viewport (`StealthConfig::viewport_width`/`viewport_height`), never
+    /// from this field.
     pub screen_width: u32,
-    /// Screen height in pixels.
+    /// Stored for compatibility only; see `screen_width`.
     pub screen_height: u32,
     /// Screen color depth in bits.
     pub color_depth: u8,
@@ -280,8 +282,23 @@ impl Fingerprint {
         timezone: Option<&str>,
         profile_dir: Option<&Path>,
     ) -> io::Result<Self> {
+        Self::resolve_for_launch(user_agent, None, timezone, profile_dir)
+    }
+
+    /// Like [`Fingerprint::resolve_for_profile`], but also takes the user
+    /// agent detected from the installed Chrome. Only `configured_user_agent`
+    /// must agree with a stored identity. A detected agent reflects the
+    /// installed browser, so when Chrome updates, the stored identity keeps
+    /// everything except its Chrome version, which follows the install.
+    pub(crate) fn resolve_for_launch(
+        configured_user_agent: Option<&str>,
+        detected_user_agent: Option<&str>,
+        timezone: Option<&str>,
+        profile_dir: Option<&Path>,
+    ) -> io::Result<Self> {
+        let user_agent = configured_user_agent;
         let Some(profile_dir) = profile_dir else {
-            return Ok(Self::resolve(user_agent, timezone));
+            return Ok(Self::resolve(user_agent.or(detected_user_agent), timezone));
         };
 
         let path = profile_dir.join(PERSISTED_FINGERPRINT_FILE);
@@ -312,30 +329,89 @@ impl Fingerprint {
                     ));
                 }
             }
-            // Identities stored before 0.10.3 could claim a software
-            // renderer, which marks a headless host. Replace it once.
-            if is_software_renderer(&fingerprint.webgl_renderer) {
+            let mut changed = false;
+            if user_agent.is_none() {
+                if let Some(version) = detected_user_agent.and_then(chrome_full_version_of) {
+                    changed |= fingerprint.follow_chrome_version(version);
+                }
+            }
+            // Identities stored before 0.11 could claim a software renderer,
+            // which marks a headless host, or an Intel GPU next to an ARM
+            // macOS architecture. Replace the renderer once.
+            if is_software_renderer(&fingerprint.webgl_renderer)
+                || !renderer_matches_platform(fingerprint.platform, &fingerprint.webgl_renderer)
+            {
                 (fingerprint.webgl_vendor, fingerprint.webgl_renderer) =
                     platform_webgl(fingerprint.platform);
+                changed = true;
+            }
+            if changed {
                 fingerprint.persist(profile_dir)?;
             }
             return Ok(fingerprint);
         }
 
-        let fingerprint = Self::resolve(user_agent, timezone);
+        let fingerprint = Self::resolve(user_agent.or(detected_user_agent), timezone);
         fingerprint.persist(profile_dir)?;
         Ok(fingerprint)
     }
 
-    /// Atomically stores this identity beside the profile.
+    /// Atomically stores this identity beside the profile, readable only by
+    /// the owner.
     fn persist(&self, profile_dir: &Path) -> io::Result<()> {
+        use std::io::Write;
         let temporary = profile_dir.join(format!(
-            "{PERSISTED_FINGERPRINT_FILE}.tmp-{}",
-            std::process::id()
+            "{PERSISTED_FINGERPRINT_FILE}.tmp-{}-{:016x}",
+            std::process::id(),
+            fastrand::u64(..)
         ));
         let encoded = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        fs::write(&temporary, encoded)?;
-        fs::rename(temporary, profile_dir.join(PERSISTED_FINGERPRINT_FILE))
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let written = options.open(&temporary).and_then(|mut out| {
+            out.write_all(&encoded)?;
+            out.sync_all()
+        });
+        if let Err(error) = written
+            .and_then(|()| fs::rename(&temporary, profile_dir.join(PERSISTED_FINGERPRINT_FILE)))
+        {
+            let _ = fs::remove_file(&temporary);
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// Moves this identity to another Chrome full version, keeping the rest.
+    /// Returns whether anything changed.
+    fn follow_chrome_version(&mut self, full_version: &str) -> bool {
+        if full_version == self.chrome_full_version {
+            return false;
+        }
+        let old = format!("Chrome/{}", self.chrome_full_version);
+        if self.user_agent.contains(&old) {
+            self.user_agent = self
+                .user_agent
+                .replace(&old, &format!("Chrome/{full_version}"));
+        } else {
+            self.user_agent = ua_for(self.platform, full_version);
+        }
+        self.chrome_major = full_version
+            .split('.')
+            .next()
+            .unwrap_or(full_version)
+            .to_string();
+        self.chrome_full_version = full_version.to_string();
+        true
+    }
+
+    /// Whether a Linux identity claims an ARM CPU.
+    fn is_linux_arm(&self) -> bool {
+        self.platform == Platform::Linux && self.user_agent.contains("aarch64")
     }
 
     /// `navigator.platform` value consistent with this fingerprint.
@@ -343,15 +419,18 @@ impl Fingerprint {
         match self.platform {
             Platform::MacOS => "MacIntel",
             Platform::Windows => "Win32",
+            Platform::Linux if self.is_linux_arm() => "Linux aarch64",
             Platform::Linux => "Linux x86_64",
         }
     }
 
-    /// Client-hint `architecture` for the claimed platform. `platform_webgl`
-    /// picks Apple-silicon renderers for macOS, so macOS claims are ARM.
+    /// Client-hint `architecture` for the claimed platform. The macOS
+    /// renderer catalog lists only Apple-silicon GPUs, so macOS claims are
+    /// ARM; Linux follows the CPU named in the user agent.
     pub fn ch_architecture(&self) -> &'static str {
         match self.platform {
             Platform::MacOS => "arm",
+            Platform::Linux if self.is_linux_arm() => "arm",
             Platform::Windows | Platform::Linux => "x86",
         }
     }
@@ -451,6 +530,20 @@ impl Fingerprint {
             ("Not?A_Brand".to_string(), "24.0.0.0".to_string()),
         ]
     }
+}
+
+/// The full Chrome version in a user agent, e.g. `156.0.8078.80`.
+fn chrome_full_version_of(user_agent: &str) -> Option<&str> {
+    user_agent
+        .split("Chrome/")
+        .nth(1)
+        .and_then(|rest| rest.split(' ').next())
+        .filter(|version| !version.is_empty())
+}
+
+/// Whether the renderer is one the platform's catalog could have produced.
+fn renderer_matches_platform(platform: Platform, renderer: &str) -> bool {
+    platform != Platform::MacOS || renderer.starts_with("ANGLE (Apple,")
 }
 
 /// Whether a WebGL renderer string names a CPU rasterizer.

@@ -338,7 +338,8 @@ fn test_resolve_linux_ua_is_coherent() {
     let ua = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.186 Safari/537.36";
     let fp = Fingerprint::resolve(Some(ua), Some("America/Los_Angeles"));
     assert_eq!(fp.platform, Platform::Linux);
-    assert_eq!(fp.nav_platform(), "Linux x86_64");
+    // Chrome on ARM Linux reports its real CPU in navigator.platform.
+    assert_eq!(fp.nav_platform(), "Linux aarch64");
     assert_eq!(fp.ch_platform(), "Linux");
     assert_eq!(fp.timezone, "America/Los_Angeles");
     assert!(WEBGL_RENDERERS_LINUX.contains(&fp.webgl_renderer.as_str()));
@@ -474,5 +475,93 @@ fn test_persisted_software_renderer_is_replaced_once() {
 
     let second = Fingerprint::resolve_for_profile(Some(ua), None, Some(&dir)).unwrap();
     assert_eq!(first.webgl_renderer, second.webgl_renderer);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn temp_profile() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "eoka-fingerprint-test-{}-{}",
+        std::process::id(),
+        fastrand::u64(..)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn test_profile_identity_follows_detected_chrome_update() {
+    let dir = temp_profile();
+    let old = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.8059.39 Safari/537.36";
+    let new = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.80 Safari/537.36";
+    let first = Fingerprint::resolve_for_launch(None, Some(old), None, Some(&dir)).unwrap();
+    let second = Fingerprint::resolve_for_launch(None, Some(new), None, Some(&dir)).unwrap();
+    assert_eq!(second.user_agent, new);
+    assert_eq!(second.chrome_major, "156");
+    assert_eq!(second.chrome_full_version, "156.0.8078.80");
+    assert_eq!(second.noise_seed, first.noise_seed);
+    assert_eq!(second.webgl_renderer, first.webgl_renderer);
+    assert_eq!(second.hardware_concurrency, first.hardware_concurrency);
+    // The update is stored, not recomputed on every launch.
+    let third = Fingerprint::resolve_for_profile(None, None, Some(&dir)).unwrap();
+    assert_eq!(third.chrome_full_version, "156.0.8078.80");
+    // An explicitly configured agent must still agree with the stored one.
+    assert!(Fingerprint::resolve_for_launch(Some(old), Some(new), None, Some(&dir)).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_mac_identities_claim_only_apple_silicon() {
+    for renderer in WEBGL_RENDERERS_MAC {
+        assert!(renderer.starts_with("ANGLE (Apple,"), "{renderer}");
+    }
+    for _ in 0..50 {
+        let fp = Fingerprint::build(Platform::MacOS, "156".into(), "156.0.8078.80".into());
+        assert_eq!(fp.ch_architecture(), "arm");
+        assert_eq!(fp.webgl_vendor, "Google Inc. (Apple)");
+    }
+}
+
+#[test]
+fn test_persisted_mac_intel_renderer_is_replaced() {
+    let dir = temp_profile();
+    let ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.182 Safari/537.36";
+    let mut stored = Fingerprint::resolve(Some(ua), None);
+    stored.webgl_vendor = "Google Inc. (Intel)".into();
+    stored.webgl_renderer = "ANGLE (Intel, Intel UHD Graphics 630, OpenGL 4.1)".into();
+    stored.persist(&dir).unwrap();
+    let loaded = Fingerprint::resolve_for_profile(Some(ua), None, Some(&dir)).unwrap();
+    assert!(loaded.webgl_renderer.starts_with("ANGLE (Apple,"));
+    assert_eq!(loaded.noise_seed, stored.noise_seed);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn test_linux_arm_identity_is_coherent() {
+    let ua = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.8078.80 Safari/537.36";
+    let fp = Fingerprint::resolve(Some(ua), None);
+    assert_eq!(fp.ch_architecture(), "arm");
+    assert_eq!(fp.nav_platform(), "Linux aarch64");
+    let x86 = Fingerprint::resolve(Some(&ua.replace("aarch64", "x86_64")), None);
+    assert_eq!(x86.ch_architecture(), "x86");
+    assert_eq!(x86.nav_platform(), "Linux x86_64");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_persisted_identity_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_profile();
+    Fingerprint::resolve_for_profile(None, None, Some(&dir)).unwrap();
+    let mode = std::fs::metadata(dir.join(PERSISTED_FINGERPRINT_FILE))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let leftovers: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_name().to_string_lossy().contains(".tmp-"))
+        .collect();
+    assert!(leftovers.is_empty());
     std::fs::remove_dir_all(dir).unwrap();
 }

@@ -321,39 +321,47 @@ impl Browser {
         Ok(())
     }
 
-    /// Create a new page and navigate to URL
+    /// Create a new page and navigate to URL. Navigation is verified the
+    /// same way as [`Page::goto`]. When setup or navigation fails, the new
+    /// tab is closed before the error is returned.
     pub async fn new_page(&self, url: &str) -> Result<Page> {
-        let target_id = self
-            .connection
-            .create_target("about:blank", None, None)
-            .await?;
-
-        let session = self.connection.attach_to_target(&target_id).await?;
-        self.setup_session(&session, true).await?;
-
-        // Navigate to URL
-        let nav_result = session.navigate(url, None).await?;
-        if let Some(error) = nav_result.error_text {
-            return Err(Error::Navigation(error));
+        let page = self.new_blank_page().await?;
+        if let Err(error) = page.goto(url).await {
+            self.discard_target(page.target_id()).await;
+            return Err(error);
         }
-
-        // Brief settle time for the initial page load to start.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        Ok(Page::new(session, Arc::clone(&self.config)))
+        Ok(page)
     }
 
-    /// Create a new page without navigation (at about:blank)
+    /// Create a new page without navigation (at about:blank). When setup
+    /// fails, the new tab is closed before the error is returned.
     pub async fn new_blank_page(&self) -> Result<Page> {
         let target_id = self
             .connection
             .create_target("about:blank", None, None)
             .await?;
 
-        let session = self.connection.attach_to_target(&target_id).await?;
-        self.setup_session(&session, true).await?;
+        let setup = async {
+            let session = self.connection.attach_to_target(&target_id).await?;
+            self.setup_session(&session, true).await?;
+            Ok::<_, Error>(session)
+        }
+        .await;
+        match setup {
+            Ok(session) => Ok(Page::new(session, Arc::clone(&self.config))),
+            Err(error) => {
+                self.discard_target(&target_id).await;
+                Err(error)
+            }
+        }
+    }
 
-        Ok(Page::new(session, Arc::clone(&self.config)))
+    /// Best-effort close of a tab this browser just created for a call that
+    /// failed; the original error is what the caller sees.
+    async fn discard_target(&self, target_id: &str) {
+        if let Err(error) = self.connection.close_target(target_id).await {
+            tracing::warn!("Failed to close tab {target_id} after a failed open: {error}");
+        }
     }
 
     /// Get the browser version

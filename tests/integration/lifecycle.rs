@@ -99,3 +99,36 @@ async fn test_multi_tab() {
 
     browser.close().await.expect("Failed to close browser");
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_failed_new_page_closes_its_tab() {
+    let browser = support::browser().await;
+    let before = browser.tabs().await.unwrap().len();
+    // Port 1 refuses connections, so navigation fails after the tab exists.
+    let error = browser.new_page("http://127.0.0.1:1/").await;
+    assert!(error.is_err(), "navigation to a closed port must fail");
+    let mut after = browser.tabs().await.unwrap().len();
+    for _ in 0..20 {
+        if after == before {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        after = browser.tabs().await.unwrap().len();
+    }
+    assert_eq!(after, before, "failed new_page left its tab open");
+    browser.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn test_new_page_waits_for_navigation() {
+    let fixture =
+        support::HttpFixture::start(|_| async { support::Response::html("<title>ready</title>") })
+            .await;
+    let browser = support::browser().await;
+    let page = browser.new_page(&fixture.url).await.unwrap();
+    // No sleep: the URL is committed when new_page returns.
+    assert!(page.url().await.unwrap().starts_with(&fixture.url));
+    browser.close().await.unwrap();
+}
