@@ -120,7 +120,7 @@ Function results reject non-JSON values before CDP serialization and are limited
 to 1 MiB of UTF-8 JSON. `evaluate_json` and `evaluate_json_in_frame_id` reuse this
 validator for raw expressions with an explicit result byte limit.
 
-See [MIGRATION-0.11.md](MIGRATION-0.11.md) (and the older 0.6/0.10 guides). `Locator` offers click, double_click, human_click, hover, human_hover, fill, type_text, focus, submit, select, upload and scroll_into_view. `Page::act(Action, ActionOptions)` and
+See [MIGRATION-0.6.md](MIGRATION-0.6.md). `Locator` offers click, double_click, human_click, hover, human_hover, fill, type_text, focus, submit, select, upload and scroll_into_view. `Page::act(Action, ActionOptions)` and
 `Page::locator`/`locator_text` provide receipts, strict execution-time resolution,
 actionability checks, one deadline, per-target serialization and bounded held-input
 cleanup. Through `act` and `Locator`, click/type/key/submit/drag require an explicit

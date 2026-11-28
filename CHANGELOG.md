@@ -6,8 +6,6 @@ All notable changes to this project will be documented in this file.
 
 ## [0.11.0] - 2026-11-28
 
-This release is breaking; see [MIGRATION-0.11.md](MIGRATION-0.11.md).
-
 ### Breaking
 
 - Errors eoka raises itself carry a stable `ErrorCode` in the new
