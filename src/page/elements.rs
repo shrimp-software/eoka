@@ -1,7 +1,7 @@
 use super::{Element, Page, TextMatch};
 use crate::action::{ActionCall, TryActionCall};
 use crate::error::{Error, Result};
-use crate::{Action, LocatorSpec};
+use crate::{Action, InputMode, LocatorSpec};
 
 /// A JavaScript expression evaluating to the elements `text` matches, in
 /// priority order. Arguments are JSON literals, never spliced as source.
@@ -19,7 +19,45 @@ fn text_candidates_expression(text: &str, match_type: TextMatch, all: bool) -> R
     ))
 }
 
+fn click_action(target: LocatorSpec, human: bool) -> Action {
+    Action::Click {
+        target,
+        human,
+        double: false,
+    }
+}
+
+fn hover_action(selector: &str, human: bool) -> Action {
+    Action::Hover {
+        target: LocatorSpec::css(selector),
+        human,
+    }
+}
+
+fn type_action(selector: &str, text: &str, input_mode: InputMode) -> Action {
+    Action::Type {
+        target: LocatorSpec::css(selector),
+        text: text.into(),
+        input_mode,
+    }
+}
+
+fn fill_action(selector: &str, value: &str, input_mode: InputMode) -> Action {
+    Action::Fill {
+        target: LocatorSpec::css(selector),
+        value: value.into(),
+        input_mode,
+    }
+}
+
 impl Page {
+    /// Run `action` with this page's [`crate::ActionDefaults`], discarding the receipt.
+    async fn act_default(&self, action: Action) -> Result<()> {
+        self.act(action, self.action_defaults.options())
+            .await
+            .map(|_| ())
+    }
+
     /// Drag horizontally from the selected element's center.
     /// For explicit cancellation cleanup, retain a [`crate::stealth::Human`] helper.
     pub fn human_drag(&self, selector: &str, dx: f64) -> ActionCall {
@@ -165,62 +203,27 @@ impl Page {
     /// Click an element by selector. Awaiting proves dispatch only; add
     /// [`ActionCall::expecting`] to prove the page reacted.
     pub fn click(&self, selector: &str) -> ActionCall {
-        ActionCall::new(
-            self,
-            Action::Click {
-                target: LocatorSpec::css(selector),
-                human: false,
-                double: false,
-            },
-        )
+        ActionCall::new(self, click_action(LocatorSpec::css(selector), false))
     }
 
     /// Type text into an element by selector. Awaiting proves dispatch only; see [`ActionCall`].
     pub fn type_into(&self, selector: &str, text: &str) -> ActionCall {
-        ActionCall::new(
-            self,
-            Action::Type {
-                target: LocatorSpec::css(selector),
-                text: text.into(),
-                input_mode: Default::default(),
-            },
-        )
+        ActionCall::new(self, type_action(selector, text, InputMode::default()))
     }
 
     /// Click an element by its text content. Awaiting proves dispatch only; see [`ActionCall`].
     pub fn click_by_text(&self, text: &str) -> ActionCall {
-        ActionCall::new(
-            self,
-            Action::Click {
-                target: LocatorSpec::text(text),
-                human: false,
-                double: false,
-            },
-        )
+        ActionCall::new(self, click_action(LocatorSpec::text(text), false))
     }
 
     /// Try to click an element, returning Ok(false) if not found or not clickable
     pub fn try_click(&self, selector: &str) -> TryActionCall {
-        TryActionCall::new(
-            self,
-            Action::Click {
-                target: LocatorSpec::css(selector),
-                human: false,
-                double: false,
-            },
-        )
+        TryActionCall::new(self, click_action(LocatorSpec::css(selector), false))
     }
 
     /// Try to click an element by text, returning Ok(false) if not found or not clickable
     pub fn try_click_by_text(&self, text: &str) -> TryActionCall {
-        TryActionCall::new(
-            self,
-            Action::Click {
-                target: LocatorSpec::text(text),
-                human: false,
-                double: false,
-            },
-        )
+        TryActionCall::new(self, click_action(LocatorSpec::text(text), false))
     }
 
     /// Fill a form field: click, clear, type, and verify the resulting value.
@@ -230,92 +233,41 @@ impl Page {
     /// min/max/step constraints; accepted range values dispatch bubbling
     /// `input` and `change` events.
     pub async fn fill(&self, selector: &str, value: &str) -> Result<()> {
-        self.act(
-            Action::Fill {
-                target: LocatorSpec::css(selector),
-                value: value.into(),
-                input_mode: Default::default(),
-            },
-            self.action_defaults.options(),
-        )
-        .await
-        .map(|_| ())
+        self.act_default(fill_action(selector, value, InputMode::default()))
+            .await
     }
 
     /// Human-like click on an element
     pub fn human_click(&self, selector: &str) -> ActionCall {
-        ActionCall::new(
-            self,
-            Action::Click {
-                target: LocatorSpec::css(selector),
-                human: true,
-                double: false,
-            },
-        )
+        ActionCall::new(self, click_action(LocatorSpec::css(selector), true))
     }
 
     /// Human-like typing into an element: key events at irregular intervals
     /// ([`crate::InputMode::Human`]).
     pub fn human_type(&self, selector: &str, text: &str) -> ActionCall {
-        ActionCall::new(
-            self,
-            Action::Type {
-                target: LocatorSpec::css(selector),
-                text: text.into(),
-                input_mode: crate::InputMode::Human,
-            },
-        )
+        ActionCall::new(self, type_action(selector, text, InputMode::Human))
     }
 
     /// Human-like click on an element found by text content
     pub fn human_click_by_text(&self, text: &str) -> ActionCall {
-        ActionCall::new(
-            self,
-            Action::Click {
-                target: LocatorSpec::text(text),
-                human: true,
-                double: false,
-            },
-        )
+        ActionCall::new(self, click_action(LocatorSpec::text(text), true))
     }
 
     /// Try to human-click an element, returning Ok(true) if clicked, Ok(false) if not found or not clickable
     pub fn try_human_click(&self, selector: &str) -> TryActionCall {
-        TryActionCall::new(
-            self,
-            Action::Click {
-                target: LocatorSpec::css(selector),
-                human: true,
-                double: false,
-            },
-        )
+        TryActionCall::new(self, click_action(LocatorSpec::css(selector), true))
     }
 
     /// Try to human-click an element by text, returning Ok(true) if clicked, Ok(false) if not found or not clickable
     pub fn try_human_click_by_text(&self, text: &str) -> TryActionCall {
-        TryActionCall::new(
-            self,
-            Action::Click {
-                target: LocatorSpec::text(text),
-                human: true,
-                double: false,
-            },
-        )
+        TryActionCall::new(self, click_action(LocatorSpec::text(text), true))
     }
 
     /// Human-like form fill: clear, then type with key events at irregular
     /// intervals ([`crate::InputMode::Human`]), and verify the value.
     pub async fn human_fill(&self, selector: &str, value: &str) -> Result<()> {
-        self.act(
-            Action::Fill {
-                target: LocatorSpec::css(selector),
-                value: value.into(),
-                input_mode: crate::InputMode::Human,
-            },
-            self.action_defaults.options(),
-        )
-        .await
-        .map(|_| ())
+        self.act_default(fill_action(selector, value, InputMode::Human))
+            .await
     }
 
     /// Find the first element matching any of the given selectors
@@ -340,79 +292,47 @@ impl Page {
 
     /// Upload multiple files to a file input element
     pub async fn upload_files(&self, selector: &str, paths: &[&str]) -> Result<()> {
-        self.act(
-            Action::Upload {
-                target: LocatorSpec::css(selector),
-                files: paths.iter().map(|v| (*v).into()).collect(),
-            },
-            self.action_defaults.options(),
-        )
+        self.act_default(Action::Upload {
+            target: LocatorSpec::css(selector),
+            files: paths.iter().map(|v| (*v).into()).collect(),
+        })
         .await
-        .map(|_| ())
     }
 
     /// Select option by value
     pub async fn select(&self, selector: &str, value: &str) -> Result<()> {
-        self.act(
-            Action::Select {
-                target: LocatorSpec::css(selector),
-                values: vec![value.into()],
-            },
-            self.action_defaults.options(),
-        )
+        self.act_default(Action::Select {
+            target: LocatorSpec::css(selector),
+            values: vec![value.into()],
+        })
         .await
-        .map(|_| ())
     }
 
     /// Select option by visible text
     pub async fn select_by_text(&self, selector: &str, text: &str) -> Result<()> {
-        self.act(
-            Action::SelectText {
-                target: LocatorSpec::css(selector),
-                text: text.into(),
-            },
-            self.action_defaults.options(),
-        )
+        self.act_default(Action::SelectText {
+            target: LocatorSpec::css(selector),
+            text: text.into(),
+        })
         .await
-        .map(|_| ())
     }
 
     /// Select multiple options by values
     pub async fn select_multiple(&self, selector: &str, values: &[&str]) -> Result<()> {
-        self.act(
-            Action::Select {
-                target: LocatorSpec::css(selector),
-                values: values.iter().map(|v| (*v).into()).collect(),
-            },
-            self.action_defaults.options(),
-        )
+        self.act_default(Action::Select {
+            target: LocatorSpec::css(selector),
+            values: values.iter().map(|v| (*v).into()).collect(),
+        })
         .await
-        .map(|_| ())
     }
 
     /// Hover over element (for revealing menus)
     pub async fn hover(&self, selector: &str) -> Result<()> {
-        self.act(
-            Action::Hover {
-                target: LocatorSpec::css(selector),
-                human: false,
-            },
-            self.action_defaults.options(),
-        )
-        .await
-        .map(|_| ())
+        self.act_default(hover_action(selector, false)).await
     }
 
     /// Human-like hover with Bezier curve movement
     pub async fn human_hover(&self, selector: &str) -> Result<()> {
-        self.act(
-            Action::Hover {
-                target: LocatorSpec::css(selector),
-                human: true,
-            },
-            self.action_defaults.options(),
-        )
-        .await
-        .map(|_| ())
+        self.act_default(hover_action(selector, true)).await
     }
 }
