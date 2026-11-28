@@ -46,10 +46,20 @@ cargo +1.85.0 check --lib --all-features --locked
 xvfb-run -a cargo test --all-features --locked --no-fail-fast --tests -- --ignored --test-threads=1
 ```
 
-CI pins Chrome for Testing 155.0.8059.39, verifies Chrome/Xvfb availability,
-runs every ignored browser test without skipping failures, and uploads the log.
-Cookie and lifecycle regressions use local HTTP fixtures. Chrome wrapper scripts
-are resolved to their underlying ELF executable; do not skip that regression.
+CI pins Chrome for Testing in `.github/chrome-version` (156.0.8078.80), runs
+every ignored browser test with nextest in two shards (`.config/nextest.toml`
+retries a failure once and reports it as FLAKY) and uploads a JUnit report. CI
+also runs on pushes to main, and Publish runs only after CI passes on the commit
+it publishes. Cookie and lifecycle regressions use local HTTP fixtures. Chrome
+wrapper scripts are resolved to their underlying ELF executable; do not skip
+that regression.
+
+All browser tests are modules of one binary, `tests/integration.rs`
+(`tests/integration/*.rs`); add new ones there, not as new top-level files.
+Run one file with `cargo test --test integration -- --ignored page_coverage::`.
+Set `EOKA_TEST_CHROME_PATH` to the pinned Chrome (under
+`~/.cache/eoka/chrome-linux-x64-gnu-156.*`); a local beta Chrome may lack WebGL
+under Xvfb. Run one Chrome suite at a time.
 
 ## Architecture
 
@@ -58,12 +68,19 @@ src/
 ├── lib.rs              # Public API: Browser, Page, StealthConfig, Result
 ├── browser.rs          # Browser API, tabs and session setup
 ├── browser/launch.rs   # Chrome launch preparation and profile ownership
-├── page.rs             # Page abstraction, Element, request capture
-├── session.rs          # Cookie import/export
-├── error.rs            # Error types (ElementNotVisible, RetryExhausted, etc.)
+├── browser/discovery.rs # Chrome discovery and wrapper-to-ELF resolution
+├── page.rs             # Page abstraction
+├── page/frames.rs      # Frame snapshots, geometry and frame evaluation
+├── page/frames/shadow.rs # Clicking inside (closed) shadow roots
+├── page/text_candidates.js # The one text matcher (find_by_text, text locators)
+├── element.rs          # Element handles, pinned to backend node ids
+├── network.rs          # RequestCapture, NetworkWatcher
+├── session.rs          # Cookie import/export (incl. CHIPS partition keys)
+├── error.rs            # Error enum; error/code.rs (ErrorCode), error/classify.rs (CDP error text)
+├── action/             # Action engine: runner, perform, locator, destination
 ├── cdp/
 │   ├── transport.rs    # WebSocket commands, cancellation and shutdown
-│   ├── transport/      # Reader, Fetch interception, Chrome process lifecycle
+│   ├── transport/      # Reader, writer task, Fetch interception, Chrome process lifecycle
 │   ├── connection.rs   # Connection and shared target/session state
 │   ├── connection/     # Session commands grouped by page/network/document/input
 │   ├── headers.rs      # Target-scoped temporary header cleanup and recovery
@@ -73,21 +90,26 @@ src/
 └── stealth/
     ├── evasions.rs     # Script selection and fingerprint substitution
     ├── evasions/scripts/ # JavaScript assets, embedded at compile time
-    ├── patcher.rs      # Binary patching (Aho-Corasick)
+    ├── patcher.rs      # Opt-in binary patching; patcher/{sections,cache,macos}.rs
     ├── human.rs        # Bezier curves, typing simulation
     ├── fingerprint.rs  # Fingerprint generation and persistence
     └── fingerprint/catalog.rs # Platform defaults and lookup tables
 ```
 
-## Action contract (0.8)
+## Action contract
 
-`Page::explore(Action, ActionOptions)` is the opt-in agent exploration entry point
-in 0.6.1. It preserves actionability, one deadline, durable dispatch hooks and
+`Page::explore(Action, ActionOptions)` is the opt-in agent exploration entry point.
+It preserves actionability, one deadline, durable dispatch hooks and
 cleanup. Without intrinsic or explicit completion evidence, `Ok(receipt)` has
 `OutcomeUnknown`; inspect the receipt. `Page::act` remains strict.
 
 Text fill/type use `InputMode::Sequential` by default and check the original
-input before each character; `InputMode::Bulk` opts into one native insertion.
+input before each character; `InputMode::Bulk` opts into one native insertion
+and `InputMode::Human` (used by `human_type`/`human_fill`) sends trusted
+keydown/keyup pairs at irregular intervals. Fill fails with `ValueMismatch`
+(character counts only) once a different value has been stable for 750ms.
+Locators always resolve in one cached isolated world per frame
+(`src/action/locator.rs`), never in the page's main world.
 `Expectation::DocumentReady`, `Enabled` and `All` express readiness within one
 deadline. `Destination` controls current/new-tab verification, with correlated
 child targets recorded in `ActionReceipt::destination_target_id`.
@@ -98,7 +120,7 @@ Function results reject non-JSON values before CDP serialization and are limited
 to 1 MiB of UTF-8 JSON. `evaluate_json` and `evaluate_json_in_frame_id` reuse this
 validator for raw expressions with an explicit result byte limit.
 
-See [MIGRATION-0.6.md](MIGRATION-0.6.md). `Page::act(Action, ActionOptions)` and
+See [MIGRATION-0.11.md](MIGRATION-0.11.md) (and the older 0.6/0.10 guides). `Locator` offers click, double_click, human_click, hover, human_hover, fill, type_text, focus, submit, select, upload and scroll_into_view. `Page::act(Action, ActionOptions)` and
 `Page::locator`/`locator_text` provide receipts, strict execution-time resolution,
 actionability checks, one deadline, per-target serialization and bounded held-input
 cleanup. Through `act` and `Locator`, click/type/key/submit/drag require an explicit
@@ -109,9 +131,11 @@ only (`OutcomeUnknown`), and `.expecting(..)` proves one call. `try_*` returns
 scrolled). `type_text` requires an editable focus. Page handles carry
 `ActionDefaults` (`with_action_defaults`) and never an expectation. Element handles
 stay pinned and never retarget replacements. Fill/select/upload/focus/hover/scroll
-and navigation verify intrinsic results. `with_retry` never replays action errors.
-`Error::Action { code, receipt, source }` distinguishes not dispatched, uncertain,
-and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
+and navigation verify intrinsic results; an aborted navigation fails at once with
+`navigation_aborted`, and post-dispatch checks treat a destroyed context as
+"not yet". `with_retry` retries only `Error::is_retryable` errors, so it never
+replays input that may have landed. `Error::Action { code: ErrorCode, receipt,
+source }` distinguishes not dispatched, uncertain, and verified outcomes. Low-level input, JavaScript and CDP remain primitives.
 `src/action/` owns this engine; persistence and file policy remain in eoka-tools.
 
 Pointer preparation scrolls clipped targets through scroll containers. Fill
@@ -135,7 +159,7 @@ live in `tests/page_coverage.rs`.
 
 ### Page - Finding Elements
 - `page.find(selector)` / `page.find_all(selector)` - By CSS selector
-- `page.find_by_text(text)` - By visible text (prioritizes links/buttons)
+- `page.find_by_text(text)` - By visible text (interactive first, then the innermost static match)
 - `page.find_by_text_match(text, TextMatch)` - With match strategy (Exact/Contains/StartsWith/EndsWith)
 - `page.find_all_by_text(text)` - All elements with text
 - `page.find_any(&[selectors])` - First matching selector
@@ -158,10 +182,10 @@ live in `tests/page_coverage.rs`.
 
 ### Page - Form Filling
 - `page.fill(selector, value)` - Clear and type
-- `page.human_fill(selector, value)` - Human-like clear and type
+- `page.human_fill(selector, value)` - Clear, then type with `InputMode::Human`
 - `page.type_text(text)` - Type into focused element (`ActionCall`)
 - `page.type_into(selector, text)` - Type without clearing (`ActionCall`)
-- `page.human_type(selector, text)` - Human-like typing (`ActionCall`)
+- `page.human_type(selector, text)` - Type with `InputMode::Human` (`ActionCall`)
 
 ### Page - Waiting
 - `page.wait_for(selector, timeout)` - Wait for element in DOM
@@ -189,7 +213,7 @@ live in `tests/page_coverage.rs`.
 - `page.evaluate(js)` / `page.evaluate_sync(js)` - Run JavaScript (sync variant skips promise await)
 - `page.execute(js)` / `page.execute_sync(js)` - Run JS, discard result
 - `page.frames()` - List all frames
-- `page.evaluate_in_frame(frame_selector, js)` - JS in iframe (uses Function constructor, CSP-safe)
+- `page.evaluate_in_frame(frame_selector, js)` - JS in iframe (runs in an isolated world, CSP-safe)
 
 ### Page - File Uploads
 - `page.upload_file(selector, path)` - Upload single file
@@ -216,7 +240,8 @@ live in `tests/page_coverage.rs`.
 - `BrowserSession::cookies_for_url(url)` / `cookie_header_for(url)` - RFC 6265 scoped, exact values, `Error::InvalidUrl` on ambiguous URLs; `save` writes `0600` atomically
 - `page.clear_all_cookies()` / `page.set_cookies_bulk(cookies)` - Bulk operations
 - `page.set_extra_headers(headers)` / `page.clear_extra_headers()` - Custom HTTP headers
-- `page.enable_request_capture()` / `page.disable_request_capture()` - Network capture
+- `page.capture_requests(RequestCaptureOptions)` - Page-scoped bounded `RequestCapture`: `requests`, `get`, `drain_completed`, `wait_for`, `stats`, `response_body`, `stop`. Never sends `Network.disable` (that drops extra headers)
+- `page.enable_request_capture()` / `page.disable_request_capture()` - Enable/disable the Network domain
 - `page.get_response_body(request_id)` - Get captured response body
 
 ### Page - Configuration
@@ -247,53 +272,98 @@ live in `tests/page_coverage.rs`.
 ## Key Design Decisions
 
 ### CDP Command Filtering
-Transport blocks detectable commands in `src/cdp/transport.rs`:
-- `Runtime.enable` - BLOCKED (prevents consoleAPICalled detection)
-- `Debugger.enable` - BLOCKED
-- `HeapProfiler.*` - BLOCKED
-- `Console.enable` - BLOCKED
+Transport refuses detectable commands in `src/cdp/transport.rs` (`is_blocked`):
+`Runtime.enable/disable` (prevents consoleAPICalled detection),
+`Debugger.enable/disable`, `HeapProfiler.enable/disable`,
+`Profiler.enable/disable`, `Console.enable/disable`. A blocked command returns
+`Error::Cdp` naming `filter_cdp`. Launched and connected browsers honour
+`StealthConfig.filter_cdp`; `live()` turns it off.
+
+### Transport
+A single writer task (`transport/writer.rs`) owns the socket, with a priority
+lane for pongs and automatic Fetch replies, so the reader never waits on a
+write. Events are broadcast as `Arc<CdpMessage>` (`EVENT_CHANNEL_CAPACITY`
+4096); a subscriber that lags must recover (rescan targets, re-read the frame
+tree) rather than fail an action that was already dispatched. Pending commands
+record their session and fail with Chrome's `-32001` on detach. `Connection`
+drops target state on `Target.targetDestroyed`, or on detach once
+`Target.getTargetInfo` reports the target gone. Command ids use
+1..=999,999,999 and automatic replies 1e9..=i32::MAX, both wrapping.
 
 ### X-Client-Data Header
 Chromium sends `X-Client-Data` (field-trial variation IDs) on requests to
 Google-owned domains; a fresh automation profile has a distinctive set that
 Google scores before any page JS runs. Eoka launches with
 `--disable-field-trial-config` and strips the header via CDP Fetch
-interception auto-continued in the transport reader
-(`StealthConfig.strip_x_client_data`). Auto-responder CDP command IDs must
-stay within int32 — DevTools silently drops commands with larger ids.
+interception auto-continued in the transport (`StealthConfig.strip_x_client_data`).
+DevTools silently drops commands with ids above int32. Only targets eoka
+attaches are intercepted; out-of-process iframes and workers are not.
 
 ### Proxy Authentication
 Configured proxy credentials answer only explicit `Proxy` challenges, on both
 launched and connected browsers.
 `Server`, missing, and unknown sources receive `CancelAuth` without credentials.
 Without configured proxy credentials, auth events remain available to the caller.
+With `config.proxy` set, Chrome runs with
+`--webrtc-ip-handling-policy=disable_non_proxied_udp`.
 
-### Document Proxy
-CDP markers ($cdc_*) are hidden via Proxy on document object. See `src/stealth/evasions.rs` CDP_EVASION.
+### Binary Patching
+Opt-in (`patch_binary`, default false). Stock Chrome has no automation
+markers. When enabled, only ChromeDriver's `$cdc_`/`$wdc_`/`$chromeDriver`
+inside non-executable sections are rewritten (ELF, Mach-O, PE headers are
+parsed; unparseable binaries are refused). Linux cache:
+`~/.cache/eoka/patched-chrome`, verified by manifest and content hash.
 
-### Navigator Prototype
-All navigator properties (webdriver, plugins, getBattery) are defined on `Navigator.prototype`, not the instance. This prevents detection via `Object.getOwnPropertyNames(navigator)`.
+### Evasion Shape
+Evasions patch interface prototypes through the prelude helpers
+`_eoka_patchMethod`/`_eoka_patchGetter` (native name, length, `toString`,
+non-constructible, receiver checks) and only where Chrome reports something
+wrong; `window.chrome`, plugins, permissions, `webdriver` and connection are
+native in current Chrome. Timezone comes only from
+`Emulation.setTimezoneOverride`. Never define properties on instances.
+Cross-site (out-of-process) iframes and workers get no evasions.
+
+### Launch Flags
+User `--disable-features`, `--enable-features`, `--disable-blink-features`,
+`--enable-blink-features` and `--blink-settings` in `extra_args` are merged
+into eoka's (Chrome keeps only the last copy of a switch).
+
+### Fingerprint Persistence
+A durable profile stores its identity in `.eoka-fingerprint.json` (0600). Only
+an explicitly configured user agent must match it; the detected Chrome version
+updates it. macOS identities claim Apple-silicon renderers and `arm`.
 
 ### Text Finding Priority
-`find_by_text()` searches in two passes:
-1. Interactive elements: `a, button, input[type="submit"], [role="button"], [onclick]`
-2. Static elements: `div, span, p, label, h1-h6, li, td, th`
+`src/page/text_candidates.js` is shared by `find_by_text`, `find_all_by_text`
+and text locators:
+1. Interactive elements: `a, button, input[type="submit"], input[type="button"], [role="button"], [onclick]`
+2. Otherwise the innermost static match among `div, span, p, label, h1-h6, li, td, th`
+Arguments reach page scripts as JSON, never spliced into source.
 
 ### Error Handling
-CDP "box model" errors are converted to friendly `ElementNotVisible` errors.
-Try-click methods return `Ok(false)` for both missing AND invisible elements.
+Chrome reports lifecycle conditions only as message text; all such matching
+lives in `src/error/classify.rs` (`CdpFailure`). CDP "box model" errors become
+`ElementNotVisible`. `try_*` returns `Ok(false)` for missing, invisible,
+moved, covered and stale targets when no input was sent.
 
 ## Error Types
 
 ```rust
+Error::Coded { code: ErrorCode, message } // eoka's own usage/policy/state errors
+Error::Action { code: ErrorCode, receipt, source }
 Error::ElementNotFound(selector)      // Not in DOM
 Error::ElementNotVisible { selector } // In DOM but not rendered
 Error::Timeout(message)
 Error::InvalidUrl(message)            // Unusable URL; message omits it
 Error::InvalidScreenshotOptions(message) // Invalid format/quality/crop combination
-Error::RetryExhausted { attempts, last_error }
-Error::Cdp { method, code, message }  // Raw CDP error
+Error::ValueMismatch { selector, expected_chars, actual_chars } // never the values
+Error::RetryExhausted { attempts, last_error, source }
+Error::Cdp { method, code, message }  // Chrome's own protocol errors only
 ```
+
+Raise new eoka-side failures with `Error::coded(ErrorCode::X, msg)`, never with a
+code prefix inside `Error::cdp_msg`. `ErrorCode` compares equal to its
+snake_case string. `Error::is_retryable` drives `with_retry`.
 
 ## Evasion Scripts
 
@@ -303,21 +373,24 @@ at compile time, so no runtime file reads are needed.
 
 | Script | Purpose |
 |--------|---------|
-| `WEBDRIVER_EVASION` | navigator.webdriver = false |
-| `CDP_EVASION` | Proxy on document to hide $cdc_* markers |
-| `CHROME_RUNTIME_EVASION` | chrome.runtime/loadTimes/csi APIs |
-| `PERMISSIONS_EVASION` | Fix Notification/Permissions consistency |
-| `PLUGINS_EVASION` | Spoof navigator.plugins (3 plugins) |
-| `NAVIGATOR_PROPS_EVASION` | languages, platform, hardware |
-| `HEADLESS_EVASION` | Screen dimensions, Image fix |
+| `NATIVE_TOSTRING_EVASION` | Prelude: patch helpers and native `toString` |
+| `WEBDRIVER_EVASION` | navigator.webdriver, only if Chrome exposes it |
+| `CHROME_RUNTIME_EVASION` | window.chrome, only if missing |
+| `PERMISSIONS_EVASION` | Notification/Permissions consistency, only if inconsistent |
+| `PLUGINS_EVASION` | The five PDF plugins, only if the list is empty |
+| `NAVIGATOR_PROPS_EVASION` | languages (one cached frozen array), platform, hardware |
+| `HEADLESS_EVASION` | PerformanceObserver entry types on old headless builds |
 | `BATTERY_EVASION` | navigator.getBattery() |
-| `NAVIGATOR_EXTRA_EVASION` | userAgentData, connection |
-| `FINGERPRINT_EVASION` | WebGL/Canvas/Audio noise |
-| `WEBRTC_EVASION` | Prevent IP leak via STUN |
+| `NAVIGATOR_EXTRA_EVASION` | connection, only if missing |
+| `WEBGL_EVASION` / `CANVAS_EVASION` / `AUDIO_EVASION` | Gated by `webgl_spoof`/`canvas_spoof`/`audio_spoof` |
 | `SPEECH_EVASION` | speechSynthesis.getVoices() |
 | `MEDIA_DEVICES_EVASION` | mediaDevices.enumerateDevices() |
 | `BLUETOOTH_EVASION` | navigator.bluetooth API |
-| `TIMEZONE_EVASION` | Intl.DateTimeFormat consistency |
+| `FONTS_EVASION` | document.fonts.check for system fonts (page fonts stay native) |
+| `KEYBOARD_EVASION` | navigator.keyboard.getLayoutMap() |
+
+`CDP_EVASION`, `TIMEZONE_EVASION` and `WEBRTC_EVASION` are deprecated empty
+strings; `FINGERPRINT_EVASION` is WebGL + canvas + audio.
 
 ## Common Tasks
 
@@ -332,8 +405,8 @@ at compile time, so no runtime file reads are needed.
 3. Test with `cargo run --example rebrowser_test`
 
 ### Add new Page method
-1. Add method to `impl Page` in `src/page.rs`
-2. For text-based methods, use Runtime.callFunctionOn (no DOM mutation)
+1. Add method to `impl Page` in `src/page.rs` or the matching `src/page/` module
+2. Pass values to page scripts as `callFunctionOn` arguments or JSON literals; no DOM mutation
 3. Update README.md API reference
 4. Update this file
 
@@ -348,8 +421,11 @@ cargo run --example rebrowser_test    # Runtime.enable leak, etc.
 
 Minimal by design:
 - `tokio` - async runtime
+- `tokio-tungstenite` / `futures-util` - WebSocket transport (no TLS)
+- `libc` - Unix process handling
+- `schemars` - optional JSON schemas (`schema` feature)
 - `serde`/`serde_json` - serialization
-- `aho-corasick` - binary patching
+- `aho-corasick` - binary patching (opt-in)
 - `memmap2` - memory-mapped file I/O
 - `fastrand` - human simulation randomness
 - `base64` - screenshot/response encoding
@@ -358,24 +434,11 @@ Minimal by design:
 
 ## Exported Types
 
-```rust
-pub use browser::{Browser, TabInfo};
-pub use error::{Error, Result};
-pub use action::{Action, ActionCall, TryActionCall, ActionDefaults, ActionOptions, ActionReceipt, ActionOutcome, DispatchState, DispatchObserver, Expectation, Locator, LocatorQuery, LocatorSpec};
-pub use network::{NetworkEvent, NetworkWatcher};
-pub use page::{
-    BoundingBox,      // Element position/size
-    CapturedRequest,  // Network request info
-    Element,          // DOM element wrapper
-    FrameInfo,        // Frame/iframe info
-    Page,             // Page abstraction
-    PageState,        // Debug info (url, title, element counts)
-    ResponseBody,     // Text or Binary response
-    TextMatch,        // Exact, Contains, StartsWith, EndsWith
-};
-pub use page::{ScreenshotClip, ScreenshotFormat, ScreenshotOptions};
-pub use recording::{NativeRecording, NativeRecordingOptions, RecordingChunk, RecordingError};
-pub use session::{BrowserSession, SessionCookie};
-pub use stealth::{Fingerprint, HumanSpeed};
-pub struct StealthConfig { ... }
-```
+See the `pub use` block in `src/lib.rs`; it is the source of truth. Highlights:
+`Browser`, `Page`, `Element`, `BoundingBox`, `Locator`, `Action`, `ActionCall`,
+`TryActionCall`, `ActionOptions`, `ActionReceipt`, `Expectation`, `Destination`,
+`InputMode`, `Error`, `ErrorCode`, `Result`, `RequestCapture`,
+`RequestCaptureOptions`, `NetworkWatcher`, `BrowserSession`, `SessionCookie`,
+`DownloadWatch`, `BoundedFetchRequest`, `FrameResponseCapture`,
+`NativeRecording`, `ScreenshotOptions`, `Fingerprint`, `HumanSpeed` and
+`StealthConfig`.
