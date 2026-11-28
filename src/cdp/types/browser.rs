@@ -69,8 +69,6 @@ pub struct TargetInfo {
     pub r#type: String,
     pub title: String,
     pub url: String,
-    #[serde(default)]
-    pub attached: bool,
 }
 
 pub type BrowserGetVersion = Empty;
@@ -80,8 +78,6 @@ pub type BrowserGetVersion = Empty;
 pub struct BrowserGetVersionResult {
     #[serde(default)]
     pub product: String,
-    #[serde(default)]
-    pub user_agent: String,
 }
 
 pub type BrowserClose = Empty;

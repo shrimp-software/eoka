@@ -490,7 +490,8 @@ async fn owned_teardown<T: Send + 'static>(
     operation: impl Future<Output = Result<T>> + Send + 'static,
 ) -> Result<T> {
     tokio::spawn(operation).await.map_err(|_| {
-        crate::Error::cdp_msg(
+        crate::Error::coded(
+            crate::ErrorCode::CleanupUncertain,
             "Owned browser teardown ended without a result; native cleanup is uncertain",
         )
     })?

@@ -55,8 +55,6 @@ pub struct RemoteObject {
     #[serde(default)]
     pub subtype: Option<String>,
     #[serde(default)]
-    pub class_name: Option<String>,
-    #[serde(default)]
     pub value: Option<serde_json::Value>,
     #[serde(default)]
     pub description: Option<String>,

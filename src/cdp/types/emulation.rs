@@ -22,12 +22,14 @@ pub struct EmulationSetDeviceMetricsOverride {
 impl EmulationSetDeviceMetricsOverride {
     pub(crate) fn new(width: u32, height: u32, device_scale_factor: f64) -> crate::Result<Self> {
         if width == 0 || height == 0 || width > i32::MAX as u32 || height > i32::MAX as u32 {
-            return Err(crate::Error::cdp_msg(
+            return Err(crate::Error::coded(
+                crate::ErrorCode::InvalidArgument,
                 "Viewport dimensions must be positive and no greater than i32::MAX",
             ));
         }
         if !device_scale_factor.is_finite() || device_scale_factor <= 0.0 {
-            return Err(crate::Error::cdp_msg(
+            return Err(crate::Error::coded(
+                crate::ErrorCode::InvalidArgument,
                 "Viewport device scale factor must be positive and finite",
             ));
         }

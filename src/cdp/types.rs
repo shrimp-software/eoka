@@ -1,8 +1,4 @@
 //! Hand-written CDP schemas, organized by domain.
-//!
-//! Protocol responses include fields that are not yet read internally. Keep
-//! their wire definitions without turning them into public API obligations.
-#![allow(dead_code)]
 
 use serde::Serialize;
 
