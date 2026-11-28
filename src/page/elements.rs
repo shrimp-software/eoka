@@ -44,10 +44,7 @@ impl Page {
             return Err(Error::ElementNotFound(selector.to_string()));
         }
 
-        Ok(Element {
-            page: self.clone(),
-            node_id,
-        })
+        Element::from_node_id(self, node_id).await
     }
 
     /// Find all elements matching a CSS selector
@@ -56,14 +53,13 @@ impl Page {
             .with_document(|doc| self.session.query_selector_all(doc, selector))
             .await?;
 
-        Ok(node_ids
-            .into_iter()
-            .filter(|&id| id != 0)
-            .map(|node_id| Element {
-                page: self.clone(),
-                node_id,
-            })
-            .collect())
+        futures_util::future::try_join_all(
+            node_ids
+                .into_iter()
+                .filter(|&id| id != 0)
+                .map(|node_id| Element::from_node_id(self, node_id)),
+        )
+        .await
     }
 
     /// Check if an element exists
@@ -110,10 +106,7 @@ impl Page {
             return Err(Error::ElementNotFound(format!("text: {}", text)));
         }
 
-        Ok(Element {
-            page: self.clone(),
-            node_id,
-        })
+        Element::from_node_id(self, node_id).await
     }
 
     /// Find all elements matching the given text
@@ -145,10 +138,7 @@ impl Page {
             if let Some(ref obj_id) = prop.value.as_ref().and_then(|v| v.object_id.clone()) {
                 if let Ok(node_id) = self.session.request_node(obj_id).await {
                     if node_id != 0 {
-                        elements.push(Element {
-                            page: self.clone(),
-                            node_id,
-                        });
+                        elements.push(Element::from_node_id(self, node_id).await?);
                     }
                 }
             }

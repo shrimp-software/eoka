@@ -398,3 +398,40 @@ async fn with_retry_stops_on_permanent_errors() {
     );
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn locator_covers_hover_focus_type_and_submit() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    page.execute("document.body.innerHTML=`<form id=f onsubmit='event.preventDefault();document.querySelector(\"#h\").textContent=\"sent\"'><input id=q></form><div id=h>hover</div>`").await.unwrap();
+    let receipt = page.locator("#h").hover(options()).await.unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    let receipt = page.locator("#q").focus(options()).await.unwrap();
+    assert_eq!(receipt.outcome, ActionOutcome::VerifiedComplete);
+    page.locator("#q")
+        .type_text(
+            "abc",
+            ActionOptions {
+                expect: Some(Expectation::Value {
+                    target: LocatorSpec::css("#q"),
+                    value: "abc".into(),
+                }),
+                ..options()
+            },
+        )
+        .await
+        .unwrap();
+    page.locator("#q")
+        .submit(ActionOptions {
+            expect: Some(Expectation::Text {
+                target: LocatorSpec::css("#h"),
+                value: "sent".into(),
+                contains: false,
+            }),
+            ..options()
+        })
+        .await
+        .unwrap();
+    browser.close().await.unwrap();
+}

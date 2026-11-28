@@ -107,3 +107,21 @@ async fn missing_shadow_selector_times_out() {
     assert!(matches!(error, Error::Timeout(_)), "got {error:?}");
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn element_handles_survive_a_shadow_click() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    page.execute("document.body.innerHTML='<p id=a data-q=\"it&#39;s\">alpha</p><div id=host></div>';const r=document.querySelector('#host').attachShadow({mode:'closed'});r.innerHTML='<button id=b>B</button>'").await.unwrap();
+    let element = page.find("#a").await.unwrap();
+    page.click_shadow("#b").await.unwrap();
+    // click_shadow re-requests the document, which invalidates frontend node ids.
+    assert_eq!(element.text().await.unwrap(), "alpha");
+    assert_eq!(
+        element.get_attribute("data-q").await.unwrap().as_deref(),
+        Some("it's")
+    );
+    assert!(element.bounding_box().await.is_some());
+    browser.close().await.unwrap();
+}

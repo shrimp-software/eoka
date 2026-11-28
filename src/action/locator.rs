@@ -111,6 +111,85 @@ impl Locator {
             )
             .await
     }
+    /// Double-click and verify the supplied completion condition.
+    pub async fn double_click(&self, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run(
+            Action::Click {
+                target: self.spec.clone(),
+                human: false,
+                double: true,
+            },
+            options,
+        )
+        .await
+    }
+    /// Move the pointer over the target and verify hover.
+    pub async fn hover(&self, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run(
+            Action::Hover {
+                target: self.spec.clone(),
+                human: false,
+            },
+            options,
+        )
+        .await
+    }
+    /// Hover with paced pointer movement and verify hover.
+    pub async fn human_hover(&self, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run(
+            Action::Hover {
+                target: self.spec.clone(),
+                human: true,
+            },
+            options,
+        )
+        .await
+    }
+    /// Focus the target and type without clearing; verify the supplied condition.
+    pub async fn type_text(&self, text: &str, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run(
+            Action::Type {
+                target: self.spec.clone(),
+                text: text.into(),
+                input_mode: Default::default(),
+            },
+            options,
+        )
+        .await
+    }
+    /// Focus the target and verify focus.
+    pub async fn focus(&self, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run(
+            Action::Focus {
+                target: self.spec.clone(),
+            },
+            options,
+        )
+        .await
+    }
+    /// Focus the target, press Enter and verify the supplied condition.
+    pub async fn submit(&self, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run(
+            Action::Submit {
+                target: self.spec.clone(),
+            },
+            options,
+        )
+        .await
+    }
+    /// Scroll the target into the viewport and verify it is there.
+    pub async fn scroll_into_view(&self, options: ActionOptions) -> Result<ActionReceipt> {
+        self.run(
+            Action::ScrollIntoView {
+                target: self.spec.clone(),
+            },
+            options,
+        )
+        .await
+    }
+    async fn run(&self, action: Action, options: ActionOptions) -> Result<ActionReceipt> {
+        self.page.act(action, options).await
+    }
     /// Set and verify the uploaded files.
     pub async fn upload(
         &self,

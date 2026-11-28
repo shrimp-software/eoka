@@ -4,8 +4,9 @@
 
 use crate::action::ActionCall;
 use crate::error::{Error, Result};
-use crate::page::{escape_js_string, Page};
+use crate::page::Page;
 use crate::{Action, LocatorQuery, LocatorSpec};
+use serde_json::{json, Value};
 
 /// Bounding box of an element
 #[derive(Debug, Clone, Copy)]
@@ -28,28 +29,60 @@ impl BoundingBox {
 }
 
 /// A handle to a DOM element. Owns a cheap clone of its `Page`, so it is
-/// `'static` — you can store it, return it, and pass it around freely. The
-/// `node_id` can still go stale if the DOM mutates or the page navigates; a
-/// stale handle surfaces as an `ElementNotFound`/`Cdp` error on use.
+/// `'static` — you can store it, return it, and pass it around freely.
+///
+/// The handle is pinned to Chrome's backend node id, which stays valid for
+/// the node's lifetime even when other calls re-request the document. It goes
+/// stale when the node is removed or the page navigates; a stale handle
+/// surfaces as an error on use and is never retargeted to a replacement.
 pub struct Element {
     pub(crate) page: Page,
-    pub(crate) node_id: i32,
+    pub(crate) backend_node_id: i64,
 }
 
 impl Element {
+    /// Pins a frontend node id from the current document to its backend id.
+    pub(crate) async fn from_node_id(page: &Page, node_id: i32) -> Result<Self> {
+        let described: Value = page
+            .session
+            .send("DOM.describeNode", &json!({ "nodeId": node_id }))
+            .await?;
+        let backend_node_id = described["node"]["backendNodeId"]
+            .as_i64()
+            .ok_or_else(|| Error::cdp("DOM.describeNode", -1, "No backendNodeId returned"))?;
+        Ok(Self {
+            page: page.clone(),
+            backend_node_id,
+        })
+    }
+
     fn action_target(&self) -> LocatorSpec {
         LocatorSpec {
-            query: LocatorQuery::Node { id: self.node_id },
+            query: LocatorQuery::BackendNode {
+                id: self.backend_node_id,
+            },
             frame_id: None,
             index: None,
         }
     }
 
+    async fn box_model(&self) -> Result<crate::cdp::types::BoxModel> {
+        let result: crate::cdp::types::DOMGetBoxModelResult = self
+            .page
+            .session
+            .send(
+                "DOM.getBoxModel",
+                &json!({ "backendNodeId": self.backend_node_id }),
+            )
+            .await?;
+        Ok(result.model)
+    }
+
     /// Get the element's center coordinates
     pub async fn center(&self) -> Result<(f64, f64)> {
-        let model = self.page.session.get_box_model(self.node_id).await?;
+        let model = self.box_model().await?;
         model.try_center().ok_or_else(|| Error::ElementNotVisible {
-            selector: format!("node {}", self.node_id),
+            selector: format!("backend node {}", self.backend_node_id),
         })
     }
 
@@ -92,40 +125,74 @@ impl Element {
 
     /// Get outer HTML
     pub async fn outer_html(&self) -> Result<String> {
-        self.page.session.get_outer_html(self.node_id).await
-    }
-
-    /// Get inner text
-    ///
-    /// Extracts text content from the element's outerHTML without using focus.
-    pub async fn text(&self) -> Result<String> {
-        self.eval_str("this.textContent || ''").await
-    }
-
-    /// Evaluate a JavaScript expression on this element via Runtime.callFunctionOn.
-    ///
-    /// The expression should use `this` to refer to the element.
-    /// Example: `"this.textContent || ''"`, `"this.tagName.toLowerCase()"`
-    async fn eval_on_element(&self, js_body: &str) -> Result<serde_json::Value> {
-        let object_id = self.page.session.resolve_node(self.node_id).await?;
-        let func = format!("function() {{ return {}; }}", js_body);
-        let result = self
+        let result: Value = self
             .page
             .session
-            .call_function_on(&object_id, &func)
+            .send(
+                "DOM.getOuterHTML",
+                &json!({ "backendNodeId": self.backend_node_id }),
+            )
             .await?;
-        Ok(result.result.value.unwrap_or(serde_json::Value::Null))
+        Ok(result["outerHTML"].as_str().unwrap_or_default().to_owned())
     }
 
-    /// Evaluate JS on element, return as String (empty string on null/non-string)
-    async fn eval_str(&self, js_body: &str) -> Result<String> {
-        let value = self.eval_on_element(js_body).await?;
+    /// Get the element's `textContent` (empty when it has none).
+    pub async fn text(&self) -> Result<String> {
+        self.eval_str("function(){return this.textContent || ''}", &[])
+            .await
+    }
+
+    /// Calls `function` with this element as `this` and JSON `args` as its
+    /// arguments, returning the result by value. The remote object is
+    /// released afterwards so repeated calls do not pin DOM nodes.
+    async fn call_on_element(&self, function: &str, args: &[Value]) -> Result<Value> {
+        let resolved: Value = self
+            .page
+            .session
+            .send(
+                "DOM.resolveNode",
+                &json!({ "backendNodeId": self.backend_node_id }),
+            )
+            .await?;
+        let object_id = resolved["object"]["objectId"]
+            .as_str()
+            .ok_or_else(|| Error::cdp("DOM.resolveNode", -1, "No object_id returned"))?
+            .to_owned();
+        let arguments: Vec<Value> = args.iter().map(|value| json!({ "value": value })).collect();
+        let result: Result<Value> = self
+            .page
+            .session
+            .send(
+                "Runtime.callFunctionOn",
+                &json!({
+                    "objectId": object_id,
+                    "functionDeclaration": function,
+                    "arguments": arguments,
+                    "returnByValue": true,
+                }),
+            )
+            .await;
+        let _ = self
+            .page
+            .session
+            .send::<_, Value>("Runtime.releaseObject", &json!({ "objectId": object_id }))
+            .await;
+        let result = result?;
+        if let Some(details) = result.get("exceptionDetails") {
+            return Err(Error::javascript_exception(details));
+        }
+        Ok(result["result"]["value"].clone())
+    }
+
+    /// Call a function on the element, returning a String (empty on null/non-string)
+    async fn eval_str(&self, function: &str, args: &[Value]) -> Result<String> {
+        let value = self.call_on_element(function, args).await?;
         Ok(value.as_str().unwrap_or("").to_string())
     }
 
-    /// Evaluate JS on element, return as bool with a default
-    async fn eval_bool(&self, js_body: &str, default: bool) -> Result<bool> {
-        let value = self.eval_on_element(js_body).await?;
+    /// Call a function on the element, returning a bool with a default
+    async fn eval_bool(&self, function: &str, default: bool) -> Result<bool> {
+        let value = self.call_on_element(function, &[]).await?;
         Ok(value.as_bool().unwrap_or(default))
     }
 
@@ -163,7 +230,7 @@ impl Element {
     ///
     /// Returns None if the element is not visible/rendered.
     pub async fn bounding_box(&self) -> Option<BoundingBox> {
-        match self.page.session.get_box_model(self.node_id).await {
+        match self.box_model().await {
             Ok(model) => {
                 let content = &model.content;
                 if content.len() >= 8 {
@@ -193,9 +260,11 @@ impl Element {
 
     /// Get an attribute value
     pub async fn get_attribute(&self, name: &str) -> Result<Option<String>> {
-        let escaped_name = escape_js_string(name);
         let value = self
-            .eval_on_element(&format!("this.getAttribute('{}')", escaped_name))
+            .call_on_element(
+                "function(name){return this.getAttribute(name)}",
+                &[json!(name)],
+            )
             .await?;
 
         if value.is_null() {
@@ -209,31 +278,34 @@ impl Element {
 
     /// Get the tag name of the element (e.g., "div", "input", "a")
     pub async fn tag_name(&self) -> Result<String> {
-        self.eval_str("this.tagName.toLowerCase()").await
+        self.eval_str("function(){return this.tagName.toLowerCase()}", &[])
+            .await
     }
 
     /// Check if the element is enabled (not disabled)
     pub async fn is_enabled(&self) -> Result<bool> {
-        self.eval_bool("!this.disabled", true).await
+        self.eval_bool("function(){return !this.disabled}", true)
+            .await
     }
 
     /// Check if a checkbox/radio is checked
     pub async fn is_checked(&self) -> Result<bool> {
-        self.eval_bool("this.checked === true", false).await
+        self.eval_bool("function(){return this.checked === true}", false)
+            .await
     }
 
     /// Get the value of an input element
     pub async fn value(&self) -> Result<String> {
-        self.eval_str("this.value || ''").await
+        self.eval_str("function(){return this.value || ''}", &[])
+            .await
     }
 
     /// Get computed CSS property value
     pub async fn css(&self, property: &str) -> Result<String> {
-        let escaped = escape_js_string(property);
-        self.eval_str(&format!(
-            "getComputedStyle(this).getPropertyValue('{}')",
-            escaped
-        ))
+        self.eval_str(
+            "function(property){return getComputedStyle(this).getPropertyValue(property)}",
+            &[json!(property)],
+        )
         .await
     }
 

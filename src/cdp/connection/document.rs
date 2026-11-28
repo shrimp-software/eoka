@@ -84,59 +84,6 @@ impl Session {
         Ok(result.node_ids)
     }
 
-    /// Get the box model for an element
-    pub(crate) async fn get_box_model(&self, node_id: i32) -> Result<BoxModel> {
-        let result: DOMGetBoxModelResult = self
-            .send(
-                "DOM.getBoxModel",
-                &DOMGetBoxModel {
-                    node_id: Some(node_id),
-                },
-            )
-            .await?;
-        Ok(result.model)
-    }
-
-    /// Get outer HTML of an element
-    pub(crate) async fn get_outer_html(&self, node_id: i32) -> Result<String> {
-        let result: DOMGetOuterHTMLResult = self
-            .send(
-                "DOM.getOuterHTML",
-                &DOMGetOuterHTML {
-                    node_id: Some(node_id),
-                },
-            )
-            .await?;
-        Ok(result.outer_html)
-    }
-
-    /// Resolve a DOM node to a Runtime remote object ID
-    pub(crate) async fn resolve_node(&self, node_id: i32) -> Result<String> {
-        let result: DOMResolveNodeResult = self
-            .send(
-                "DOM.resolveNode",
-                &DOMResolveNode {
-                    node_id: Some(node_id),
-                    object_group: Some("eoka".to_string()),
-                },
-            )
-            .await?;
-        result
-            .object
-            .object_id
-            .ok_or_else(|| crate::error::Error::cdp("DOM.resolveNode", -1, "No object_id returned"))
-    }
-
-    /// Call a function on a remote object and return the result by value
-    pub(crate) async fn call_function_on(
-        &self,
-        object_id: &str,
-        function_declaration: &str,
-    ) -> Result<RuntimeEvaluateResult> {
-        self.call_function_on_impl(object_id, function_declaration, true)
-            .await
-    }
-
     /// Evaluate JavaScript and return a remote object reference (not by value).
     pub(crate) async fn evaluate_for_remote_object(
         &self,
@@ -174,31 +121,6 @@ impl Session {
             )
             .await?;
         Ok(result.result)
-    }
-
-    async fn call_function_on_impl(
-        &self,
-        object_id: &str,
-        function_declaration: &str,
-        return_by_value: bool,
-    ) -> Result<RuntimeEvaluateResult> {
-        let result: RuntimeCallFunctionOnResult = self
-            .send(
-                "Runtime.callFunctionOn",
-                &RuntimeCallFunctionOn {
-                    function_declaration: function_declaration.to_string(),
-                    object_id: Some(object_id.to_string()),
-                    arguments: None,
-                    silent: None,
-                    return_by_value: Some(return_by_value),
-                    await_promise: Some(true),
-                },
-            )
-            .await?;
-        Ok(RuntimeEvaluateResult {
-            result: result.result,
-            exception_details: result.exception_details,
-        })
     }
 
     /// Evaluate JavaScript expression and return the result by value
