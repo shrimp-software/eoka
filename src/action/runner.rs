@@ -12,7 +12,16 @@ use super::{
     perform::{self, Verification},
     *,
 };
-use crate::{cdp::transport::CdpMessage, page::ActionInput, Error, Page, Result};
+use crate::{
+    cdp::transport::CdpMessage,
+    error::classify::{cdp_failure, CdpFailure},
+    page::ActionInput,
+    Error, ErrorCode, Page, Result,
+};
+
+/// How long a filled value must stay unchanged and wrong before fill reports
+/// [`Error::ValueMismatch`].
+const VALUE_SETTLE: Duration = Duration::from_millis(750);
 
 struct Cleanup {
     gate: Option<OwnedMutexGuard<()>>,
@@ -96,13 +105,13 @@ impl Page {
         let execution = async {
             if options.timeout_ms == 0 || options.timeout_ms > 86_400_000 {
                 return Err(Error::coded(
-                    crate::ErrorCode::InvalidTimeout,
+                    ErrorCode::InvalidTimeout,
                     "action timeout must be between 1 and 86400000ms",
                 ));
             }
             if action.requires_expectation() && options.expect.is_none() && !exploratory {
                 return Err(Error::coded(
-                    crate::ErrorCode::ExpectationRequired,
+                    ErrorCode::ExpectationRequired,
                     "action requires an expected result",
                 ));
             }
@@ -114,13 +123,11 @@ impl Page {
             }
             if let Some(expect) = &options.expect {
                 validate_expectation(expect, 0)?;
-            }
-            if let Some(expect) = &options.expect {
                 if options.destination != Destination::NewTab
                     && self.check_expectation(expect).await?
                 {
                     return Err(Error::coded(
-                        crate::ErrorCode::ExpectationAlreadySatisfied,
+                        ErrorCode::ExpectationAlreadySatisfied,
                         "choose a condition that proves a new result",
                     ));
                 }
@@ -209,17 +216,9 @@ impl Page {
                                 match &settled {
                                     Some((value, since)) if *value == actual => {
                                         if since.elapsed() >= VALUE_SETTLE {
-                                            let chars = |v: &Value| {
-                                                v.as_str().map_or(0, |s| s.chars().count())
-                                            };
-                                            return Err(Error::ValueMismatch {
-                                                selector: action.target().map_or_else(
-                                                    || "the focused control".into(),
-                                                    |t| format!("{:?}", t.query),
-                                                ),
-                                                expected_chars: chars(&expected),
-                                                actual_chars: chars(&actual),
-                                            });
+                                            return Err(value_mismatch(
+                                                &action, &expected, &actual,
+                                            ));
                                         }
                                     }
                                     _ => settled = Some((actual, tokio::time::Instant::now())),
@@ -234,7 +233,7 @@ impl Page {
                     if matches!(options.expect, Some(Expectation::DownloadStarted)) => {}
                 Verification::NavigationAborted { download } => {
                     return Err(Error::coded(
-                        crate::ErrorCode::NavigationAborted,
+                        ErrorCode::NavigationAborted,
                         if download {
                             "the navigation became a download; expect DownloadStarted to wait for it"
                         } else {
@@ -406,7 +405,7 @@ impl Page {
             Expectation::All { conditions } => {
                 if conditions.is_empty() {
                     return Err(Error::coded(
-                        crate::ErrorCode::InvalidExpectation,
+                        ErrorCode::InvalidExpectation,
                         "all requires at least one condition",
                     ));
                 }
@@ -467,6 +466,24 @@ impl Page {
         })
     }
 
+    /// Checks an expectation after dispatch. Input often starts a navigation,
+    /// which destroys the context the check runs in; that means "not yet",
+    /// not failure, because the next document may satisfy it.
+    async fn check_settling(&self, expect: &Expectation) -> Result<bool> {
+        match self.check_expectation(expect).await {
+            Err(error)
+                if matches!(
+                    cdp_failure(&error),
+                    Some(CdpFailure::ContextLost | CdpFailure::NodeGone)
+                ) =>
+            {
+                tracing::debug!("expectation check raced a document change: {error}");
+                Ok(false)
+            }
+            result => result,
+        }
+    }
+
     /// Wait for observable page state without dispatching input or replaying an action.
     pub async fn wait_for_expectation(
         &self,
@@ -491,48 +508,33 @@ impl Page {
     }
 }
 
-/// How long a filled value must stay unchanged and wrong before fill reports
-/// [`Error::ValueMismatch`].
-const VALUE_SETTLE: Duration = Duration::from_millis(750);
-
-impl Page {
-    /// Checks an expectation after dispatch. Input often starts a navigation,
-    /// which destroys the context the check runs in; that means "not yet",
-    /// not failure, because the next document may satisfy it.
-    async fn check_settling(&self, expect: &Expectation) -> Result<bool> {
-        use crate::error::classify::{cdp_failure, CdpFailure};
-        match self.check_expectation(expect).await {
-            Err(error)
-                if matches!(
-                    cdp_failure(&error),
-                    Some(CdpFailure::ContextLost | CdpFailure::NodeGone)
-                ) =>
-            {
-                tracing::debug!("expectation check raced a document change: {error}");
-                Ok(false)
-            }
-            result => result,
-        }
+fn value_mismatch(action: &Action, expected: &Value, actual: &Value) -> Error {
+    let chars = |v: &Value| v.as_str().map_or(0, |s| s.chars().count());
+    Error::ValueMismatch {
+        selector: action.target().map_or_else(
+            || "the focused control".into(),
+            |t| format!("{:?}", t.query),
+        ),
+        expected_chars: chars(expected),
+        actual_chars: chars(actual),
     }
 }
 
 /// The stable code an action failure reports for its underlying cause.
-fn action_code(source: &Error) -> crate::ErrorCode {
-    use crate::ErrorCode;
-    match source {
-        Error::Coded { code, .. } | Error::Action { code, .. } => *code,
+fn action_code(source: &Error) -> ErrorCode {
+    source.code().unwrap_or(match source {
         Error::Timeout(_) => ErrorCode::ActionTimeout,
         Error::InputState(_) => ErrorCode::InputState,
         Error::ElementNotFound(_) | Error::ElementNotVisible { .. } => ErrorCode::TargetUnavailable,
-        Error::ValueMismatch { .. } => ErrorCode::ValueMismatch,
         Error::Navigation(_) => ErrorCode::NavigationFailed,
         _ => ErrorCode::ActionFailed,
-    }
+    })
 }
+
 fn validate_expectation(expectation: &Expectation, depth: usize) -> Result<()> {
     if depth > 8 {
         return Err(Error::coded(
-            crate::ErrorCode::InvalidExpectation,
+            ErrorCode::InvalidExpectation,
             "nesting exceeds 8",
         ));
     }
@@ -540,7 +542,7 @@ fn validate_expectation(expectation: &Expectation, depth: usize) -> Result<()> {
         Expectation::All { conditions } => {
             if conditions.is_empty() || conditions.len() > 16 {
                 return Err(Error::coded(
-                    crate::ErrorCode::InvalidExpectation,
+                    ErrorCode::InvalidExpectation,
                     "all requires 1 through 16 conditions",
                 ));
             }
@@ -550,7 +552,7 @@ fn validate_expectation(expectation: &Expectation, depth: usize) -> Result<()> {
         }
         Expectation::DownloadStarted if depth > 0 => {
             return Err(Error::coded(
-                crate::ErrorCode::InvalidExpectation,
+                ErrorCode::InvalidExpectation,
                 "download_started must be a standalone event expectation",
             ))
         }

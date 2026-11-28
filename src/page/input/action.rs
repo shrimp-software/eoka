@@ -1,5 +1,9 @@
-use super::*;
+use super::{
+    dispatch_coordinated_key_event, dispatch_coordinated_mouse_event, held_key_from_combo,
+    input_state_error, key_event, sleep_ms, HeldInputState, MouseButton, MouseEventType, Session,
+};
 use crate::action::dispatch::Dispatch;
+use crate::error::Result;
 use serde_json::json;
 use tokio::sync::OwnedMutexGuard;
 
@@ -135,25 +139,24 @@ impl ActionInput {
                     (ch.to_string(), ch.to_string())
                 };
                 let (code, virtual_key, shift) = us_key(ch);
-                let modifiers = if shift { 8 } else { 0 };
+                let mut event = json!({"type":"keyDown","key":key,"code":code,"text":typed,"unmodifiedText":typed,
+                    "windowsVirtualKeyCode":virtual_key,"nativeVirtualKeyCode":virtual_key,"modifiers":if shift { 8 } else { 0 }});
                 dispatch
                     .send(
                         &self.session,
                         "Input.dispatchKeyEvent",
-                        json!({"type":"keyDown","key":key,"code":code,"text":typed,"unmodifiedText":typed,
-                            "windowsVirtualKeyCode":virtual_key,"nativeVirtualKeyCode":virtual_key,"modifiers":modifiers}),
+                        event.clone(),
                         false,
                     )
                     .await?;
                 sleep_ms(fastrand::u64(15..45)).await;
+                event["type"] = json!("keyUp");
+                if let Some(fields) = event.as_object_mut() {
+                    fields.remove("text");
+                    fields.remove("unmodifiedText");
+                }
                 dispatch
-                    .send(
-                        &self.session,
-                        "Input.dispatchKeyEvent",
-                        json!({"type":"keyUp","key":key,"code":code,
-                            "windowsVirtualKeyCode":virtual_key,"nativeVirtualKeyCode":virtual_key,"modifiers":modifiers}),
-                        false,
-                    )
+                    .send(&self.session, "Input.dispatchKeyEvent", event, false)
                     .await?;
                 let pause = if ch == ' ' || ch.is_ascii_punctuation() {
                     fastrand::u64(90..220)

@@ -13,10 +13,9 @@ fn text_candidates_expression(text: &str, match_type: TextMatch, all: bool) -> R
         TextMatch::EndsWith => "ends_with",
     };
     Ok(format!(
-        "({})({}, {}, {all})",
+        "({})({}, '{mode}', {all})",
         include_str!("text_candidates.js"),
-        serde_json::to_string(text)?,
-        serde_json::to_string(mode)?
+        serde_json::to_string(text)?
     ))
 }
 

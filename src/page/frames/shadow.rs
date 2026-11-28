@@ -1,8 +1,16 @@
 //! Clicking elements inside (closed) shadow roots, in the top frame or any
 //! child frame.
 
-#[allow(unused_imports)]
-use super::*;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use super::{frame_discovery_raced, FrameObjects, Page, ShadowClickReceipt, Snapshot};
+use crate::cdp::Session;
+use crate::error::{Error, Result};
+use crate::stealth::human::Human;
+use crate::MouseButton;
 
 /// Default deadline for resolving a shadow-root target.
 const SHADOW_CLICK_TIMEOUT: Duration = Duration::from_secs(10);

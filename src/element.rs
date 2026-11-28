@@ -31,10 +31,9 @@ impl BoundingBox {
 /// A handle to a DOM element. Owns a cheap clone of its `Page`, so it is
 /// `'static` — you can store it, return it, and pass it around freely.
 ///
-/// The handle is pinned to Chrome's backend node id, which stays valid for
-/// the node's lifetime even when other calls re-request the document. It goes
-/// stale when the node is removed or the page navigates; a stale handle
-/// surfaces as an error on use and is never retargeted to a replacement.
+/// Pinned to Chrome's backend node id, which survives document re-requests.
+/// Removing the node or navigating makes the handle stale: it then errors on
+/// use and is never retargeted to a replacement.
 pub struct Element {
     pub(crate) page: Page,
     pub(crate) backend_node_id: i64,
@@ -142,9 +141,8 @@ impl Element {
             .await
     }
 
-    /// Calls `function` with this element as `this` and JSON `args` as its
-    /// arguments, returning the result by value. The remote object is
-    /// released afterwards so repeated calls do not pin DOM nodes.
+    /// Calls `function` with this element as `this`, returning the result by
+    /// value. The remote object is released so repeated calls don't pin nodes.
     async fn call_on_element(&self, function: &str, args: &[Value]) -> Result<Value> {
         let resolved: Value = self
             .page
@@ -230,32 +228,25 @@ impl Element {
     ///
     /// Returns None if the element is not visible/rendered.
     pub async fn bounding_box(&self) -> Option<BoundingBox> {
-        match self.box_model().await {
-            Ok(model) => {
-                let content = &model.content;
-                if content.len() >= 8 {
-                    // content is [x1,y1, x2,y2, x3,y3, x4,y4] for a quad
-                    // Handle rotated/transformed elements by finding actual bounds
-                    let xs = [content[0], content[2], content[4], content[6]];
-                    let ys = [content[1], content[3], content[5], content[7]];
-
-                    let min_x = xs.iter().copied().fold(f64::INFINITY, f64::min);
-                    let max_x = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-                    let min_y = ys.iter().copied().fold(f64::INFINITY, f64::min);
-                    let max_y = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-
-                    Some(BoundingBox {
-                        x: min_x,
-                        y: min_y,
-                        width: max_x - min_x,
-                        height: max_y - min_y,
-                    })
-                } else {
-                    None
-                }
-            }
-            Err(_) => None,
+        let model = self.box_model().await.ok()?;
+        let content = &model.content;
+        if content.len() < 8 {
+            return None;
         }
+        // content is [x1,y1, x2,y2, x3,y3, x4,y4] for a quad; take the
+        // bounds so rotated/transformed elements are covered.
+        let xs = [content[0], content[2], content[4], content[6]];
+        let ys = [content[1], content[3], content[5], content[7]];
+        let min_x = xs.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_x = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let min_y = ys.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_y = ys.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        Some(BoundingBox {
+            x: min_x,
+            y: min_y,
+            width: max_x - min_x,
+            height: max_y - min_y,
+        })
     }
 
     /// Get an attribute value
@@ -266,14 +257,7 @@ impl Element {
                 &[json!(name)],
             )
             .await?;
-
-        if value.is_null() {
-            return Ok(None);
-        }
-        if let Some(s) = value.as_str() {
-            return Ok(Some(s.to_string()));
-        }
-        Ok(None)
+        Ok(value.as_str().map(str::to_owned))
     }
 
     /// Get the tag name of the element (e.g., "div", "input", "a")

@@ -184,12 +184,10 @@ impl Page {
     /// redirects elsewhere (to a login page, say) and there is storage to restore,
     /// this fails after restoring cookies and writes no storage.
     ///
-    /// The user agent is left alone when it already matches. A different saved
-    /// user agent is applied together with client-hint metadata derived from it,
-    /// keeping this page's languages; script-visible values the stealth
-    /// evasions installed at launch, such as `navigator.platform`, still come
-    /// from the launch fingerprint, so restore into a browser launched with the
-    /// saved `user_agent` for a fully consistent identity.
+    /// A different saved user agent is applied with matching client hints and
+    /// this page's languages. Values the launch evasions installed, such as
+    /// `navigator.platform`, keep the launch fingerprint; launch with the saved
+    /// `user_agent` for a fully consistent identity.
     pub async fn restore_state(&self, state: &BrowserState) -> Result<()> {
         self.restore_user_agent(&state.user_agent).await?;
         if !self.config.live_session {
