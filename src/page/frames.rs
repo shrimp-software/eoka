@@ -55,9 +55,12 @@ struct Snapshot {
 
 impl Snapshot {
     fn get(&self, id: &str) -> Result<&Entry> {
-        self.entries
-            .get(id)
-            .ok_or_else(|| Error::cdp_msg(format!("Frame not in this page: {id}")))
+        self.entries.get(id).ok_or_else(|| {
+            Error::coded(
+                ErrorCode::PreconditionFailed,
+                format!("Frame not in this page: {id}"),
+            )
+        })
     }
 
     async fn capture(page: &Page) -> Result<Self> {
@@ -101,7 +104,10 @@ impl Snapshot {
                 snapshot.attachments.push(AttachedFrame(session.clone()));
                 tree = session.get_frame_tree().await?;
                 if tree.frame.id != id {
-                    return Err(Error::cdp_msg("Frame target changed while attaching"));
+                    return Err(Error::coded(
+                        ErrorCode::PreconditionFailed,
+                        "Frame target changed while attaching",
+                    ));
                 }
             }
             for target in targets
@@ -242,7 +248,10 @@ impl Page {
         hit_test: bool,
     ) -> Result<(f64, f64)> {
         if !x.is_finite() || !y.is_finite() {
-            return Err(Error::cdp_msg("Frame coordinates must be finite"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "Frame coordinates must be finite",
+            ));
         }
         let snapshot = Snapshot::capture(self).await?;
         let mut id = frame_id;
@@ -295,7 +304,10 @@ impl Page {
                 || (quad[5] - quad[7]).abs() > 1e-6
                 || (quad[6] - quad[0]).abs() > 1e-6
             {
-                return Err(Error::cdp_msg("Unsupported rendered frame owner transform"));
+                return Err(Error::coded(
+                    ErrorCode::PreconditionFailed,
+                    "Unsupported rendered frame owner transform",
+                ));
             }
             let result: Result<RuntimeEvaluateResult> = parent
                 .session
@@ -316,12 +328,16 @@ impl Page {
                 || geometry.scale_x <= 0.0
                 || geometry.scale_y <= 0.0
             {
-                return Err(Error::cdp_msg(
+                return Err(Error::coded(
+                    ErrorCode::PreconditionFailed,
                     "Unsupported transformed or hidden frame owner",
                 ));
             }
             if (geometry.width - size[0]).abs() > 1.0 || (geometry.height - size[1]).abs() > 1.0 {
-                return Err(Error::cdp_msg("Frame owner and viewport dimensions differ"));
+                return Err(Error::coded(
+                    ErrorCode::PreconditionFailed,
+                    "Frame owner and viewport dimensions differ",
+                ));
             }
             x = geometry.x + x * geometry.scale_x;
             y = geometry.y + y * geometry.scale_y;
@@ -370,7 +386,10 @@ impl Page {
         expression: &str,
     ) -> Result<T> {
         if frame_selector.len() > 4096 {
-            return Err(Error::cdp_msg("Frame selector exceeds 4096 bytes"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "Frame selector exceeds 4096 bytes",
+            ));
         }
         let root = self.session.get_frame_tree().await?.frame.id;
         let context = self.session.create_isolated_world(&root).await?;
@@ -395,9 +414,12 @@ impl Page {
             .session
             .send("DOM.describeNode", &json!({"objectId":object_id}))
             .await?;
-        let frame_id = described["node"]["frameId"]
-            .as_str()
-            .ok_or_else(|| Error::cdp_msg("Selected frame has no attached document"))?;
+        let frame_id = described["node"]["frameId"].as_str().ok_or_else(|| {
+            Error::coded(
+                ErrorCode::PreconditionFailed,
+                "Selected frame has no attached document",
+            )
+        })?;
         objects.release().await?;
         self.evaluate_in_frame_id(frame_id, expression).await
     }
@@ -440,7 +462,10 @@ impl Page {
         index: usize,
     ) -> Result<[f64; 8]> {
         if index >= 64 || selector.len() > 4096 {
-            return Err(Error::cdp_msg("Frame quad selection limit exceeded"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "Frame quad selection limit exceeded",
+            ));
         }
         let snapshot = Snapshot::capture(self).await?;
         let entry = snapshot.get(frame_id)?;
@@ -474,7 +499,10 @@ impl Page {
             })
             .sum::<f64>();
         if quad.iter().any(|v| !v.is_finite()) || !area.is_finite() || area.abs() < 1e-8 {
-            return Err(Error::cdp_msg("Degenerate frame content quad"));
+            return Err(Error::coded(
+                ErrorCode::TargetUnavailable,
+                "Degenerate frame content quad",
+            ));
         }
         objects.release().await?;
         Ok(quad)

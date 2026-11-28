@@ -1,6 +1,6 @@
 //! Bounded text inspection through the active browser session.
 
-use crate::{Error, Page, Result};
+use crate::{Error, ErrorCode, Page, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -73,10 +73,16 @@ impl Page {
         request: &BoundedFetchRequest,
     ) -> Result<BoundedFetchResponse> {
         if request.max_bytes > MAX_TEXT_FETCH_BYTES {
-            return Err(Error::cdp_msg("max_body must not exceed 16777216 bytes"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "max_body must not exceed 16777216 bytes",
+            ));
         }
         if !matches!(request.redirect.as_str(), "follow" | "manual" | "error") {
-            return Err(Error::cdp_msg("redirect must be follow, manual, or error"));
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
+                "redirect must be follow, manual, or error",
+            ));
         }
         let request = serde_json::to_string(request)?;
         let script = format!(

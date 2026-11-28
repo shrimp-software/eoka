@@ -117,7 +117,8 @@ impl Page {
     ) -> Result<ShadowClickReceipt> {
         let selector = selector.trim();
         if selector.is_empty() || selector.len() > SHADOW_SELECTOR_LIMIT {
-            return Err(Error::cdp_msg(
+            return Err(Error::coded(
+                ErrorCode::InvalidArgument,
                 "Shadow selector must be 1..=4096 characters",
             ));
         }
@@ -332,7 +333,10 @@ impl Page {
             .map(|quad| quad.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
             .unwrap_or_default();
         if quad.len() < 8 || quad.iter().any(|value| !value.is_finite()) {
-            return Err(Error::cdp_msg("Shadow node has no finite content quad"));
+            return Err(Error::coded(
+                ErrorCode::PreconditionFailed,
+                "Shadow node has no finite content quad",
+            ));
         }
         let area = (0..4)
             .map(|index| {
@@ -341,7 +345,10 @@ impl Page {
             })
             .sum::<f64>();
         if !area.is_finite() || area.abs() < 1e-8 {
-            return Err(Error::cdp_msg("Shadow node content quad is degenerate"));
+            return Err(Error::coded(
+                ErrorCode::PreconditionFailed,
+                "Shadow node content quad is degenerate",
+            ));
         }
         Ok((
             (quad[0] + quad[2] + quad[4] + quad[6]) / 4.0,
