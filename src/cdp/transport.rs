@@ -749,7 +749,9 @@ impl Transport {
         })
         .await
         .map_err(|_| {
-            Error::Timeout(format!(
+            // Transport, as before: callers treat a dead command as a
+            // connection-level failure, not as an action or wait timeout.
+            Error::transport(format!(
                 "CDP command {method} (id={id}) exceeded its {:?} deadline",
                 self.cmd_timeout
             ))
@@ -863,7 +865,7 @@ impl Transport {
         dispatch: &CommandDispatch,
     ) -> Result<(Result<()>, CommandResponse)> {
         let claim = dispatch.claim()?;
-        let _withdraw = WithdrawOnDrop(Arc::clone(&claim));
+        let withdraw = WithdrawOnDrop(Arc::clone(&claim));
         self.check_filter(method)?;
         let (data, response) =
             self.prepare_command(Some(Arc::clone(session_id)), method, params, true)?;
@@ -876,6 +878,8 @@ impl Transport {
                 ))
             })
             .and_then(|result| result);
+        // Withdraw before deciding, so the writer cannot send it afterwards.
+        drop(withdraw);
         match written {
             Err(error) if !dispatch.may_have_been_sent() => Err(error),
             written => Ok((written, response)),

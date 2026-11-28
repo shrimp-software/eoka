@@ -253,7 +253,7 @@ async fn cdp_errors_keep_their_data_and_timeouts_name_method_and_id() {
         .send::<_, Value>("Fixture.silent", &params)
         .await
         .unwrap_err();
-    assert!(matches!(error, Error::Timeout(_)), "{error:?}");
+    assert!(matches!(error, Error::Transport { .. }), "{error:?}");
     let text = error.to_string();
     assert!(
         text.contains("Fixture.silent") && text.contains("id="),

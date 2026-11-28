@@ -139,3 +139,37 @@ async fn clearing_headers_does_not_re_enable_disabled_network_capture() {
     assert!(page.text().await.unwrap().contains("present"));
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome; local header fixture"]
+async fn headers_cleared_while_network_is_disabled_stay_cleared_after_re_enabling() {
+    let fixture = HttpFixture::start(|request| async move {
+        Response::html(
+            request
+                .headers
+                .get("x-fixture-secret")
+                .map(String::as_str)
+                .unwrap_or("absent"),
+        )
+    })
+    .await;
+    let browser = support::browser().await;
+    let page = browser.new_page(&fixture.url).await.unwrap();
+    page.set_extra_headers(std::collections::HashMap::from([(
+        "X-Fixture-Secret".into(),
+        "secret".into(),
+    )]))
+    .await
+    .unwrap();
+    page.goto(&format!("{}set", fixture.url)).await.unwrap();
+    assert!(page.text().await.unwrap().contains("secret"));
+    page.disable_request_capture().await.unwrap();
+    // Cleared without enabling Network; Chrome must still store the empty set.
+    page.clear_extra_headers().await.unwrap();
+    page.enable_request_capture().await.unwrap();
+    page.goto(&format!("{}re-enabled", fixture.url))
+        .await
+        .unwrap();
+    assert_eq!(page.text().await.unwrap().trim(), "absent");
+    browser.close().await.unwrap();
+}
