@@ -489,16 +489,16 @@ impl Page {
                 Ok(buttons) => buttons,
                 Err(_) => continue,
             };
-            if let Err(error) = self
-                .dispatch_mouse_event(
-                    MouseEventType::MouseReleased,
-                    x,
-                    y,
-                    Some(button),
-                    Some(1),
-                    buttons,
-                )
-                .await
+            if let Err(error) = dispatch_coordinated_mouse_event(
+                &self.session,
+                MouseEventType::MouseReleased,
+                x,
+                y,
+                Some(button),
+                Some(1),
+                buttons,
+            )
+            .await
             {
                 first_error.get_or_insert(error);
                 continue;
@@ -516,30 +516,6 @@ impl Page {
                 Ok(())
             }
         }
-    }
-
-    async fn dispatch_mouse_event(
-        &self,
-        event_type: MouseEventType,
-        x: f64,
-        y: f64,
-        button: Option<MouseButton>,
-        click_count: Option<i32>,
-        buttons: i32,
-    ) -> Result<()> {
-        self.session
-            .dispatch_mouse_event_full(crate::cdp::InputDispatchMouseEvent {
-                r#type: event_type,
-                x,
-                y,
-                button: button.map(MouseButton::cdp),
-                click_count,
-                buttons: (buttons != 0).then_some(buttons),
-                force: Some(if buttons == 0 { 0.0 } else { 0.5 }),
-                delta_x: None,
-                delta_y: None,
-            })
-            .await
     }
 
     /// Type text into the focused element. Awaiting proves dispatch only; see [`ActionCall`].

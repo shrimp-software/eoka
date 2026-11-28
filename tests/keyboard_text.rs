@@ -163,3 +163,30 @@ async fn held_modifiers_shortcuts_and_prevent_default_preserve_native_semantics(
     );
     browser.close().await.unwrap();
 }
+
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn human_typing_sends_key_events_and_verifies_the_value() {
+    let browser = eoka::Browser::launch_with(|c| {
+        c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
+        c.patch_binary = false;
+    })
+    .await
+    .unwrap();
+    let page = browser.new_blank_page().await.unwrap();
+    page.execute("document.body.innerHTML='<input id=f>';window.keys=[];const f=document.querySelector('#f');for(const t of ['keydown','keyup'])f.addEventListener(t,e=>keys.push([t,e.key,e.code,e.shiftKey,e.isTrusted]))").await.unwrap();
+    page.human_fill("#f", "Hi 2!").await.unwrap();
+    assert_eq!(
+        page.evaluate::<String>("document.querySelector('#f').value")
+            .await
+            .unwrap(),
+        "Hi 2!"
+    );
+    let keys: Vec<(String, String, String, bool, bool)> = page.evaluate("keys").await.unwrap();
+    assert_eq!(keys.iter().filter(|k| k.0 == "keydown").count(), 5);
+    assert_eq!(keys.iter().filter(|k| k.0 == "keyup").count(), 5);
+    assert!(keys.iter().all(|k| k.4), "events must be trusted");
+    assert!(keys.contains(&("keydown".into(), "H".into(), "KeyH".into(), true, true)));
+    assert!(keys.contains(&("keydown".into(), "!".into(), "Digit1".into(), true, true)));
+    browser.close().await.unwrap();
+}

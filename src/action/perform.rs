@@ -467,7 +467,7 @@ pub(super) async fn perform(
                 .send(
                     page.session(),
                     "Input.dispatchMouseEvent",
-                    json!({"type":"mouseMoved","x":x,"y":y,"buttons":0}),
+                    json!({"type":"mouseMoved","x":x,"y":y,"buttons":0,"force":0.0}),
                     false,
                 )
                 .await?;

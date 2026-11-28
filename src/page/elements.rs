@@ -255,14 +255,15 @@ impl Page {
         )
     }
 
-    /// Human-like typing into an element
+    /// Human-like typing into an element: key events at irregular intervals
+    /// ([`crate::InputMode::Human`]).
     pub fn human_type(&self, selector: &str, text: &str) -> ActionCall {
         ActionCall::new(
             self,
             Action::Type {
                 target: LocatorSpec::css(selector),
                 text: text.into(),
-                input_mode: Default::default(),
+                input_mode: crate::InputMode::Human,
             },
         )
     }
@@ -303,13 +304,14 @@ impl Page {
         )
     }
 
-    /// Human-like form fill: click, clear, type with natural delays
+    /// Human-like form fill: clear, then type with key events at irregular
+    /// intervals ([`crate::InputMode::Human`]), and verify the value.
     pub async fn human_fill(&self, selector: &str, value: &str) -> Result<()> {
         self.act(
             Action::Fill {
                 target: LocatorSpec::css(selector),
                 value: value.into(),
-                input_mode: Default::default(),
+                input_mode: crate::InputMode::Human,
             },
             self.action_defaults.options(),
         )

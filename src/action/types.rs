@@ -208,6 +208,11 @@ pub enum InputMode {
     Sequential,
     /// Insert the whole string in one native input event.
     Bulk,
+    /// Type like a person: a `keydown`/`keyup` pair per character (US
+    /// layout key and code where one exists) at irregular 50–150ms intervals,
+    /// pausing longer after spaces and punctuation. Used by `human_type` and
+    /// `human_fill`.
+    Human,
 }
 
 /// Which page may satisfy an action's completion expectation.

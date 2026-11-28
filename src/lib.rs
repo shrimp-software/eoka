@@ -129,9 +129,19 @@ pub struct StealthConfig {
     pub canvas_spoof: bool,
     /// Spoof audio fingerprint
     pub audio_spoof: bool,
-    /// Use human-like mouse movements
+    /// Has no effect. Choose human pointer movement per call with
+    /// `human_click`/`human_hover` or `Action::Click { human: true, .. }`.
+    #[deprecated(
+        since = "0.11.0",
+        note = "has no effect; use human_click/human_hover per call"
+    )]
     pub human_mouse: bool,
-    /// Use human-like typing
+    /// Has no effect. Choose human typing per call with `human_type`,
+    /// `human_fill` or `InputMode::Human`.
+    #[deprecated(
+        since = "0.11.0",
+        note = "has no effect; use human_type/human_fill or InputMode::Human"
+    )]
     pub human_typing: bool,
     /// Custom user agent (None = random realistic)
     pub user_agent: Option<String>,
@@ -154,7 +164,12 @@ pub struct StealthConfig {
     pub viewport_height: u32,
     /// Physical pixels per CSS pixel. Must be finite and positive.
     pub device_scale_factor: f64,
-    /// Debug mode - log actions and save screenshots on error
+    /// Has no effect. Use `tracing` for logs and `Page::debug_screenshot`
+    /// for screenshots; `debug_dir` still sets where those go.
+    #[deprecated(
+        since = "0.11.0",
+        note = "has no effect; use tracing and Page::debug_screenshot"
+    )]
     pub debug: bool,
     /// Directory for debug screenshots (defaults to current directory)
     pub debug_dir: Option<String>,
@@ -234,6 +249,7 @@ impl std::fmt::Debug for Redacted {
     }
 }
 
+#[allow(deprecated)]
 impl std::fmt::Debug for StealthConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Exhaustive, so that adding a field forces a decision about printing it.
@@ -311,6 +327,7 @@ impl std::fmt::Debug for StealthConfig {
     }
 }
 
+#[allow(deprecated)] // Default values for deprecated fields.
 impl Default for StealthConfig {
     fn default() -> Self {
         Self {
@@ -348,6 +365,7 @@ impl Default for StealthConfig {
     }
 }
 
+#[allow(deprecated)] // Presets still initialize deprecated fields.
 impl StealthConfig {
     /// Proxy credentials the transport answers `Proxy` challenges with.
     pub(crate) fn proxy_credentials(&self) -> Option<(String, String)> {
