@@ -702,6 +702,33 @@ mod try_attach_existing_tests {
         assert_eq!(args.last().unwrap(), "--use-fake-ui-for-media-stream");
     }
 
+    // A list switch eoka does not set is appended once, and a repeat of it in
+    // extra_args folds into that copy instead of replacing it.
+    #[test]
+    fn stealth_args_fold_repeated_user_list_switches() {
+        let config = StealthConfig {
+            extra_args: vec![
+                "--enable-blink-features=Foo".into(),
+                "--enable-blink-features=Bar,Foo".into(),
+                "--disable-features=Translate".into(),
+                "--disable-features=Translate<Trial,Other".into(),
+            ],
+            ..StealthConfig::default()
+        };
+        let args = stealth_args(&config, &Fingerprint::random());
+        let matching = |prefix: &str| -> Vec<&String> {
+            args.iter().filter(|a| a.starts_with(prefix)).collect()
+        };
+        assert_eq!(
+            matching("--enable-blink-features="),
+            ["--enable-blink-features=Foo,Bar"]
+        );
+        assert_eq!(
+            matching("--disable-features="),
+            ["--disable-features=AutomationControlled,EnableAutomation,Translate,Other"]
+        );
+    }
+
     // Regression: site isolation was "disabled" with names that are not
     // features (`site-per-process` is a switch), which changed nothing.
     #[test]
