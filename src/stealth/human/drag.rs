@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin, sync::Mutex, task::Poll, time::Duration};
 
-use super::{approach_start, bezier_curve, random_range, Human};
+use super::{approach_start, bezier_curve, pause, Human};
 use crate::error::{Error, Result};
 use crate::page::DragInput;
 
@@ -163,7 +163,7 @@ impl Human<'_> {
         let (min, max) = self.speed.move_delay_ms();
         for (px, py) in path {
             release.move_to(px, py).await?;
-            tokio::time::sleep(Duration::from_millis(random_range(min, max))).await;
+            pause(min, max).await;
         }
         release.x = x;
         release.y = y;
