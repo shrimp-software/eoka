@@ -123,6 +123,7 @@ fn cookie(name: &str, domain: &str) -> SessionCookie {
         http_only: false,
         same_site: None,
         expires: None,
+        partition_key: None,
     }
 }
 
@@ -407,5 +408,111 @@ async fn restore_replaces_storage_of_the_saved_origin() {
         .await
         .unwrap();
     assert_eq!(stored, [Some("new".into()), None]);
+    browser.close().await.unwrap();
+}
+
+async fn resolver_browser() -> eoka::Browser {
+    eoka::Browser::launch_with(|c| {
+        c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
+        c.patch_binary = false;
+        c.strip_x_client_data = false;
+        c.cdp_timeout = 5;
+        c.extra_args
+            .push("--host-resolver-rules=MAP *.test 127.0.0.1".into());
+    })
+    .await
+    .unwrap()
+}
+
+/// Checked rather than changed: Chrome keeps a dotless `domain` host-only, so
+/// `set_cookies_bulk` does not widen host-only or `__Host-` cookies to
+/// subdomains when it passes `domain`.
+#[tokio::test]
+#[ignore = "requires Chrome; local HTTP fixture"]
+async fn bulk_import_keeps_host_only_cookies_host_only() {
+    let server = support::HttpFixture::start(|_| async {
+        support::Response::html("<!doctype html><title>t</title>")
+    })
+    .await;
+    let port = server.url.rsplit(':').next().unwrap().trim_end_matches('/');
+    let browser = resolver_browser().await;
+    let page = browser
+        .new_page(&format!("http://app.site.test:{port}/"))
+        .await
+        .unwrap();
+    page.execute(
+        "document.cookie='host=1; path=/'; document.cookie='wide=1; domain=site.test; path=/'",
+    )
+    .await
+    .unwrap();
+    let mut host_prefixed = cookie("__Host-id", "app.site.test");
+    host_prefixed.secure = true;
+    let saved: Vec<_> = page
+        .all_cookies()
+        .await
+        .unwrap()
+        .into_iter()
+        .chain([host_prefixed])
+        .collect();
+    page.clear_all_cookies().await.unwrap();
+    page.set_cookies_bulk(saved.clone()).await.unwrap();
+
+    let mut after = page.all_cookies().await.unwrap();
+    after.sort_by(|a, b| a.name.cmp(&b.name));
+    let domains: Vec<_> = after
+        .iter()
+        .map(|c| (c.name.as_str(), c.domain.as_str()))
+        .collect();
+    assert_eq!(
+        domains,
+        [
+            ("__Host-id", "app.site.test"),
+            ("host", "app.site.test"),
+            ("wide", ".site.test")
+        ]
+    );
+    page.goto(&format!("http://sub.app.site.test:{port}/"))
+        .await
+        .unwrap();
+    let seen: String = page.evaluate("document.cookie").await.unwrap();
+    assert_eq!(seen, "wide=1");
+    browser.close().await.unwrap();
+}
+
+/// Regression: capture dropped the CHIPS partition key, so a restore turned a
+/// partitioned cookie into an unpartitioned one.
+#[tokio::test]
+#[ignore = "requires Chrome"]
+async fn partitioned_cookies_keep_their_partition() {
+    let browser = support::browser().await;
+    let page = browser.new_blank_page().await.unwrap();
+    let mut partitioned = cookie("chips", "embed.test");
+    partitioned.secure = true;
+    partitioned.same_site = Some("None".into());
+    partitioned.partition_key = Some(eoka::session::CookiePartitionKey {
+        top_level_site: "https://top.test".into(),
+        has_cross_site_ancestor: false,
+    });
+    page.set_cookies_bulk(vec![partitioned.clone(), cookie("plain", "embed.test")])
+        .await
+        .unwrap();
+
+    let saved = page.all_cookies().await.unwrap();
+    let chips = saved.iter().find(|c| c.name == "chips").unwrap();
+    assert_eq!(chips.partition_key, partitioned.partition_key);
+    assert_eq!(
+        saved
+            .iter()
+            .find(|c| c.name == "plain")
+            .unwrap()
+            .partition_key,
+        None
+    );
+
+    page.clear_all_cookies().await.unwrap();
+    page.set_cookies_bulk(saved).await.unwrap();
+    let restored = page.all_cookies().await.unwrap();
+    let chips = restored.iter().find(|c| c.name == "chips").unwrap();
+    assert_eq!(chips.partition_key, partitioned.partition_key);
     browser.close().await.unwrap();
 }

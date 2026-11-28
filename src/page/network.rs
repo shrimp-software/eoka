@@ -16,6 +16,12 @@ fn session_cookie(c: crate::cdp::types::Cookie) -> SessionCookie {
         same_site: c.same_site,
         // Session cookies have no meaningful expiry.
         expires: if c.session { None } else { Some(c.expires) },
+        partition_key: c
+            .partition_key
+            .map(|key| crate::session::CookiePartitionKey {
+                top_level_site: key.top_level_site,
+                has_cross_site_ancestor: key.has_cross_site_ancestor,
+            }),
     }
 }
 
@@ -113,6 +119,9 @@ impl Page {
     }
 
     /// Bulk-import cookies (e.g., restored from a prior `cookies()` dump).
+    ///
+    /// A `domain` without a leading dot stays host-only, and partitioned
+    /// (CHIPS) cookies keep their partition.
     pub async fn set_cookies_bulk(&self, cookies: Vec<SessionCookie>) -> Result<()> {
         let cdp_cookies = cookies
             .into_iter()
@@ -126,6 +135,12 @@ impl Page {
                 http_only: Some(c.http_only),
                 same_site: c.same_site,
                 expires: c.expires,
+                partition_key: c
+                    .partition_key
+                    .map(|key| crate::cdp::types::CookiePartitionKey {
+                        top_level_site: key.top_level_site,
+                        has_cross_site_ancestor: key.has_cross_site_ancestor,
+                    }),
             })
             .collect();
         self.session.set_cookies(cdp_cookies).await

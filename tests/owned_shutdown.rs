@@ -66,6 +66,7 @@ async fn owned_live_close_flushes_netlog_and_persistent_cookies() {
                 .as_secs_f64()
                 + 3600.0,
         ),
+        partition_key: None,
     }])
     .await
     .unwrap();
