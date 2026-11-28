@@ -16,6 +16,12 @@ All notable changes to this project will be documented in this file.
   `invalid_expectation`, `actionability_changed`, `ambiguous_destination`,
   `target_stale`, …) are reported as themselves. `Error::code()` and
   `Error::is_retryable()` are new, and `RecordingError` converts into `Error`.
+- More of eoka's own failures are `Error::Coded` instead of `Error::Cdp`:
+  invalid arguments (frame coordinates, JavaScript argument limits, drag
+  offsets, upload paths, viewport sizes, network-idle timeouts, fetch limits)
+  are `invalid_argument` and no longer retried; frame mapping, select options
+  and a covered iframe owner report `precondition_failed`,
+  `target_unavailable` and `actionability_changed`.
 - `Error::ValueMismatch` reports character counts instead of the expected and
   actual values, which could be passwords.
 - `Error::RetryExhausted` keeps the last error as `source`.
