@@ -5,26 +5,29 @@ use crate::support;
 use eoka::{BrowserSession, Page, SessionCookie};
 use serde_json::{json, Value};
 
-async fn names(page: &Page) -> Vec<String> {
-    let mut names: Vec<_> = page
-        .cookies()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|c| c.name)
-        .collect();
+const PAGE: &str = "<!doctype html><title>t</title>";
+
+fn sorted_names(cookies: Vec<SessionCookie>) -> Vec<String> {
+    let mut names: Vec<_> = cookies.into_iter().map(|c| c.name).collect();
     names.sort();
     names
+}
+
+/// Cookie names for the page's URL.
+async fn names(page: &Page) -> Vec<String> {
+    sorted_names(page.cookies().await.unwrap())
+}
+
+/// Cookie names in the page's whole browser context.
+async fn jar(page: &Page) -> Vec<String> {
+    sorted_names(page.all_cookies().await.unwrap())
 }
 
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
 async fn capture_and_restore_keep_other_sites_cookies() {
-    let server = support::HttpFixture::start(|_| async {
-        support::Response::html("<!doctype html><title>t</title>")
-    })
-    .await;
-    let port = server.url.rsplit(':').next().unwrap().trim_end_matches('/');
+    let server = support::HttpFixture::html(PAGE).await;
+    let port = server.port();
     let browser = support::browser().await;
     let sso = browser
         .new_page(&format!("http://localhost:{port}/"))
@@ -77,7 +80,7 @@ async fn exported_header_matches_what_the_browser_sends() {
         )
     })
     .await;
-    let port = server.url.rsplit(':').next().unwrap().trim_end_matches('/');
+    let port = server.port();
     let url = format!("http://127.0.0.1:{port}/app/page");
     let browser = support::browser().await;
     let page = browser.new_page(&url).await.unwrap();
@@ -119,24 +122,8 @@ fn cookie(name: &str, domain: &str) -> SessionCookie {
         value: "1".into(),
         domain: domain.into(),
         path: "/".into(),
-        secure: false,
-        http_only: false,
-        same_site: None,
-        expires: None,
-        partition_key: None,
+        ..Default::default()
     }
-}
-
-async fn jar(page: &Page) -> Vec<String> {
-    let mut names: Vec<_> = page
-        .all_cookies()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|c| c.name)
-        .collect();
-    names.sort();
-    names
 }
 
 #[tokio::test]
@@ -178,17 +165,8 @@ async fn all_cookies_reads_the_pages_own_browser_context() {
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
 async fn restoring_into_a_live_session_deletes_nothing() {
-    let server = support::HttpFixture::start(|_| async {
-        support::Response::html("<!doctype html><title>t</title>")
-    })
-    .await;
-    let browser = eoka::Browser::launch_with(|config| {
-        config.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
-        config.patch_binary = false;
-        config.live_session = true;
-    })
-    .await
-    .unwrap();
+    let server = support::HttpFixture::html(PAGE).await;
+    let browser = support::launch(|c| c.live_session = true).await;
     let page = browser.new_page(&server.url).await.unwrap();
     page.set_cookies_bulk(vec![
         cookie("bank", "bank.test"),
@@ -231,7 +209,7 @@ async fn recording_fixture(seen: Seen) -> support::HttpFixture {
                     body_gate: None,
                 };
             }
-            support::Response::html("<!doctype html><title>t</title>")
+            support::Response::html(PAGE)
         }
     })
     .await
@@ -255,10 +233,7 @@ const CLIENT_HINTS: &str = "(async () => { const d = await navigator.userAgentDa
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
 async fn restore_keeps_the_fingerprints_client_hints() {
-    let server = support::HttpFixture::start(|_| async {
-        support::Response::html("<!doctype html><title>t</title>")
-    })
-    .await;
+    let server = support::HttpFixture::html(PAGE).await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
     let before: String = page.evaluate(CLIENT_HINTS).await.unwrap();
@@ -274,10 +249,7 @@ async fn restore_keeps_the_fingerprints_client_hints() {
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
 async fn restore_of_another_user_agent_sets_matching_client_hints() {
-    let server = support::HttpFixture::start(|_| async {
-        support::Response::html("<!doctype html><title>t</title>")
-    })
-    .await;
+    let server = support::HttpFixture::html(PAGE).await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
     let mut state = page.capture_state().await.unwrap();
@@ -334,7 +306,7 @@ async fn restore_sets_cookies_before_loading_the_saved_url() {
 #[ignore = "requires Chrome; local HTTP fixture"]
 async fn restore_refuses_to_write_storage_to_another_origin() {
     let server = recording_fixture(Seen::default()).await;
-    let port = server.url.rsplit(':').next().unwrap().trim_end_matches('/');
+    let port = server.port();
     let browser = support::browser().await;
     let page = browser.new_blank_page().await.unwrap();
     let mut state = state_for(&format!("http://127.0.0.1:{port}/redirect"), vec![]);
@@ -358,17 +330,8 @@ async fn restore_refuses_to_write_storage_to_another_origin() {
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
 async fn restoring_into_a_live_session_keeps_other_storage() {
-    let server = support::HttpFixture::start(|_| async {
-        support::Response::html("<!doctype html><title>t</title>")
-    })
-    .await;
-    let browser = eoka::Browser::launch_with(|config| {
-        config.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
-        config.patch_binary = false;
-        config.live_session = true;
-    })
-    .await
-    .unwrap();
+    let server = support::HttpFixture::html(PAGE).await;
+    let browser = support::launch(|c| c.live_session = true).await;
     let page = browser.new_page(&server.url).await.unwrap();
     page.execute("localStorage.setItem('theirs', '1'); sessionStorage.setItem('tab', '1')")
         .await
@@ -390,10 +353,7 @@ async fn restoring_into_a_live_session_keeps_other_storage() {
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
 async fn restore_replaces_storage_of_the_saved_origin() {
-    let server = support::HttpFixture::start(|_| async {
-        support::Response::html("<!doctype html><title>t</title>")
-    })
-    .await;
+    let server = support::HttpFixture::html(PAGE).await;
     let browser = support::browser().await;
     let page = browser.new_page(&server.url).await.unwrap();
     page.execute("localStorage.setItem('token', 'old'); localStorage.setItem('stale', '1')")
@@ -423,16 +383,11 @@ async fn restore_replaces_storage_of_the_saved_origin() {
 }
 
 async fn resolver_browser() -> eoka::Browser {
-    eoka::Browser::launch_with(|c| {
-        c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
-        c.patch_binary = false;
-        c.strip_x_client_data = false;
-        c.cdp_timeout = 5;
+    support::browser_with(|c| {
         c.extra_args
-            .push("--host-resolver-rules=MAP *.test 127.0.0.1".into());
+            .push("--host-resolver-rules=MAP *.test 127.0.0.1".into())
     })
     .await
-    .unwrap()
 }
 
 /// Checked rather than changed: Chrome keeps a dotless `domain` host-only, so
@@ -441,11 +396,8 @@ async fn resolver_browser() -> eoka::Browser {
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
 async fn bulk_import_keeps_host_only_cookies_host_only() {
-    let server = support::HttpFixture::start(|_| async {
-        support::Response::html("<!doctype html><title>t</title>")
-    })
-    .await;
-    let port = server.url.rsplit(':').next().unwrap().trim_end_matches('/');
+    let server = support::HttpFixture::html(PAGE).await;
+    let port = server.port();
     let browser = resolver_browser().await;
     let page = browser
         .new_page(&format!("http://app.site.test:{port}/"))

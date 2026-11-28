@@ -64,15 +64,7 @@ async fn launched_browsers_honour_filter_cdp() {
     assert!(error.to_string().contains("filter_cdp"), "{error}");
     filtered.close().await.unwrap();
 
-    let open = eoka::Browser::launch_with(|c| {
-        c.chrome_path = std::env::var("EOKA_TEST_CHROME_PATH").ok();
-        c.patch_binary = false;
-        c.strip_x_client_data = false;
-        c.cdp_timeout = 5;
-        c.filter_cdp = false;
-    })
-    .await
-    .unwrap();
+    let open = support::browser_with(|c| c.filter_cdp = false).await;
     let page = open.new_page("about:blank").await.unwrap();
     let mut events = page.session().transport().subscribe();
     page.session()

@@ -373,15 +373,10 @@ mod tests {
     fn test_browser_state_round_trips_storage_and_http_only_cookie() {
         let state = BrowserState {
             cookies: vec![SessionCookie {
-                name: "session".to_string(),
-                value: "secret".to_string(),
-                domain: ".example.com".to_string(),
-                path: "/".to_string(),
                 secure: true,
                 http_only: true,
                 same_site: Some("Lax".to_string()),
-                expires: None,
-                partition_key: None,
+                ..cookie("session", "secret", ".example.com", "/")
             }],
             local_storage: HashMap::from([("token".to_string(), "value".to_string())]),
             session_storage: HashMap::from([("tab".to_string(), "value".to_string())]),
@@ -402,39 +397,9 @@ mod tests {
     fn test_cookies_for_domain() {
         let session = BrowserSession {
             cookies: vec![
-                SessionCookie {
-                    name: "site1".to_string(),
-                    value: "v1".to_string(),
-                    domain: "example.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                    partition_key: None,
-                },
-                SessionCookie {
-                    name: "site2".to_string(),
-                    value: "v2".to_string(),
-                    domain: "other.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                    partition_key: None,
-                },
-                SessionCookie {
-                    name: "sub".to_string(),
-                    value: "v3".to_string(),
-                    domain: ".example.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                    partition_key: None,
-                },
+                cookie("site1", "v1", "example.com", "/"),
+                cookie("site2", "v2", "other.com", "/"),
+                cookie("sub", "v3", ".example.com", "/"),
             ],
             user_agent: String::new(),
             url: String::new(),
@@ -464,11 +429,7 @@ mod tests {
             value: value.to_string(),
             domain: domain.to_string(),
             path: path.to_string(),
-            secure: false,
-            http_only: false,
-            same_site: None,
-            expires: None,
-            partition_key: None,
+            ..Default::default()
         }
     }
 
@@ -742,29 +703,9 @@ mod tests {
         let session = BrowserSession {
             cookies: vec![
                 // Host-only cookie: stored domain has no leading dot.
-                SessionCookie {
-                    name: "host".to_string(),
-                    value: "1".to_string(),
-                    domain: "example.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                    partition_key: None,
-                },
+                cookie("host", "1", "example.com", "/"),
                 // Domain cookie: stored domain has a leading dot.
-                SessionCookie {
-                    name: "dom".to_string(),
-                    value: "2".to_string(),
-                    domain: ".example.com".to_string(),
-                    path: "/".to_string(),
-                    secure: false,
-                    http_only: false,
-                    same_site: None,
-                    expires: None,
-                    partition_key: None,
-                },
+                cookie("dom", "2", ".example.com", "/"),
             ],
             user_agent: String::new(),
             url: String::new(),
@@ -815,52 +756,24 @@ mod tests {
             }),
             ..cookie("chips", "1", ".site.test", "/")
         };
-        let header = |c: SessionCookie, url: &str| session(vec![c]).cookie_header_for(url).unwrap();
-        assert_eq!(
-            header(
-                partitioned("https://site.test", false),
-                "https://app.site.test/"
+        for (site, cross, url, expected) in [
+            (
+                "https://site.test",
+                false,
+                "https://app.site.test/",
+                "chips=1",
             ),
-            "chips=1"
-        );
-        assert_eq!(
-            header(
-                partitioned("https://site.test", false),
-                "https://site.test/"
-            ),
-            "chips=1"
-        );
-        assert_eq!(
-            header(
-                partitioned("https://top.test", false),
-                "https://app.site.test/"
-            ),
-            ""
-        );
-        assert_eq!(
-            header(
-                partitioned("https://site.test", true),
-                "https://app.site.test/"
-            ),
-            ""
-        );
-        assert_eq!(
-            header(
-                partitioned("http://site.test", false),
-                "https://app.site.test/"
-            ),
-            ""
-        );
-        assert_eq!(
-            header(
-                partitioned("https://othersite.test", false),
-                "https://site.test/"
-            ),
-            ""
-        );
-        assert_eq!(
-            header(partitioned("garbage", false), "https://site.test/"),
-            ""
-        );
+            ("https://site.test", false, "https://site.test/", "chips=1"),
+            ("https://top.test", false, "https://app.site.test/", ""),
+            ("https://site.test", true, "https://app.site.test/", ""),
+            ("http://site.test", false, "https://app.site.test/", ""),
+            ("https://othersite.test", false, "https://site.test/", ""),
+            ("garbage", false, "https://site.test/", ""),
+        ] {
+            let header = session(vec![partitioned(site, cross)])
+                .cookie_header_for(url)
+                .unwrap();
+            assert_eq!(header, expected, "{site} cross={cross} {url}");
+        }
     }
 }

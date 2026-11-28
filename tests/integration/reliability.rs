@@ -315,7 +315,7 @@ async fn function_evaluation_has_fresh_locals_and_calls_once() {
 #[tokio::test]
 #[ignore = "requires Chrome; popup and application readiness regression"]
 async fn click_follows_the_matching_popup_and_waits_for_its_application() {
-    let server = support::HttpFixture::start(|_| async { support::Response::html("<button id=ready disabled>Ready</button><script>setTimeout(()=>{document.querySelector('#ready').disabled=false},250)</script>") }).await;
+    let server = support::HttpFixture::html("<button id=ready disabled>Ready</button><script>setTimeout(()=>{document.querySelector('#ready').disabled=false},250)</script>").await;
     let browser = support::browser().await;
     let page = browser.new_blank_page().await.unwrap();
     page.execute_function("url=>{const link=document.createElement('a');link.id='login';link.href=url;link.target='_blank';link.textContent='Login';document.body.append(link)}", &[serde_json::json!(server.url)]).await.unwrap();

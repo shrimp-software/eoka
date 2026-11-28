@@ -101,7 +101,7 @@ impl std::fmt::Debug for NetworkEvent {
 const MAX_TRACKED_REQUESTS: usize = 10_000;
 
 /// Bounded request store, evicting the oldest entry (in-flight or complete).
-pub(crate) struct RequestStore {
+struct RequestStore {
     capacity: usize,
     next: u64,
     /// Insertion order: sequence number -> request id.
@@ -113,7 +113,7 @@ pub(crate) struct RequestStore {
 }
 
 impl RequestStore {
-    pub(crate) fn new(capacity: usize) -> Self {
+    fn new(capacity: usize) -> Self {
         Self {
             capacity: capacity.max(1),
             next: 0,
@@ -124,29 +124,13 @@ impl RequestStore {
         }
     }
 
-    /// Apply one CDP Network event. Returns whether it was a recognised
-    /// network event and, if any, the consumer-facing event.
-    pub(crate) fn apply(
-        &mut self,
-        method: &str,
-        params: &serde_json::Value,
-    ) -> (bool, Option<NetworkEvent>) {
-        match self.apply_inner(method, params) {
-            Some(Some(event)) => (true, Some(event)),
-            Some(None) => (true, None),
-            None => (false, None),
-        }
-    }
-
-    fn apply_inner(
-        &mut self,
-        method: &str,
-        params: &serde_json::Value,
-    ) -> Option<Option<NetworkEvent>> {
+    /// Apply one CDP event: `None` if it is not a recognised Network event,
+    /// otherwise the consumer-facing event, if any.
+    fn apply(&mut self, method: &str, params: &serde_json::Value) -> Option<Option<NetworkEvent>> {
+        use serde::Deserialize;
         match method {
             "Network.requestWillBeSent" => {
-                let e: NetworkRequestWillBeSentEvent =
-                    serde_json::from_value(params.clone()).ok()?;
+                let e = NetworkRequestWillBeSentEvent::deserialize(params).ok()?;
                 // Redirects re-fire with the same request_id; keep the original entry.
                 if self.requests.contains_key(&e.request_id) {
                     tracing::trace!(
@@ -184,8 +168,7 @@ impl RequestStore {
                 Some(Some(NetworkEvent::RequestStarted(request)))
             }
             "Network.responseReceived" => {
-                let e: NetworkResponseReceivedEvent =
-                    serde_json::from_value(params.clone()).ok()?;
+                let e = NetworkResponseReceivedEvent::deserialize(params).ok()?;
                 if let Some((_, req)) = self.requests.get_mut(&e.request_id) {
                     req.status = Some(e.response.status);
                     req.status_text = Some(e.response.status_text.clone());
@@ -201,7 +184,7 @@ impl RequestStore {
                 }))
             }
             "Network.loadingFinished" => {
-                let e: NetworkLoadingFinishedEvent = serde_json::from_value(params.clone()).ok()?;
+                let e = NetworkLoadingFinishedEvent::deserialize(params).ok()?;
                 // Completed entries stay (up to the bound) so their bodies can be read.
                 if let Some((_, req)) = self.requests.get_mut(&e.request_id) {
                     req.complete = true;
@@ -212,7 +195,7 @@ impl RequestStore {
                 }))
             }
             "Network.loadingFailed" => {
-                let e: NetworkLoadingFailedEvent = serde_json::from_value(params.clone()).ok()?;
+                let e = NetworkLoadingFailedEvent::deserialize(params).ok()?;
                 if let Some((sequence, _)) = self.requests.remove(&e.request_id) {
                     self.order.remove(&sequence);
                     self.failed += 1;
@@ -227,27 +210,26 @@ impl RequestStore {
         }
     }
 
-    pub(crate) fn get(&self, request_id: &str) -> Option<CapturedRequest> {
+    fn get(&self, request_id: &str) -> Option<CapturedRequest> {
         self.requests.get(request_id).map(|(_, r)| r.clone())
     }
 
     /// Retained requests, oldest first.
-    pub(crate) fn all(&self) -> Vec<CapturedRequest> {
+    fn all(&self) -> Vec<CapturedRequest> {
         self.order.values().filter_map(|id| self.get(id)).collect()
     }
 
     /// Remove and return completed requests, oldest first.
     fn drain_completed(&mut self) -> Vec<CapturedRequest> {
-        let done: Vec<u64> = self
-            .order
-            .iter()
-            .filter(|(_, id)| self.requests.get(*id).is_some_and(|(_, r)| r.complete))
-            .map(|(sequence, _)| *sequence)
-            .collect();
-        done.into_iter()
-            .filter_map(|sequence| self.order.remove(&sequence))
-            .filter_map(|id| self.requests.remove(&id).map(|(_, r)| r))
-            .collect()
+        let mut done = Vec::new();
+        self.order.retain(|_, id| {
+            if !self.requests.get(id).is_some_and(|(_, r)| r.complete) {
+                return true;
+            }
+            done.extend(self.requests.remove(id).map(|(_, r)| r));
+            false
+        });
+        done
     }
 
     fn find(&self, predicate: &dyn Fn(&CapturedRequest) -> bool) -> Option<CapturedRequest> {
@@ -259,7 +241,7 @@ impl RequestStore {
             .cloned()
     }
 
-    pub(crate) fn clear(&mut self) {
+    fn clear(&mut self) {
         self.order.clear();
         self.requests.clear();
     }
@@ -321,11 +303,13 @@ impl NetworkWatcher {
         {
             return false;
         }
-        let (handled, emitted) = self.requests.lock().await.apply(method, params);
+        let Some(emitted) = self.requests.lock().await.apply(method, params) else {
+            return false;
+        };
         if let Some(event) = emitted {
             self.emit(event);
         }
-        handled
+        true
     }
 
     /// Emit an event to consumers without blocking the pump.
@@ -454,7 +438,7 @@ impl RequestCapture {
                             params,
                             session_id: Some(source),
                         }) if *source == session_id && method.starts_with("Network.") => {
-                            if worker_shared.store().apply(method, params).0 {
+                            if worker_shared.store().apply(method, params).is_some() {
                                 worker_shared
                                     .changed
                                     .send_modify(|version| *version = version.wrapping_add(1));

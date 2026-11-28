@@ -23,9 +23,7 @@ async fn fixture() -> support::HttpFixture {
     .await
 }
 
-fn wait() -> Duration {
-    Duration::from_secs(5)
-}
+const WAIT: Duration = Duration::from_secs(5);
 
 #[tokio::test]
 #[ignore = "requires Chrome; local HTTP fixture"]
@@ -42,7 +40,7 @@ async fn captures_requests_with_readable_bodies() {
         .await
         .unwrap();
     let api = capture
-        .wait_for(|r| r.url.ends_with("/api/data") && r.complete, wait())
+        .wait_for(|r| r.url.ends_with("/api/data") && r.complete, WAIT)
         .await
         .unwrap();
     assert_eq!(api.method, "POST");
@@ -56,7 +54,7 @@ async fn captures_requests_with_readable_bodies() {
 
     page.goto(&format!("{}next", server.url)).await.unwrap();
     let document = capture
-        .wait_for(|r| r.url.ends_with("/next") && r.complete, wait())
+        .wait_for(|r| r.url.ends_with("/next") && r.complete, WAIT)
         .await
         .unwrap();
     assert_eq!(document.resource_type.as_deref(), Some("Document"));
@@ -94,12 +92,12 @@ async fn capture_ignores_other_pages() {
 
     other.execute("fetch('/api/other')").await.unwrap();
     other_capture
-        .wait_for(|r| r.url.ends_with("/api/other") && r.complete, wait())
+        .wait_for(|r| r.url.ends_with("/api/other") && r.complete, WAIT)
         .await
         .unwrap();
     page.execute("fetch('/api/mine')").await.unwrap();
     capture
-        .wait_for(|r| r.url.ends_with("/api/mine") && r.complete, wait())
+        .wait_for(|r| r.url.ends_with("/api/mine") && r.complete, WAIT)
         .await
         .unwrap();
     assert!(capture
@@ -125,7 +123,7 @@ async fn capture_evicts_oldest_requests_first() {
         capture
             .wait_for(
                 |r| r.url.ends_with(&format!("/api/{i}")) && r.complete,
-                wait(),
+                WAIT,
             )
             .await
             .unwrap();
@@ -158,7 +156,7 @@ async fn stopping_a_capture_keeps_the_network_domain() {
         .unwrap();
     page.execute("fetch('/api/once')").await.unwrap();
     let request = first
-        .wait_for(|r| r.url.ends_with("/api/once") && r.complete, wait())
+        .wait_for(|r| r.url.ends_with("/api/once") && r.complete, WAIT)
         .await
         .unwrap();
     let retained = first.stop().await;
@@ -167,7 +165,7 @@ async fn stopping_a_capture_keeps_the_network_domain() {
 
     page.execute("fetch('/api/after')").await.unwrap();
     second
-        .wait_for(|r| r.url.ends_with("/api/after") && r.complete, wait())
+        .wait_for(|r| r.url.ends_with("/api/after") && r.complete, WAIT)
         .await
         .unwrap();
     drop(second);
