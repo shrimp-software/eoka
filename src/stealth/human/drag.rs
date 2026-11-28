@@ -1,7 +1,7 @@
 use std::{future::Future, pin::Pin, sync::Mutex, task::Poll, time::Duration};
 
 use super::{approach_start, bezier_curve, pause, Human};
-use crate::error::{Error, Result};
+use crate::error::{Error, ErrorCode, Result};
 use crate::page::DragInput;
 
 pub(super) enum PendingRelease {
@@ -26,7 +26,10 @@ pub(super) fn validate_drag(x: f64, y: f64, dx: f64) -> Result<()> {
         || y < 0.0
         || x + dx < 0.0
     {
-        return Err(Error::cdp_msg("Invalid drag coordinates"));
+        return Err(Error::coded(
+            ErrorCode::InvalidArgument,
+            "Invalid drag coordinates",
+        ));
     }
     Ok(())
 }
@@ -34,7 +37,7 @@ pub(super) fn validate_drag(x: f64, y: f64, dx: f64) -> Result<()> {
 async fn release_drag(input: &mut DragInput, x: f64, y: f64) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(3), input.release(x, y))
         .await
-        .map_err(|_| Error::cdp_msg("Mouse drag cleanup timed out"))?
+        .map_err(|_| Error::coded(ErrorCode::InputState, "Mouse drag cleanup timed out"))?
 }
 
 impl DragRelease<'_> {
@@ -69,7 +72,8 @@ impl DragRelease<'_> {
             self.pending
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(PendingRelease::Finished(Err(Error::cdp_msg(
+                .push(PendingRelease::Finished(Err(Error::coded(
+                    ErrorCode::InputState,
                     "Mouse drag release failed",
                 ))));
         }
@@ -90,7 +94,8 @@ impl Drop for DragRelease<'_> {
             Ok(runtime) => PendingRelease::Task(
                 runtime.spawn(async move { release_drag(&mut input, x, y).await }),
             ),
-            Err(_) => PendingRelease::Finished(Err(Error::cdp_msg(
+            Err(_) => PendingRelease::Finished(Err(Error::coded(
+                ErrorCode::InputState,
                 "Mouse drag cleanup requires an active runtime",
             ))),
         };
@@ -115,7 +120,10 @@ async fn finish_releases(
                     Poll::Pending => waiting = true,
                     Poll::Ready(result) => {
                         *work = PendingRelease::Finished(result.unwrap_or_else(|_| {
-                            Err(Error::cdp_msg("Mouse drag cleanup task failed"))
+                            Err(Error::coded(
+                                ErrorCode::InputState,
+                                "Mouse drag cleanup task failed",
+                            ))
                         }))
                     }
                 }
