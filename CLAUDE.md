@@ -393,8 +393,7 @@ at compile time, so no runtime file reads are needed.
 | `FONTS_EVASION` | document.fonts.check for system fonts (page fonts stay native) |
 | `KEYBOARD_EVASION` | navigator.keyboard.getLayoutMap() |
 
-`CDP_EVASION`, `TIMEZONE_EVASION` and `WEBRTC_EVASION` are deprecated empty
-strings; `FINGERPRINT_EVASION` is WebGL + canvas + audio.
+`FINGERPRINT_EVASION` is WebGL + canvas + audio.
 
 ## Common Tasks
 
